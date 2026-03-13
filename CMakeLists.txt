@@ -36,6 +36,7 @@ if(ENABLE_WEBRTC_BACKEND)
     src/webrtc/webrtc_stream.cpp
     src/webrtc/signaling_server.cpp
     src/webrtc/http_api_server.cpp
+    src/webrtc/frame_http_encoder.cpp
   )
 
   target_include_directories(video_server_webrtc

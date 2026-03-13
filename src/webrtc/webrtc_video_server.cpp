@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "../core/video_server_core.h"
+#include "frame_http_encoder.h"
 #include "http_api_server.h"
 #include "signaling_server.h"
 #include "video_server/video_types.h"
@@ -232,11 +233,14 @@ class WebRtcVideoServer::Impl {
     if (request.path.find("/api/video/streams/") == 0) {
       const std::string tail = request.path.substr(std::string("/api/video/streams/").size());
       const auto output_pos = tail.find("/output");
-      if (request.method == "GET" && output_pos == std::string::npos) {
+      const auto frame_pos = tail.find("/frame");
+      const bool is_frame_request = frame_pos != std::string::npos && (frame_pos + 6) == tail.size();
+      if (request.method == "GET" && output_pos == std::string::npos && !is_frame_request) {
         auto info = core_.get_stream_info(tail);
         if (!info.has_value()) {
           return json_error(404, "stream not found");
         }
+        auto latest = core_.get_latest_frame_for_stream(tail);
         std::ostringstream out;
         out << "{\"stream_id\":\"" << json_escape(info->stream_id) << "\","
             << "\"label\":\"" << json_escape(info->label) << "\","
@@ -248,8 +252,33 @@ class WebRtcVideoServer::Impl {
             << "\"last_output_timestamp_ns\":" << info->last_output_timestamp_ns << ','
             << "\"last_frame_id\":" << info->last_frame_id << ','
             << "\"has_latest_frame\":" << bool_to_json(info->has_latest_frame) << ','
+            << "\"latest_frame_width\":" << (latest ? latest->width : 0) << ','
+            << "\"latest_frame_height\":" << (latest ? latest->height : 0) << ','
+            << "\"latest_frame_pixel_format\":\""
+            << (latest ? to_string(latest->pixel_format) : "") << "\"," 
+            << "\"latest_frame_timestamp_ns\":" << (latest ? latest->timestamp_ns : 0) << ','
             << "\"active\":" << bool_to_json(info->active) << '}';
         return HttpResponse{200, out.str(), "application/json"};
+      }
+
+
+      if (request.method == "GET" && is_frame_request) {
+        const std::string stream_id = tail.substr(0, frame_pos);
+        auto info = core_.get_stream_info(stream_id);
+        if (!info.has_value()) {
+          return json_error(404, "stream not found");
+        }
+
+        auto latest = core_.get_latest_frame_for_stream(stream_id);
+        if (!latest || !latest->valid) {
+          return json_error(404, "latest frame not found");
+        }
+
+        auto encoded = encode_latest_frame_as_ppm(*latest);
+        if (!encoded.has_value()) {
+          return json_error(500, "failed to encode latest frame");
+        }
+        return HttpResponse{200, std::move(encoded->body), encoded->content_type};
       }
 
       if (output_pos != std::string::npos) {
