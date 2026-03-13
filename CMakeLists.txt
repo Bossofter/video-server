@@ -69,6 +69,7 @@ if(BUILD_TESTING)
     tests/test_core.cpp
     tests/test_transforms.cpp
     tests/test_synthetic.cpp
+    tests/test_video_types.cpp
     tests/test_webrtc_http.cpp
   )
 
