@@ -244,6 +244,10 @@ class WebRtcVideoServer::Impl {
             << "\"frames_transformed\":" << info->frames_transformed << ','
             << "\"frames_dropped\":" << info->frames_dropped << ','
             << "\"access_units_received\":" << info->access_units_received << ','
+            << "\"last_input_timestamp_ns\":" << info->last_input_timestamp_ns << ','
+            << "\"last_output_timestamp_ns\":" << info->last_output_timestamp_ns << ','
+            << "\"last_frame_id\":" << info->last_frame_id << ','
+            << "\"has_latest_frame\":" << bool_to_json(info->has_latest_frame) << ','
             << "\"active\":" << bool_to_json(info->active) << '}';
         return HttpResponse{200, out.str(), "application/json"};
       }
