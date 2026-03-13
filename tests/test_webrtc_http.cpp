@@ -224,6 +224,7 @@ int test_webrtc_http() {
   assert(stream_with_latest.find("latest_frame_width") != std::string::npos);
   assert(stream_with_latest.find("latest_frame_height") != std::string::npos);
   assert(stream_with_latest.find("latest_frame_pixel_format") != std::string::npos);
+  assert(stream_with_latest.find("\"latest_frame_pixel_format\":\"RGB24\"") != std::string::npos);
 
   const std::string offer_resp =
       send_raw_request(host, port, http_request("POST", "/api/video/signaling/stream-1/offer", "offer-sdp"));

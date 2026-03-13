@@ -21,7 +21,9 @@ Managed via vcpkg manifest (`vcpkg.json`):
 - libsrtp
 - spdlog
 
-## Build on RHEL 8 with vcpkg
+## Build and test with vcpkg (supported flow)
+
+The supported build flow requires `VCPKG_ROOT` and explicitly uses the vcpkg CMake toolchain file.
 
 ```bash
 git clone https://github.com/microsoft/vcpkg.git
@@ -29,17 +31,23 @@ cd vcpkg
 ./bootstrap-vcpkg.sh
 
 cd /workspace/video-server
-cmake -S . -B build \
-  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
-  -DVCPKG_TARGET_TRIPLET=x64-linux \
-  -DENABLE_VIDEO_SERVER=ON \
-  -DENABLE_WEBRTC_BACKEND=ON \
-  -DBUILD_TESTING=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+export VCPKG_ROOT=/path/to/vcpkg
+./build.sh
+./test.sh
 ```
 
-For environments without WebRTC dependencies installed yet, configure with `-DENABLE_WEBRTC_BACKEND=OFF`.
+`build.sh` configures with:
+
+- `-DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"`
+- `-DENABLE_VIDEO_SERVER=ON`
+- `-DENABLE_WEBRTC_BACKEND=ON`
+- `-DBUILD_TESTING=ON`
+
+It then builds via `cmake --build build -j`.
+
+`test.sh` runs `ctest --test-dir build --output-on-failure`, and automatically calls `./build.sh` if the build directory is missing.
+
+If you intentionally want a no-backend build, configure manually with `-DENABLE_WEBRTC_BACKEND=OFF`.
 
 ## HTTP API surface
 

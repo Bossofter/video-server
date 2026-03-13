@@ -4,6 +4,11 @@
 int test_core();
 int test_transforms();
 int test_synthetic();
+int test_video_types();
+int test_stream_metadata_update();
+int test_http_latest_frame_endpoint();
+int test_http_stream_info_metadata();
+int test_pipeline_end_to_end_current_path();
 int test_webrtc_http();
 
 int main() {
@@ -11,6 +16,11 @@ int main() {
     if (test_core() != 0) return 1;
     if (test_transforms() != 0) return 1;
     if (test_synthetic() != 0) return 1;
+    if (test_video_types() != 0) return 1;
+    if (test_stream_metadata_update() != 0) return 1;
+    if (test_http_latest_frame_endpoint() != 0) return 1;
+    if (test_http_stream_info_metadata() != 0) return 1;
+    if (test_pipeline_end_to_end_current_path() != 0) return 1;
     if (test_webrtc_http() != 0) return 1;
   } catch (const std::exception& e) {
     std::cerr << "Unhandled exception: " << e.what() << '\n';
