@@ -9,6 +9,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
+  set(_video_server_vcpkg_toolchain "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+  if(EXISTS "${_video_server_vcpkg_toolchain}")
+    set(CMAKE_TOOLCHAIN_FILE "${_video_server_vcpkg_toolchain}" CACHE FILEPATH "CMake toolchain file")
+    message(STATUS "Using vcpkg toolchain from VCPKG_ROOT: ${CMAKE_TOOLCHAIN_FILE}")
+  endif()
+endif()
+
 if(ENABLE_VIDEO_SERVER)
   add_library(video_server_core
     src/core/video_server_core.cpp
@@ -31,6 +40,51 @@ if(ENABLE_WEBRTC_BACKEND)
   find_package(spdlog CONFIG REQUIRED)
   find_package(OpenSSL REQUIRED)
 
+  find_package(LibDataChannel CONFIG QUIET)
+  find_package(libdatachannel CONFIG QUIET)
+  find_package(libjuice CONFIG QUIET)
+  find_package(juice CONFIG QUIET)
+  find_package(unofficial-libsrtp CONFIG QUIET)
+  find_package(libsrtp CONFIG QUIET)
+
+  set(VIDEO_SERVER_LIBDATACHANNEL_TARGET "")
+  if(TARGET LibDataChannel::LibDataChannel)
+    set(VIDEO_SERVER_LIBDATACHANNEL_TARGET LibDataChannel::LibDataChannel)
+  elseif(TARGET LibDataChannel::datachannel)
+    set(VIDEO_SERVER_LIBDATACHANNEL_TARGET LibDataChannel::datachannel)
+  elseif(TARGET libdatachannel::libdatachannel)
+    set(VIDEO_SERVER_LIBDATACHANNEL_TARGET libdatachannel::libdatachannel)
+  endif()
+
+  set(VIDEO_SERVER_LIBJUICE_TARGET "")
+  if(TARGET LibJuice::LibJuice)
+    set(VIDEO_SERVER_LIBJUICE_TARGET LibJuice::LibJuice)
+  elseif(TARGET libjuice::libjuice)
+    set(VIDEO_SERVER_LIBJUICE_TARGET libjuice::libjuice)
+  elseif(TARGET juice::juice)
+    set(VIDEO_SERVER_LIBJUICE_TARGET juice::juice)
+  endif()
+
+  set(VIDEO_SERVER_LIBSRTP_TARGET "")
+  if(TARGET unofficial::libsrtp::srtp2)
+    set(VIDEO_SERVER_LIBSRTP_TARGET unofficial::libsrtp::srtp2)
+  elseif(TARGET libsrtp2::libsrtp2)
+    set(VIDEO_SERVER_LIBSRTP_TARGET libsrtp2::libsrtp2)
+  elseif(TARGET srtp2)
+    set(VIDEO_SERVER_LIBSRTP_TARGET srtp2)
+  endif()
+
+  foreach(_dep_target
+      VIDEO_SERVER_LIBDATACHANNEL_TARGET
+      VIDEO_SERVER_LIBJUICE_TARGET
+      VIDEO_SERVER_LIBSRTP_TARGET)
+    if("${${_dep_target}}" STREQUAL "")
+      message(FATAL_ERROR
+        "ENABLE_WEBRTC_BACKEND=ON requires libdatachannel, libjuice, and libsrtp via vcpkg. "
+        "Configure with -DCMAKE_TOOLCHAIN_FILE=$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    endif()
+  endforeach()
+
   add_library(video_server_webrtc
     src/webrtc/webrtc_video_server.cpp
     src/webrtc/webrtc_stream.cpp
@@ -50,6 +104,9 @@ if(ENABLE_WEBRTC_BACKEND)
   target_link_libraries(video_server_webrtc
     PUBLIC
       video_server_core
+      ${VIDEO_SERVER_LIBDATACHANNEL_TARGET}
+      ${VIDEO_SERVER_LIBJUICE_TARGET}
+      ${VIDEO_SERVER_LIBSRTP_TARGET}
       spdlog::spdlog
       OpenSSL::SSL
       OpenSSL::Crypto

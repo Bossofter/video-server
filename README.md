@@ -21,25 +21,30 @@ Managed via vcpkg manifest (`vcpkg.json`):
 - libsrtp
 - spdlog
 
-## Build on RHEL 8 with vcpkg
+## Build and test with vcpkg (supported flow)
+
+`VCPKG_ROOT` is required, and the supported build path explicitly uses the vcpkg CMake toolchain file.
 
 ```bash
-git clone https://github.com/microsoft/vcpkg.git
-cd vcpkg
-./bootstrap-vcpkg.sh
+export VCPKG_ROOT=/path/to/vcpkg
+```
 
-cd /workspace/video-server
-cmake -S . -B build \
-  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
-  -DVCPKG_TARGET_TRIPLET=x64-linux \
-  -DENABLE_VIDEO_SERVER=ON \
-  -DENABLE_WEBRTC_BACKEND=ON \
-  -DBUILD_TESTING=ON
+Run the repeatable scripts from repository root:
+
+```bash
+./build.sh
+./test.sh
+```
+
+Equivalent manual flow:
+
+```bash
+cmake -S . -B build   -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"   -DENABLE_VIDEO_SERVER=ON   -DENABLE_WEBRTC_BACKEND=ON   -DBUILD_TESTING=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-For environments without WebRTC dependencies installed yet, configure with `-DENABLE_WEBRTC_BACKEND=OFF`.
+The WebRTC-enabled path expects all manifest dependencies (`libdatachannel`, `libjuice`, `openssl`, `libsrtp`, `spdlog`) to be available through vcpkg.
 
 ## HTTP API surface
 
