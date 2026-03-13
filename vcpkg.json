@@ -1,0 +1,12 @@
+{
+  "name": "video-server",
+  "version-string": "0.1.0",
+  "description": "Portable C++ video streaming subsystem",
+  "dependencies": [
+    "libdatachannel",
+    "libjuice",
+    "openssl",
+    "libsrtp",
+    "spdlog"
+  ]
+}
