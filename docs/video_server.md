@@ -70,7 +70,7 @@ These fields are intended for lightweight operational visibility and backend rea
 
 ## Backend-ready latest-frame access
 
-The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). This keeps transport/backend concerns separate while preparing the next step where WebRTC delivery consumes the latest transformed frame.
+The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). This keeps transport/backend concerns separate while preparing the next step where WebRTC delivery consumes the latest transformed frame. The new HTTP frame endpoint is the first concrete backend consumer using this snapshot contract, and it establishes a reusable boundary for future WebRTC media and encoded access-unit delivery paths.
 
 ## WebRTC backend notes
 
@@ -90,6 +90,7 @@ Implemented endpoints:
 - `GET /api/video/streams`
 - `GET /api/video/streams/{stream_id}`
 - `GET /api/video/streams/{stream_id}/output`
+- `GET /api/video/streams/{stream_id}/frame`
 - `PUT /api/video/streams/{stream_id}/output`
 - `POST /api/video/signaling/{stream_id}/offer`
 - `POST /api/video/signaling/{stream_id}/answer`
@@ -98,6 +99,24 @@ Implemented endpoints:
 
 Output-config JSON fields:
 `display_mode`, `mirrored`, `rotation_degrees`, `palette_min`, `palette_max`.
+
+Frame retrieval endpoint:
+
+- `GET /api/video/streams/{stream_id}/frame`
+- Returns `404` when stream does not exist.
+- Returns `404` when stream exists but has no latest transformed frame snapshot yet.
+- Returns `200` with the current latest transformed frame encoded as binary **PPM P6** (`Content-Type: image/x-portable-pixmap`) when available.
+
+The frame response uses the immutable latest-frame snapshot (`std::shared_ptr<const LatestFrame>`) returned by the core. The HTTP layer only takes a snapshot pointer under lock and performs encoding afterwards, so no stream mutex is held during image encoding. This preserves thread safety under concurrent frame pushes and keeps snapshot lifetime semantics explicit for future transport consumers.
+
+Current stream metadata now also includes lightweight latest-frame fields for observability:
+
+- `latest_frame_width`
+- `latest_frame_height`
+- `latest_frame_pixel_format`
+- `latest_frame_timestamp_ns`
+
+PPM was chosen for this milestone because the core already stores transformed output as packed `RGB24`, which maps directly to PPM P6 with only a small textual header and no extra third-party image codec dependency.
 
 ## LAN-only assumptions
 

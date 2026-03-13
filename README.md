@@ -46,6 +46,7 @@ For environments without WebRTC dependencies installed yet, configure with `-DEN
 - `GET /api/video/streams`
 - `GET /api/video/streams/{stream_id}`
 - `GET /api/video/streams/{stream_id}/output`
+- `GET /api/video/streams/{stream_id}/frame` (latest transformed frame as `image/x-portable-pixmap` PPM)
 - `PUT /api/video/streams/{stream_id}/output`
 - `POST /api/video/signaling/{stream_id}/offer`
 - `POST /api/video/signaling/{stream_id}/answer`
