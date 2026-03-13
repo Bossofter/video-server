@@ -22,9 +22,9 @@ const char* to_string(VideoDisplayMode mode) {
   return "Passthrough";
 }
 
-VideoDisplayMode video_display_mode_from_string(const char* value) {
+std::optional<VideoDisplayMode> video_display_mode_from_string(const char* value) {
   if (value == nullptr) {
-    return VideoDisplayMode::Passthrough;
+    return std::nullopt;
   }
 
   std::string normalized(value);
@@ -32,6 +32,9 @@ VideoDisplayMode video_display_mode_from_string(const char* value) {
                                   [](unsigned char c) { return std::isspace(c) != 0; }),
                    normalized.end());
 
+  if (normalized == "Passthrough") {
+    return VideoDisplayMode::Passthrough;
+  }
   if (normalized == "Grayscale") {
     return VideoDisplayMode::Grayscale;
   }
@@ -45,7 +48,7 @@ VideoDisplayMode video_display_mode_from_string(const char* value) {
     return VideoDisplayMode::Rainbow;
   }
 
-  return VideoDisplayMode::Passthrough;
+  return std::nullopt;
 }
 
 }  // namespace video_server

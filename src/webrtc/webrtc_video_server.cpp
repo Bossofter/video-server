@@ -1,9 +1,12 @@
 #include "video_server/webrtc_video_server.h"
 
+#include <cctype>
+#include <cstdlib>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
-#include <utility>
+#include <unordered_map>
 
 #include "../core/video_server_core.h"
 #include "http_api_server.h"
@@ -27,80 +30,157 @@ std::string json_escape(const std::string& value) {
 
 std::string bool_to_json(bool value) { return value ? "true" : "false"; }
 
-bool extract_json_string(const std::string& body, const std::string& key, std::string& out) {
-  const std::string token = "\"" + key + "\"";
-  const auto key_pos = body.find(token);
-  if (key_pos == std::string::npos) {
-    return false;
+struct JsonValue {
+  enum class Type { String, Bool, Number } type{Type::String};
+  std::string string_value;
+  bool bool_value{false};
+  double number_value{0.0};
+};
+
+bool skip_ws(const std::string& in, size_t& pos) {
+  while (pos < in.size() && std::isspace(static_cast<unsigned char>(in[pos])) != 0) {
+    ++pos;
   }
-  const auto colon = body.find(':', key_pos + token.size());
-  if (colon == std::string::npos) {
-    return false;
-  }
-  const auto first_quote = body.find('"', colon + 1);
-  if (first_quote == std::string::npos) {
-    return false;
-  }
-  const auto second_quote = body.find('"', first_quote + 1);
-  if (second_quote == std::string::npos) {
-    return false;
-  }
-  out = body.substr(first_quote + 1, second_quote - first_quote - 1);
-  return true;
+  return pos < in.size();
 }
 
-bool extract_json_bool(const std::string& body, const std::string& key, bool& out) {
-  const std::string token = "\"" + key + "\"";
-  const auto key_pos = body.find(token);
-  if (key_pos == std::string::npos) {
+bool parse_json_string_token(const std::string& in, size_t& pos, std::string& out) {
+  if (pos >= in.size() || in[pos] != '"') {
     return false;
   }
-  const auto colon = body.find(':', key_pos + token.size());
-  if (colon == std::string::npos) {
-    return false;
+  ++pos;
+  out.clear();
+  while (pos < in.size()) {
+    const char c = in[pos++];
+    if (c == '"') {
+      return true;
+    }
+    if (c == '\\') {
+      if (pos >= in.size()) {
+        return false;
+      }
+      out.push_back(in[pos++]);
+    } else {
+      out.push_back(c);
+    }
   }
-  const auto true_pos = body.find("true", colon + 1);
-  const auto false_pos = body.find("false", colon + 1);
-  if (true_pos != std::string::npos && (false_pos == std::string::npos || true_pos < false_pos)) {
+  return false;
+}
+
+bool parse_json_bool_token(const std::string& in, size_t& pos, bool& out) {
+  if (in.compare(pos, 4, "true") == 0) {
     out = true;
+    pos += 4;
     return true;
   }
-  if (false_pos != std::string::npos) {
+  if (in.compare(pos, 5, "false") == 0) {
     out = false;
+    pos += 5;
     return true;
   }
   return false;
 }
 
-template <typename T>
-bool extract_json_number(const std::string& body, const std::string& key, T& out) {
-  const std::string token = "\"" + key + "\"";
-  const auto key_pos = body.find(token);
-  if (key_pos == std::string::npos) {
-    return false;
+bool parse_json_number_token(const std::string& in, size_t& pos, double& out) {
+  const size_t start = pos;
+  if (pos < in.size() && (in[pos] == '-' || in[pos] == '+')) {
+    ++pos;
   }
-  const auto colon = body.find(':', key_pos + token.size());
-  if (colon == std::string::npos) {
-    return false;
+  bool any = false;
+  while (pos < in.size() && std::isdigit(static_cast<unsigned char>(in[pos])) != 0) {
+    any = true;
+    ++pos;
   }
-
-  std::string number;
-  for (size_t i = colon + 1; i < body.size(); ++i) {
-    const char c = body[i];
-    if ((c >= '0' && c <= '9') || c == '-' || c == '.') {
-      number.push_back(c);
-    } else if (!number.empty()) {
-      break;
+  if (pos < in.size() && in[pos] == '.') {
+    ++pos;
+    while (pos < in.size() && std::isdigit(static_cast<unsigned char>(in[pos])) != 0) {
+      any = true;
+      ++pos;
     }
   }
-
-  if (number.empty()) {
+  if (!any) {
     return false;
   }
 
-  std::istringstream in(number);
-  in >> out;
-  return !in.fail();
+  const std::string token = in.substr(start, pos - start);
+  char* end = nullptr;
+  out = std::strtod(token.c_str(), &end);
+  return end != nullptr && *end == '\0';
+}
+
+bool parse_flat_json_object(const std::string& body, std::unordered_map<std::string, JsonValue>& out) {
+  out.clear();
+  size_t pos = 0;
+  if (!skip_ws(body, pos) || body[pos] != '{') {
+    return false;
+  }
+  ++pos;
+
+  if (!skip_ws(body, pos)) {
+    return false;
+  }
+  if (body[pos] == '}') {
+    ++pos;
+    skip_ws(body, pos);
+    return pos == body.size();
+  }
+
+  while (pos < body.size()) {
+    skip_ws(body, pos);
+    std::string key;
+    if (!parse_json_string_token(body, pos, key)) {
+      return false;
+    }
+
+    if (!skip_ws(body, pos) || body[pos] != ':') {
+      return false;
+    }
+    ++pos;
+    if (!skip_ws(body, pos)) {
+      return false;
+    }
+
+    JsonValue value;
+    if (body[pos] == '"') {
+      value.type = JsonValue::Type::String;
+      if (!parse_json_string_token(body, pos, value.string_value)) {
+        return false;
+      }
+    } else if (body[pos] == 't' || body[pos] == 'f') {
+      value.type = JsonValue::Type::Bool;
+      if (!parse_json_bool_token(body, pos, value.bool_value)) {
+        return false;
+      }
+    } else {
+      value.type = JsonValue::Type::Number;
+      if (!parse_json_number_token(body, pos, value.number_value)) {
+        return false;
+      }
+    }
+
+    out[key] = value;
+
+    if (!skip_ws(body, pos)) {
+      return false;
+    }
+    if (body[pos] == '}') {
+      ++pos;
+      skip_ws(body, pos);
+      return pos == body.size();
+    }
+    if (body[pos] != ',') {
+      return false;
+    }
+    ++pos;
+  }
+
+  return false;
+}
+
+HttpResponse json_error(int status, const char* message) {
+  std::ostringstream out;
+  out << "{\"error\":\"" << message << "\"}";
+  return HttpResponse{status, out.str(), "application/json"};
 }
 
 std::string output_config_json(const StreamOutputConfig& cfg) {
@@ -119,7 +199,8 @@ std::string output_config_json(const StreamOutputConfig& cfg) {
 class WebRtcVideoServer::Impl {
  public:
   explicit Impl(WebRtcVideoServerConfig config)
-      : config_(config), http_server_(std::make_unique<HttpApiServer>(config.http_port)) {}
+      : config_(std::move(config)),
+        http_server_(std::make_unique<HttpApiServer>(config_.http_host, config_.http_port)) {}
 
   bool start() {
     if (!config_.enable_http_api) {
@@ -145,7 +226,7 @@ class WebRtcVideoServer::Impl {
             << json_escape(streams[i].label) << "\",\"active\":" << bool_to_json(streams[i].active) << '}';
       }
       out << "]}";
-      return HttpResponse{200, out.str()};
+      return HttpResponse{200, out.str(), "application/json"};
     }
 
     if (request.path.find("/api/video/streams/") == 0) {
@@ -154,7 +235,7 @@ class WebRtcVideoServer::Impl {
       if (request.method == "GET" && output_pos == std::string::npos) {
         auto info = core_.get_stream_info(tail);
         if (!info.has_value()) {
-          return HttpResponse{404, "{\"error\":\"stream not found\"}"};
+          return json_error(404, "stream not found");
         }
         std::ostringstream out;
         out << "{\"stream_id\":\"" << json_escape(info->stream_id) << "\","
@@ -164,7 +245,7 @@ class WebRtcVideoServer::Impl {
             << "\"frames_dropped\":" << info->frames_dropped << ','
             << "\"access_units_received\":" << info->access_units_received << ','
             << "\"active\":" << bool_to_json(info->active) << '}';
-        return HttpResponse{200, out.str()};
+        return HttpResponse{200, out.str(), "application/json"};
       }
 
       if (output_pos != std::string::npos) {
@@ -172,32 +253,63 @@ class WebRtcVideoServer::Impl {
         if (request.method == "GET") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
-            return HttpResponse{404, "{\"error\":\"stream not found\"}"};
+            return json_error(404, "stream not found");
           }
-          return HttpResponse{200, output_config_json(*cfg)};
+          return HttpResponse{200, output_config_json(*cfg), "application/json"};
         }
 
         if (request.method == "PUT") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
-            return HttpResponse{404, "{\"error\":\"stream not found\"}"};
+            return json_error(404, "stream not found");
+          }
+
+          if (request.body.empty()) {
+            return json_error(400, "invalid request body");
+          }
+
+          std::unordered_map<std::string, JsonValue> body_values;
+          if (!parse_flat_json_object(request.body, body_values)) {
+            return json_error(400, "invalid request body");
+          }
+
+          const auto mode_it = body_values.find("display_mode");
+          const auto mirrored_it = body_values.find("mirrored");
+          const auto rotation_it = body_values.find("rotation_degrees");
+          const auto min_it = body_values.find("palette_min");
+          const auto max_it = body_values.find("palette_max");
+
+          if (mode_it == body_values.end() || mirrored_it == body_values.end() ||
+              rotation_it == body_values.end() || min_it == body_values.end() ||
+              max_it == body_values.end()) {
+            return json_error(400, "invalid request body");
+          }
+
+          if (mode_it->second.type != JsonValue::Type::String ||
+              mirrored_it->second.type != JsonValue::Type::Bool ||
+              rotation_it->second.type != JsonValue::Type::Number ||
+              min_it->second.type != JsonValue::Type::Number ||
+              max_it->second.type != JsonValue::Type::Number) {
+            return json_error(400, "invalid request body");
+          }
+
+          const auto parsed_mode = video_display_mode_from_string(mode_it->second.string_value.c_str());
+          if (!parsed_mode.has_value()) {
+            return json_error(400, "invalid display_mode");
           }
 
           StreamOutputConfig updated = *cfg;
-          std::string mode;
-          if (extract_json_string(request.body, "display_mode", mode)) {
-            updated.display_mode = video_display_mode_from_string(mode.c_str());
-          }
-          extract_json_bool(request.body, "mirrored", updated.mirrored);
-          extract_json_number(request.body, "rotation_degrees", updated.rotation_degrees);
-          extract_json_number(request.body, "palette_min", updated.palette_min);
-          extract_json_number(request.body, "palette_max", updated.palette_max);
+          updated.display_mode = *parsed_mode;
+          updated.mirrored = mirrored_it->second.bool_value;
+          updated.rotation_degrees = static_cast<int>(rotation_it->second.number_value);
+          updated.palette_min = static_cast<float>(min_it->second.number_value);
+          updated.palette_max = static_cast<float>(max_it->second.number_value);
 
           if (!core_.set_stream_output_config(stream_id, updated)) {
-            return HttpResponse{400, "{\"error\":\"invalid output config\"}"};
+            return json_error(400, "invalid output config");
           }
 
-          return HttpResponse{200, output_config_json(updated)};
+          return HttpResponse{200, output_config_json(updated), "application/json"};
         }
       }
     }
@@ -210,31 +322,31 @@ class WebRtcVideoServer::Impl {
 
       if (request.method == "POST" && action == "offer") {
         signaling_.set_offer(stream_id, request.body);
-        return HttpResponse{200, "{\"ok\":true}"};
+        return HttpResponse{200, "{\"ok\":true}", "application/json"};
       }
       if (request.method == "POST" && action == "answer") {
         signaling_.set_answer(stream_id, request.body);
-        return HttpResponse{200, "{\"ok\":true}"};
+        return HttpResponse{200, "{\"ok\":true}", "application/json"};
       }
       if (request.method == "POST" && action == "candidate") {
         signaling_.add_ice_candidate(stream_id, request.body);
-        return HttpResponse{200, "{\"ok\":true}"};
+        return HttpResponse{200, "{\"ok\":true}", "application/json"};
       }
       if (request.method == "GET" && action == "session") {
         auto session = signaling_.get_session(stream_id);
         if (!session.has_value()) {
-          return HttpResponse{404, "{\"error\":\"session not found\"}"};
+          return json_error(404, "session not found");
         }
         std::ostringstream out;
         out << "{\"stream_id\":\"" << json_escape(session->stream_id) << "\","
             << "\"offer_sdp\":\"" << json_escape(session->offer_sdp) << "\","
             << "\"answer_sdp\":\"" << json_escape(session->answer_sdp) << "\","
             << "\"last_ice_candidate\":\"" << json_escape(session->last_ice_candidate) << "\"}";
-        return HttpResponse{200, out.str()};
+        return HttpResponse{200, out.str(), "application/json"};
       }
     }
 
-    return HttpResponse{404, "{\"error\":\"not found\"}"};
+    return json_error(404, "not found");
   }
 
   WebRtcVideoServerConfig config_;

@@ -23,7 +23,7 @@ class HttpApiServer {
  public:
   using Handler = std::function<HttpResponse(const HttpRequest&)>;
 
-  explicit HttpApiServer(uint16_t port);
+  HttpApiServer(std::string host, uint16_t port);
   ~HttpApiServer();
 
   bool start(Handler handler);
@@ -33,6 +33,7 @@ class HttpApiServer {
   void run_loop();
   void handle_client(int client_fd) const;
 
+  std::string host_;
   uint16_t port_;
   int listen_fd_{-1};
   std::atomic<bool> running_{false};

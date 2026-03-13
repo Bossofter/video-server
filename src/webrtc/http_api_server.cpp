@@ -2,13 +2,13 @@
 
 #include <array>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <utility>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <netdb.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -90,9 +90,10 @@ bool parse_request(const std::string& raw, HttpRequest& out_request) {
 }
 
 std::string response_to_http(const HttpResponse& response) {
+  const std::string content_type = response.content_type.empty() ? "application/json" : response.content_type;
   std::ostringstream out;
   out << "HTTP/1.1 " << response.status << ' ' << reason_phrase(response.status) << "\r\n";
-  out << "Content-Type: " << response.content_type << "\r\n";
+  out << "Content-Type: " << content_type << "\r\n";
   out << "Content-Length: " << response.body.size() << "\r\n";
   out << "Connection: close\r\n\r\n";
   out << response.body;
@@ -101,7 +102,7 @@ std::string response_to_http(const HttpResponse& response) {
 
 }  // namespace
 
-HttpApiServer::HttpApiServer(uint16_t port) : port_(port) {}
+HttpApiServer::HttpApiServer(std::string host, uint16_t port) : host_(std::move(host)), port_(port) {}
 HttpApiServer::~HttpApiServer() { stop(); }
 
 bool HttpApiServer::start(Handler handler) {
@@ -111,31 +112,42 @@ bool HttpApiServer::start(Handler handler) {
 
   handler_ = std::move(handler);
 
-  listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (listen_fd_ < 0) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+
+  const std::string port_str = std::to_string(static_cast<unsigned int>(port_));
+  addrinfo* result = nullptr;
+  if (::getaddrinfo(host_.c_str(), port_str.c_str(), &hints, &result) != 0) {
     return false;
   }
 
-  int reuse = 1;
-  ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  int bound_fd = -1;
+  for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
+    const int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd < 0) {
+      continue;
+    }
 
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  addr.sin_port = htons(port_);
+    int reuse = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
+    if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd, 16) == 0) {
+      bound_fd = fd;
+      break;
+    }
+
+    ::close(fd);
+  }
+
+  ::freeaddrinfo(result);
+
+  if (bound_fd < 0) {
     return false;
   }
 
-  if (::listen(listen_fd_, 16) != 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-
+  listen_fd_ = bound_fd;
   running_ = true;
   server_thread_ = std::thread([this]() { run_loop(); });
   return true;
@@ -161,14 +173,20 @@ void HttpApiServer::stop() {
 
 void HttpApiServer::run_loop() {
   while (running_) {
+    const int local_listen_fd = listen_fd_;
+    if (local_listen_fd < 0) {
+      break;
+    }
+
     fd_set read_set;
     FD_ZERO(&read_set);
-    FD_SET(listen_fd_, &read_set);
+    FD_SET(local_listen_fd, &read_set);
+
     timeval timeout{};
     timeout.tv_sec = 0;
     timeout.tv_usec = 200000;
 
-    const int ready = ::select(listen_fd_ + 1, &read_set, nullptr, nullptr, &timeout);
+    const int ready = ::select(local_listen_fd + 1, &read_set, nullptr, nullptr, &timeout);
     if (!running_) {
       break;
     }
@@ -182,9 +200,7 @@ void HttpApiServer::run_loop() {
       continue;
     }
 
-    sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-    const int client_fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+    const int client_fd = ::accept(local_listen_fd, nullptr, nullptr);
     if (client_fd < 0) {
       if (errno == EINTR) {
         continue;
@@ -235,11 +251,15 @@ void HttpApiServer::handle_client(int client_fd) const {
   HttpRequest request;
   HttpResponse response;
   if (!parse_request(raw, request)) {
-    response = HttpResponse{400, "{\"error\":\"invalid request\"}"};
+    response = HttpResponse{400, "{\"error\":\"invalid request\"}", "application/json"};
   } else if (!handler_) {
-    response = HttpResponse{500, "{\"error\":\"handler unavailable\"}"};
+    response = HttpResponse{500, "{\"error\":\"handler unavailable\"}", "application/json"};
   } else {
     response = handler_(request);
+  }
+
+  if (response.content_type.empty()) {
+    response.content_type = "application/json";
   }
 
   const std::string http = response_to_http(response);
