@@ -22,6 +22,26 @@ const char* to_string(VideoDisplayMode mode) {
   return "Passthrough";
 }
 
+const char* to_string(VideoPixelFormat pixel_format) {
+  switch (pixel_format) {
+    case VideoPixelFormat::RGB24:
+      return "RGB24";
+    case VideoPixelFormat::BGR24:
+      return "BGR24";
+    case VideoPixelFormat::RGBA32:
+      return "RGBA32";
+    case VideoPixelFormat::BGRA32:
+      return "BGRA32";
+    case VideoPixelFormat::NV12:
+      return "NV12";
+    case VideoPixelFormat::I420:
+      return "I420";
+    case VideoPixelFormat::GRAY8:
+      return "GRAY8";
+  }
+  return "RGB24";
+}
+
 std::optional<VideoDisplayMode> video_display_mode_from_string(const char* value) {
   if (value == nullptr) {
     return std::nullopt;

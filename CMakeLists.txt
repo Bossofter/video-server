@@ -30,6 +30,9 @@ endif()
 if(ENABLE_WEBRTC_BACKEND)
   find_package(spdlog CONFIG REQUIRED)
   find_package(OpenSSL REQUIRED)
+  find_package(LibDataChannel CONFIG REQUIRED)
+  find_package(LibJuice CONFIG REQUIRED)
+  find_package(libSRTP CONFIG REQUIRED)
 
   add_library(video_server_webrtc
     src/webrtc/webrtc_video_server.cpp
@@ -53,6 +56,9 @@ if(ENABLE_WEBRTC_BACKEND)
       spdlog::spdlog
       OpenSSL::SSL
       OpenSSL::Crypto
+      LibDataChannel::LibDataChannel
+      LibJuice::LibJuice
+      libSRTP::srtp2
   )
 endif()
 

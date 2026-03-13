@@ -28,6 +28,7 @@ enum class VideoDisplayMode {
 };
 
 const char* to_string(VideoDisplayMode mode);
+const char* to_string(VideoPixelFormat pixel_format);
 std::optional<VideoDisplayMode> video_display_mode_from_string(const char* value);
 
 }  // namespace video_server
