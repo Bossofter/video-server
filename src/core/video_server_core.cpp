@@ -1,6 +1,7 @@
 #include "video_server_core.h"
 
 #include <algorithm>
+#include <memory>
 
 #include "../transforms/display_transform.h"
 
@@ -34,59 +35,84 @@ bool VideoServerCore::remove_stream(const std::string& stream_id) {
 }
 
 bool VideoServerCore::push_frame(const std::string& stream_id, const VideoFrameView& frame) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = streams_.find(stream_id);
-  if (it == streams_.end()) {
-    return false;
+  StreamConfig config_snapshot;
+  StreamOutputConfig output_config_snapshot;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = streams_.find(stream_id);
+    if (it == streams_.end()) {
+      return false;
+    }
+    config_snapshot = it->second.info.config;
+    output_config_snapshot = it->second.info.output_config;
   }
 
-  StreamState& stream = it->second;
-  VideoStreamInfo& info = stream.info;
+  auto mark_drop = [&]() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = streams_.find(stream_id);
+    if (it != streams_.end()) {
+      ++it->second.info.frames_dropped;
+    }
+  };
 
   if (frame.data == nullptr || frame.width == 0 || frame.height == 0) {
-    ++info.frames_dropped;
+    mark_drop();
     return false;
   }
 
-  if (frame.width != info.config.width || frame.height != info.config.height ||
-      frame.pixel_format != info.config.input_pixel_format) {
-    ++info.frames_dropped;
+  if (frame.width != config_snapshot.width || frame.height != config_snapshot.height ||
+      frame.pixel_format != config_snapshot.input_pixel_format) {
+    mark_drop();
     return false;
   }
 
   if (!is_supported_input_pixel_format(frame.pixel_format)) {
-    ++info.frames_dropped;
+    mark_drop();
     return false;
   }
 
   const uint32_t expected_stride = frame.width * bytes_per_pixel(frame.pixel_format);
   if (frame.stride_bytes < expected_stride) {
-    ++info.frames_dropped;
+    mark_drop();
     return false;
   }
-
-  ++info.frames_received;
-  info.last_input_timestamp_ns = frame.timestamp_ns;
 
   RgbImage transformed;
-  if (!apply_display_transform(frame, info.output_config, transformed)) {
-    ++info.frames_dropped;
+  if (!apply_display_transform(frame, output_config_snapshot, transformed)) {
+    mark_drop();
     return false;
   }
 
-  stream.latest_frame.bytes = std::move(transformed.rgb);
-  stream.latest_frame.width = transformed.width;
-  stream.latest_frame.height = transformed.height;
-  stream.latest_frame.pixel_format = VideoPixelFormat::RGB24;
-  stream.latest_frame.timestamp_ns = frame.timestamp_ns;
-  stream.latest_frame.frame_id = frame.frame_id;
-  stream.latest_frame.valid = true;
+  auto published_frame = std::make_shared<LatestFrame>();
+  published_frame->bytes = std::move(transformed.rgb);
+  published_frame->width = transformed.width;
+  published_frame->height = transformed.height;
+  published_frame->pixel_format = VideoPixelFormat::RGB24;
+  published_frame->timestamp_ns = frame.timestamp_ns;
+  published_frame->frame_id = frame.frame_id;
+  published_frame->valid = true;
 
-  ++info.frames_transformed;
-  info.last_output_timestamp_ns = frame.timestamp_ns;
-  info.last_frame_timestamp_ns = frame.timestamp_ns;
-  info.last_frame_id = frame.frame_id;
-  info.has_latest_frame = true;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = streams_.find(stream_id);
+    if (it == streams_.end()) {
+      return false;
+    }
+
+    StreamState& stream = it->second;
+    VideoStreamInfo& info = stream.info;
+    stream.latest_frame = published_frame;
+
+    ++info.frames_received;
+    ++info.frames_transformed;
+    info.last_input_timestamp_ns = frame.timestamp_ns;
+    info.last_output_timestamp_ns = frame.timestamp_ns;
+    info.last_frame_timestamp_ns = frame.timestamp_ns;
+    info.last_frame_id = frame.frame_id;
+    info.has_latest_frame = true;
+  }
+
   return true;
 }
 
@@ -149,11 +175,12 @@ std::optional<StreamOutputConfig> VideoServerCore::get_stream_output_config(
   return it->second.info.output_config;
 }
 
-std::optional<LatestFrame> VideoServerCore::get_latest_frame_for_stream(const std::string& stream_id) const {
+std::shared_ptr<const LatestFrame> VideoServerCore::get_latest_frame_for_stream(
+    const std::string& stream_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = streams_.find(stream_id);
-  if (it == streams_.end() || !it->second.latest_frame.valid) {
-    return std::nullopt;
+  if (it == streams_.end()) {
+    return nullptr;
   }
   return it->second.latest_frame;
 }

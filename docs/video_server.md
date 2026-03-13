@@ -70,7 +70,7 @@ These fields are intended for lightweight operational visibility and backend rea
 
 ## Backend-ready latest-frame access
 
-The core exposes an internal getter (`get_latest_frame_for_stream`) that returns the current transformed frame snapshot when available. This keeps transport/backend concerns separate while preparing the next step where WebRTC delivery consumes the latest transformed frame.
+The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). This keeps transport/backend concerns separate while preparing the next step where WebRTC delivery consumes the latest transformed frame.
 
 ## WebRTC backend notes
 

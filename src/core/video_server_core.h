@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -32,12 +33,12 @@ class VideoServerCore : public IVideoServer {
                                 const StreamOutputConfig& output_config) override;
   std::optional<StreamOutputConfig> get_stream_output_config(const std::string& stream_id) const override;
 
-  std::optional<LatestFrame> get_latest_frame_for_stream(const std::string& stream_id) const;
+  std::shared_ptr<const LatestFrame> get_latest_frame_for_stream(const std::string& stream_id) const;
 
  private:
   struct StreamState {
     VideoStreamInfo info;
-    LatestFrame latest_frame;
+    std::shared_ptr<const LatestFrame> latest_frame;
   };
 
   static bool is_valid_rotation(int degrees);
