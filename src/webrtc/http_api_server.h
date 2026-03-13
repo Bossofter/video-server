@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <string>
+#include <thread>
 
 namespace video_server {
 
@@ -21,15 +23,22 @@ class HttpApiServer {
  public:
   using Handler = std::function<HttpResponse(const HttpRequest&)>;
 
-  explicit HttpApiServer(uint16_t port);
+  HttpApiServer(std::string host, uint16_t port);
   ~HttpApiServer();
 
   bool start(Handler handler);
   void stop();
 
  private:
+  void run_loop();
+  void handle_client(int client_fd) const;
+
+  std::string host_;
   uint16_t port_;
-  bool running_{false};
+  int listen_fd_{-1};
+  std::atomic<bool> running_{false};
+  Handler handler_;
+  std::thread server_thread_;
 };
 
 }  // namespace video_server

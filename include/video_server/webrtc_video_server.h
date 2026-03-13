@@ -8,6 +8,7 @@
 namespace video_server {
 
 struct WebRtcVideoServerConfig {
+  std::string http_host{"127.0.0.1"};
   uint16_t http_port{8080};
   bool enable_http_api{true};
 };
@@ -38,7 +39,6 @@ class WebRtcVideoServer : public IVideoServer {
                                 const StreamOutputConfig& output_config) override;
   std::optional<StreamOutputConfig> get_stream_output_config(const std::string& stream_id) const override;
 
-  // Test/control seam for exercising subsystem HTTP contract without external socket plumbing.
   WebRtcHttpResponse handle_http_request_for_test(const std::string& method, const std::string& path,
                                                   const std::string& body = "");
 
