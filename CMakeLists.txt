@@ -28,6 +28,7 @@ if(ENABLE_VIDEO_SERVER)
 endif()
 
 if(ENABLE_WEBRTC_BACKEND)
+  find_package(spdlog CONFIG REQUIRED)
   find_package(OpenSSL REQUIRED)
 
   add_library(video_server_webrtc
@@ -48,6 +49,7 @@ if(ENABLE_WEBRTC_BACKEND)
   target_link_libraries(video_server_webrtc
     PUBLIC
       video_server_core
+      spdlog::spdlog
       OpenSSL::SSL
       OpenSSL::Crypto
   )
