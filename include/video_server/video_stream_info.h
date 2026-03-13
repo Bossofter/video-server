@@ -19,6 +19,10 @@ struct VideoStreamInfo {
   uint64_t frames_dropped{0};
   uint64_t access_units_received{0};
   uint64_t last_frame_timestamp_ns{0};
+  uint64_t last_input_timestamp_ns{0};
+  uint64_t last_output_timestamp_ns{0};
+  uint64_t last_frame_id{0};
+  bool has_latest_frame{false};
 };
 
 }  // namespace video_server
