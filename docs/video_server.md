@@ -5,7 +5,7 @@
 This subsystem is split into portable core APIs and optional backend-specific transport layers.
 
 - **Producer-facing API (stable):** register stream, push frame pointer, push encoded access unit.
-- **Core state model:** stream metadata, runtime output config, stats, and latest transformed frame storage.
+- **Core state model:** stream metadata, runtime output config, stats, latest transformed frame storage, and latest encoded access-unit storage.
 - **Transform stage:** display/output mapping independent of source pixel format.
 - **WebRTC backend:** transport/signaling integration point for browser-native LAN delivery.
 - **HTTP control surface:** stream inspection, output config, and signaling endpoints.
@@ -52,6 +52,30 @@ Each stream stores an internal latest frame object that contains:
 
 The stored internal output format is **packed `RGB24`**.
 
+## Internal encoded H264 pipeline
+
+`push_access_unit()` is now a real producer-to-backend path:
+
+1. validate stream id
+2. validate the encoded payload pointer + size
+3. validate codec support (`H264` is accepted in this step)
+4. copy the encoded bytes into an owning immutable per-stream snapshot
+5. preserve timestamp, keyframe, codec-config, and sequence metadata
+6. publish the new latest encoded-unit snapshot
+7. update encoded stream counters and observability fields
+
+Each stream now stores an internal latest encoded-unit object that contains:
+
+- owning encoded bytes (`std::vector<uint8_t>`)
+- codec
+- timestamp
+- keyframe flag
+- codec-config flag
+- sequence id
+- validity flag
+
+This snapshot follows the same publication model as latest transformed frames: construct fully, then publish via a `std::shared_ptr<const ...>` so backend readers can safely retain older snapshots while newer ones are published.
+
 ## Runtime output config behavior
 
 Changing `StreamOutputConfig` via HTTP or direct API immediately affects the next `push_frame()` for that stream. Re-registration is not required.
@@ -65,12 +89,16 @@ Runtime stream info tracks practical counters and markers:
 - `last_input_timestamp_ns`, `last_output_timestamp_ns`
 - `last_frame_id`
 - `has_latest_frame`
+- `has_latest_encoded_unit`
+- `last_encoded_codec`, `last_encoded_timestamp_ns`
+- `last_encoded_sequence_id`, `last_encoded_size_bytes`
+- `last_encoded_keyframe`, `last_encoded_codec_config`
 
 These fields are intended for lightweight operational visibility and backend readiness.
 
 ## Backend-ready latest-frame access
 
-The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). The HTTP frame endpoint uses this directly today, and the WebRTC backend now exposes an explicit media-source bridge abstraction that observes the same snapshot boundary for the upcoming real video sender path.
+The core exposes internal getters (`get_latest_frame_for_stream`, `get_latest_encoded_unit_for_stream`) that return immutable `std::shared_ptr<const ...>` snapshots when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). The HTTP frame endpoint uses the frame getter today, and the WebRTC backend now uses both getters to seed per-session media bridge state.
 
 ## WebRTC backend notes
 
@@ -104,14 +132,14 @@ A session is currently keyed by `stream_id`, and the signaling layer currently e
 
 ### Current media-source bridge state
 
-This milestone keeps the backend media path honest: WebRTC **DataChannels are not used for video transport**. Instead, each active signaling session now owns an explicit media-source bridge abstraction that can observe temporary raw-frame snapshots today and future encoded H264 access units later.
+This milestone keeps the backend media path honest: WebRTC **DataChannels are not used for video transport**. Instead, each active signaling session now owns an explicit media-source bridge abstraction that can observe raw-frame snapshots and real latest encoded H264 access units.
 
 For each active signaling session, the backend now owns:
 
 - a real `rtc::PeerConnection`
 - a media-source bridge object tied to the stream id
 - raw-snapshot observation for current transformed-frame state
-- encoded-access-unit observation for the future H.264 sender path
+- encoded-unit observation for the preferred H.264 sender path
 - bridge status (`media_bridge_state`, `preferred_media_path`, snapshot metadata, encoded access-unit metadata)
 
 Current bridge behavior:
@@ -119,15 +147,16 @@ Current bridge behavior:
 1. producer pushes raw frames through the unchanged producer API
 2. core transforms and publishes a new immutable latest-frame snapshot
 3. `push_frame()` forwards the latest immutable transformed frame snapshot into the bridge through `on_latest_frame(...)`
-4. `push_access_unit()` forwards encoded access-unit metadata into the bridge through `on_encoded_access_unit(...)`
-5. signaling/session inspection can report what raw or encoded source state is currently available to a future real sender path
+4. `push_access_unit()` publishes a new immutable `LatestEncodedUnit` and forwards that snapshot into the bridge through `on_latest_encoded_unit(...)`
+5. new signaling sessions are seeded from both current latest-frame and latest-encoded getters, so an already-running H264 producer path is visible immediately
+6. signaling/session inspection can report what raw or encoded source state is currently available to a future real sender path
 
 The current bridge state is intentionally explicit:
 
 - `awaiting-video-track-bridge` when only latest-frame snapshot state is available
 - `awaiting-h264-video-track-bridge` once encoded H.264 access units have been observed
 
-That makes the system’s status explicit: the backend now has real peer/session plumbing plus a real backend-side media source boundary, but it does **not** yet claim to deliver final video media over WebRTC.
+That makes the system’s status explicit: the backend now has real peer/session plumbing plus a real encoded-media source boundary, but it does **not** yet claim to deliver final video media over WebRTC.
 
 This leaves the next step well-defined: attach a real encoded/RTP video sender implementation to the bridge rather than replacing another temporary transport.
 
@@ -179,6 +208,7 @@ Current session payload fields include:
 - `latest_encoded_access_unit_available`
 - `latest_encoded_codec`
 - `latest_encoded_timestamp_ns`
+- `latest_encoded_sequence_id`
 - `latest_encoded_size_bytes`
 - `latest_encoded_keyframe`
 - `latest_encoded_codec_config`
@@ -202,17 +232,30 @@ Current stream metadata now also includes lightweight latest-frame fields for ob
 - `latest_frame_pixel_format`
 - `latest_frame_timestamp_ns`
 
+Stream metadata now also exposes encoded observability fields:
+
+- `has_latest_encoded_unit`
+- `latest_encoded_codec`
+- `latest_encoded_timestamp_ns`
+- `latest_encoded_sequence_id`
+- `latest_encoded_size_bytes`
+- `latest_encoded_keyframe`
+- `latest_encoded_codec_config`
+
 PPM was chosen for this milestone because the core already stores transformed output as packed `RGB24`, which maps directly to PPM P6 with only a small textual header and no extra third-party image codec dependency.
 
 ## LAN-only assumptions
 
 This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple. The current WebRTC work is optimized for that environment: a single stream-scoped session, lightweight candidate forwarding, and an explicit media-source bridge that is ready to be connected to a real video sender implementation. DataChannels are not the intended video path.
 
-## Future encoded H.264 path
+## Preferred encoded H.264 direction
 
-`push_access_unit` and `EncodedAccessUnitView` are already part of the core interface, so producers can later provide direct H.264 access units without breaking API shape.
+The producer-facing API remains unchanged: producers can still call `push_frame()` or `push_access_unit()` with the same view types. Internally, however, the architecture is now explicitly split into two source paths:
 
-The media bridge now observes both latest transformed frames and, when present, encoded access-unit metadata. That keeps the raw-frame path and the future encoded H.264 path structurally separate while making it obvious how a real browser-native sender can prefer encoded input once that transport step lands.
+- Raw path: `push_frame()` → transforms → `LatestFrame` → media bridge
+- Encoded path: `push_access_unit(H264)` → `LatestEncodedUnit` → media bridge → `WebRtcStreamSession`
+
+Raw frames remain supported for transforms, snapshots, and inspection. Encoded H264 is now the preferred media-oriented backend path because it is the path that will connect naturally to browser-native RTP/video-track delivery in the next step.
 
 ## Synthetic generation path
 

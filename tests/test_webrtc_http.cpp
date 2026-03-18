@@ -110,6 +110,18 @@ uint64_t json_uint_field(const std::string& json, const std::string& key) {
   return std::stoull(json.substr(pos, end - pos));
 }
 
+bool json_bool_field(const std::string& json, const std::string& key) {
+  const std::string needle = "\"" + key + "\":";
+  const auto start = json.find(needle);
+  assert(start != std::string::npos);
+  const size_t pos = start + needle.size();
+  if (json.compare(pos, 4, "true") == 0) {
+    return true;
+  }
+  assert(json.compare(pos, 5, "false") == 0);
+  return false;
+}
+
 template <typename Predicate>
 bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -141,6 +153,23 @@ int test_webrtc_http() {
   assert(stream_resp.find("200 OK") != std::string::npos);
   assert(stream_resp.find("frames_received") != std::string::npos);
   assert_json_response_headers(stream_resp);
+
+  std::array<uint8_t, 7> initial_access_unit_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00};
+  video_server::EncodedAccessUnitView initial_access_unit{};
+  initial_access_unit.data = initial_access_unit_bytes.data();
+  initial_access_unit.size_bytes = initial_access_unit_bytes.size();
+  initial_access_unit.codec = video_server::VideoCodec::H264;
+  initial_access_unit.timestamp_ns = 7777;
+  initial_access_unit.keyframe = false;
+  initial_access_unit.codec_config = true;
+  assert(server.push_access_unit(cfg.stream_id, initial_access_unit));
+
+  const std::string stream_resp_after_encoded =
+      send_raw_request(host, port, http_request("GET", "/api/video/streams/stream-1"));
+  assert(stream_resp_after_encoded.find("\"has_latest_encoded_unit\":true") != std::string::npos);
+  assert(stream_resp_after_encoded.find("\"latest_encoded_codec\":\"H264\"") != std::string::npos);
+  assert(stream_resp_after_encoded.find("\"latest_encoded_timestamp_ns\":7777") != std::string::npos);
+  assert(stream_resp_after_encoded.find("\"latest_encoded_codec_config\":true") != std::string::npos);
 
   const std::string output_resp = send_raw_request(host, port, http_request("GET", "/api/video/streams/stream-1/output"));
   assert(output_resp.find("200 OK") != std::string::npos);
@@ -418,7 +447,10 @@ int test_webrtc_http() {
   assert(json_uint_field(session_after_updates.body, "latest_snapshot_height") == cfg.height);
   assert(json_string_field(session_after_updates.body, "latest_encoded_codec") == "H264");
   assert(json_uint_field(session_after_updates.body, "latest_encoded_timestamp_ns") == access_unit.timestamp_ns);
+  assert(json_uint_field(session_after_updates.body, "latest_encoded_sequence_id") == access_unit.timestamp_ns);
   assert(json_uint_field(session_after_updates.body, "latest_encoded_size_bytes") == access_unit.size_bytes);
+  assert(json_bool_field(session_after_updates.body, "latest_encoded_keyframe"));
+  assert(!json_bool_field(session_after_updates.body, "latest_encoded_codec_config"));
 
   assert(server.remove_stream(cfg.stream_id));
   const auto removed_session = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");

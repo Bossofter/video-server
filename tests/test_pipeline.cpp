@@ -1,4 +1,5 @@
 #include <cassert>
+#include <array>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -175,7 +176,7 @@ int test_http_stream_info_metadata() {
 int test_pipeline_end_to_end_current_path() {
   // Future-facing scaffold: this validates the currently implemented end-to-end path and is intended
   // to grow in future PRs toward stronger transform assertions, future transport/media behavior,
-  // future encoded-input path validation, and future WebRTC media output validation.
+  // encoded H264 bridge validation, and future WebRTC media output validation.
   const std::string host = "127.0.0.1";
   const uint16_t port = static_cast<uint16_t>(32000 + (::getpid() % 2000));
   video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
@@ -194,6 +195,16 @@ int test_pipeline_end_to_end_current_path() {
 
   push_test_frame(server, cfg, 8888, 99);
 
+  std::array<uint8_t, 6> encoded_bytes{0x00, 0x00, 0x00, 0x01, 0x65, 0x88};
+  video_server::EncodedAccessUnitView access_unit{};
+  access_unit.data = encoded_bytes.data();
+  access_unit.size_bytes = encoded_bytes.size();
+  access_unit.codec = video_server::VideoCodec::H264;
+  access_unit.timestamp_ns = 9999;
+  access_unit.keyframe = true;
+  access_unit.codec_config = false;
+  assert(server.push_access_unit(cfg.stream_id, access_unit));
+
   const std::string frame_resp =
       send_raw_request(host, port, http_request("GET", "/api/video/streams/pipeline-stream/frame"));
   assert(frame_resp.find("200 OK") != std::string::npos);
@@ -204,6 +215,15 @@ int test_pipeline_end_to_end_current_path() {
   std::ostringstream prefix;
   prefix << "P6\n" << cfg.width << ' ' << cfg.height << "\n255\n";
   assert(body.compare(0, prefix.str().size(), prefix.str()) == 0);
+
+  const std::string stream_info_resp =
+      send_raw_request(host, port, http_request("GET", "/api/video/streams/pipeline-stream"));
+  assert(stream_info_resp.find("200 OK") != std::string::npos);
+  assert(stream_info_resp.find("\"has_latest_frame\":true") != std::string::npos);
+  assert(stream_info_resp.find("\"has_latest_encoded_unit\":true") != std::string::npos);
+  assert(stream_info_resp.find("\"latest_encoded_codec\":\"H264\"") != std::string::npos);
+  assert(stream_info_resp.find("\"latest_encoded_timestamp_ns\":9999") != std::string::npos);
+  assert(stream_info_resp.find("\"latest_encoded_keyframe\":true") != std::string::npos);
 
   server.stop();
   return 0;

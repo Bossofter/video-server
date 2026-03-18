@@ -4,8 +4,11 @@
 
 namespace video_server {
 
-SignalingServer::SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter)
-    : stream_exists_(std::move(stream_exists)), latest_frame_getter_(std::move(latest_frame_getter)) {}
+SignalingServer::SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter,
+                                 LatestEncodedUnitGetterFn latest_encoded_unit_getter)
+    : stream_exists_(std::move(stream_exists)),
+      latest_frame_getter_(std::move(latest_frame_getter)),
+      latest_encoded_unit_getter_(std::move(latest_encoded_unit_getter)) {}
 
 SignalingServer::~SignalingServer() { stop(); }
 
@@ -18,7 +21,7 @@ bool SignalingServer::set_offer(const std::string& stream_id, const std::string&
     return false;
   }
 
-  auto session = std::make_shared<WebRtcStreamSession>(stream_id, latest_frame_getter_);
+  auto session = std::make_shared<WebRtcStreamSession>(stream_id, latest_frame_getter_, latest_encoded_unit_getter_);
   if (!session->apply_offer(offer_sdp, error_message)) {
     session->stop();
     return false;
@@ -88,7 +91,7 @@ void SignalingServer::on_latest_frame(const std::string& stream_id,
   session->on_latest_frame(std::move(latest_frame));
 }
 void SignalingServer::on_encoded_access_unit(const std::string& stream_id,
-                                             const EncodedAccessUnitView& access_unit) {
+                                             std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) {
   std::shared_ptr<WebRtcStreamSession> session;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -98,7 +101,7 @@ void SignalingServer::on_encoded_access_unit(const std::string& stream_id,
     }
     session = it->second.session;
   }
-  session->on_encoded_access_unit(access_unit);
+  session->on_encoded_access_unit(std::move(latest_encoded_unit));
 }
 std::optional<SignalingSession> SignalingServer::get_session(const std::string& stream_id) const {
   uint64_t session_generation = 0;

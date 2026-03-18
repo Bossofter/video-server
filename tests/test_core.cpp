@@ -107,6 +107,49 @@ int test_core() {
   assert(newest != nullptr);
   assert(newest->frame_id == 2);
 
+  std::vector<uint8_t> encoded_bytes = {0x00, 0x00, 0x00, 0x01, 0x67, 0x64};
+  video_server::EncodedAccessUnitView encoded{};
+  encoded.data = encoded_bytes.data();
+  encoded.size_bytes = encoded_bytes.size();
+  encoded.codec = video_server::VideoCodec::H264;
+  encoded.timestamp_ns = 250;
+  encoded.keyframe = true;
+  encoded.codec_config = true;
+  assert(server.push_access_unit(cfg.stream_id, encoded));
+
+  auto latest_encoded = server.get_latest_encoded_unit_for_stream(cfg.stream_id);
+  assert(latest_encoded != nullptr);
+  assert(latest_encoded->valid);
+  assert(latest_encoded->codec == video_server::VideoCodec::H264);
+  assert(latest_encoded->timestamp_ns == 250);
+  assert(latest_encoded->sequence_id == 250);
+  assert(latest_encoded->keyframe);
+  assert(latest_encoded->codec_config);
+  assert(latest_encoded->bytes == encoded_bytes);
+
+  info = server.get_stream_info(cfg.stream_id);
+  assert(info.has_value());
+  assert(info->access_units_received == 1);
+  assert(info->has_latest_encoded_unit);
+  assert(info->last_encoded_codec == video_server::VideoCodec::H264);
+  assert(info->last_encoded_timestamp_ns == 250);
+  assert(info->last_encoded_sequence_id == 250);
+  assert(info->last_encoded_size_bytes == encoded_bytes.size());
+  assert(info->last_encoded_keyframe);
+  assert(info->last_encoded_codec_config);
+
+  // Encoded snapshots keep immutable publication semantics too.
+  auto latest_encoded_again = server.get_latest_encoded_unit_for_stream(cfg.stream_id);
+  assert(latest_encoded_again != nullptr);
+  assert(latest_encoded_again.get() == latest_encoded.get());
+
+  assert(!server.push_access_unit("missing", encoded));
+  video_server::EncodedAccessUnitView empty_encoded{};
+  assert(!server.push_access_unit(cfg.stream_id, empty_encoded));
+  video_server::EncodedAccessUnitView invalid_codec = encoded;
+  invalid_codec.codec = static_cast<video_server::VideoCodec>(99);
+  assert(!server.push_access_unit(cfg.stream_id, invalid_codec));
+
   assert(server.remove_stream(cfg.stream_id));
   assert(!server.remove_stream(cfg.stream_id));
 

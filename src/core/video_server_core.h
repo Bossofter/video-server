@@ -11,6 +11,16 @@
 
 namespace video_server {
 
+struct LatestEncodedUnit {
+  std::vector<uint8_t> bytes;
+  VideoCodec codec{VideoCodec::H264};
+  uint64_t timestamp_ns{0};
+  uint64_t sequence_id{0};
+  bool keyframe{false};
+  bool codec_config{false};
+  bool valid{false};
+};
+
 struct LatestFrame {
   std::vector<uint8_t> bytes;
   uint32_t width{0};
@@ -34,11 +44,13 @@ class VideoServerCore : public IVideoServer {
   std::optional<StreamOutputConfig> get_stream_output_config(const std::string& stream_id) const override;
 
   std::shared_ptr<const LatestFrame> get_latest_frame_for_stream(const std::string& stream_id) const;
+  std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit_for_stream(const std::string& stream_id) const;
 
  private:
   struct StreamState {
     VideoStreamInfo info;
     std::shared_ptr<const LatestFrame> latest_frame;
+    std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit;
   };
 
   static bool is_valid_rotation(int degrees);

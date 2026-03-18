@@ -42,6 +42,14 @@ const char* to_string(VideoPixelFormat pixel_format) {
   return "RGB24";
 }
 
+const char* to_string(VideoCodec codec) {
+  switch (codec) {
+    case VideoCodec::H264:
+      return "H264";
+  }
+  return "H264";
+}
+
 std::optional<VideoDisplayMode> video_display_mode_from_string(const char* value) {
   if (value == nullptr) {
     return std::nullopt;
