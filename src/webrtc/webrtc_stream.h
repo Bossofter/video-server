@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <rtc/peerconnection.hpp>
+#include <rtc/track.hpp>
 
 #include "../core/video_server_core.h"
 #include "video_server/encoded_access_unit_view.h"
@@ -36,8 +37,15 @@ struct EncodedVideoSenderSnapshot {
   bool has_pending_encoded_unit{false};
   bool codec_config_seen{false};
   bool ready_for_video_track{false};
+  bool video_track_exists{false};
+  bool video_track_open{false};
+  bool h264_delivery_active{false};
+  bool keyframe_seen{false};
+  bool cached_codec_config_available{false};
   uint64_t delivered_units{0};
   uint64_t duplicate_units_skipped{0};
+  uint64_t failed_units{0};
+  uint64_t packets_attempted{0};
   uint64_t last_delivered_sequence_id{0};
   uint64_t last_delivered_timestamp_ns{0};
   size_t last_delivered_size_bytes{0};
@@ -47,6 +55,8 @@ struct EncodedVideoSenderSnapshot {
   bool last_contains_pps{false};
   bool last_contains_idr{false};
   bool last_contains_non_idr{false};
+  std::string last_packetization_status;
+  std::string video_mid;
 };
 
 struct WebRtcMediaSourceSnapshot {
@@ -91,8 +101,7 @@ struct WebRtcSessionSnapshot {
 class IEncodedVideoSender {
  public:
   virtual ~IEncodedVideoSender() = default;
-  // Session-side delivery/payloading-prep boundary for encoded units.
-  // This is not yet the final browser-facing RTP/video-track sender.
+  // Session-side delivery/packetization boundary for encoded units feeding the browser-facing track.
   virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };

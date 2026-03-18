@@ -36,12 +36,17 @@ TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
   const auto snapshot = session.snapshot();
   EXPECT_TRUE(snapshot.media_source.latest_encoded_access_unit_available);
   EXPECT_EQ(snapshot.media_source.latest_encoded_timestamp_ns, 1000u);
+  EXPECT_TRUE(snapshot.media_source.encoded_sender.video_track_exists);
+  EXPECT_FALSE(snapshot.media_source.encoded_sender.video_mid.empty());
   EXPECT_EQ(snapshot.media_source.encoded_sender.delivered_units, 1u);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.codec_config_seen);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.ready_for_video_track);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.last_contains_sps);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.last_contains_pps);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.last_contains_idr);
+  EXPECT_TRUE(snapshot.media_source.encoded_sender.packets_attempted == 0u ||
+              snapshot.media_source.encoded_sender.packets_attempted >= 1u);
+  EXPECT_FALSE(snapshot.media_source.encoded_sender.last_packetization_status.empty());
 }
 
 TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserved) {
@@ -56,10 +61,13 @@ TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserve
 
   auto after_config = session.snapshot();
   EXPECT_EQ(after_config.media_source.encoded_sender.delivered_units, 1u);
+  EXPECT_EQ(after_config.media_source.encoded_sender.packets_attempted, 0u);
   EXPECT_TRUE(after_config.media_source.encoded_sender.codec_config_seen);
   EXPECT_FALSE(after_config.media_source.encoded_sender.ready_for_video_track);
+  EXPECT_TRUE(after_config.media_source.encoded_sender.cached_codec_config_available);
   EXPECT_TRUE(after_config.media_source.latest_encoded_codec_config);
   EXPECT_FALSE(after_config.media_source.latest_encoded_keyframe);
+  EXPECT_EQ(after_config.media_source.encoded_sender.last_packetization_status, "keyframe-required");
 
   session.on_encoded_access_unit(codec_config);
   auto after_duplicate = session.snapshot();
@@ -71,10 +79,12 @@ TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserve
   auto after_idr = session.snapshot();
   EXPECT_EQ(after_idr.media_source.encoded_sender.delivered_units, 2u);
   EXPECT_TRUE(after_idr.media_source.encoded_sender.ready_for_video_track);
+  EXPECT_TRUE(after_idr.media_source.encoded_sender.keyframe_seen);
   EXPECT_TRUE(after_idr.media_source.encoded_sender.last_delivered_keyframe);
   EXPECT_FALSE(after_idr.media_source.encoded_sender.last_delivered_codec_config);
   EXPECT_TRUE(after_idr.media_source.encoded_sender.last_contains_idr);
   EXPECT_EQ(after_idr.media_source.encoded_sender.last_delivered_timestamp_ns, 3000u);
+  EXPECT_FALSE(after_idr.media_source.encoded_sender.last_packetization_status.empty());
 }
 
 TEST(WebRtcStreamSessionTest, InvalidConditionsAndParserBehaviorStayClean) {
@@ -94,6 +104,17 @@ TEST(WebRtcStreamSessionTest, InvalidConditionsAndParserBehaviorStayClean) {
   EXPECT_TRUE(non_idr_desc.valid);
   EXPECT_TRUE(non_idr_desc.has_non_idr_slice);
   EXPECT_FALSE(non_idr_desc.has_idr);
+
+  video_server::WebRtcStreamSession session(
+      "stream-c", [](const std::string&) { return std::shared_ptr<const video_server::LatestFrame>{}; },
+      [](const std::string&) { return std::shared_ptr<const video_server::LatestEncodedUnit>{}; });
+  auto invalid_empty = std::make_shared<video_server::LatestEncodedUnit>();
+  invalid_empty->valid = true;
+  invalid_empty->codec = video_server::VideoCodec::H264;
+  session.on_encoded_access_unit(invalid_empty);
+  const auto snapshot = session.snapshot();
+  EXPECT_EQ(snapshot.media_source.encoded_sender.failed_units, 1u);
+  EXPECT_EQ(snapshot.media_source.encoded_sender.last_packetization_status, "rejected-invalid-input");
 }
 
 }  // namespace

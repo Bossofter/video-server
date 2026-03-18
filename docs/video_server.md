@@ -132,15 +132,16 @@ A session is currently keyed by `stream_id`, and the signaling layer currently e
 
 ### Current media-source bridge state
 
-This milestone keeps the backend media path honest: WebRTC **DataChannels are not used for video transport**. Instead, each active signaling session now owns an explicit media-source bridge abstraction that can observe raw-frame snapshots and real latest encoded H264 access units.
+WebRTC **DataChannels are not used for video transport**. Each active signaling session now owns an explicit media-source bridge abstraction plus a real browser-facing video track path for H264 delivery.
 
 For each active signaling session, the backend now owns:
 
 - a real `rtc::PeerConnection`
+- a real session-owned `rtc::Track` configured as an H264 video sender
 - a media-source bridge object tied to the stream id
 - raw-snapshot observation for current transformed-frame state
 - encoded-unit observation for the preferred H.264 sender path
-- a dedicated session-side H.264 sender object that consumes immutable encoded snapshots through the bridge boundary
+- a dedicated session-side H.264 sender/packetizer object that consumes immutable encoded snapshots through the bridge boundary
 - bridge status (`media_bridge_state`, `preferred_media_path`, snapshot metadata, encoded access-unit metadata, sender metadata)
 
 Current bridge behavior:
@@ -150,18 +151,17 @@ Current bridge behavior:
 3. `push_frame()` forwards the latest immutable transformed frame snapshot into the bridge through `on_latest_frame(...)`
 4. `push_access_unit()` publishes a new immutable `LatestEncodedUnit` and forwards that snapshot into the bridge through `on_latest_encoded_unit(...)`
 5. `WebRtcStreamSession` forwards the immutable encoded snapshot to its `H264EncodedVideoSender` consumer path without taking direct access to core stream internals
-6. the sender inspects H.264 Annex-B NAL units, preserves `codec_config`, `keyframe`, and `timestamp_ns`, skips duplicate sequence ids, and updates delivery-oriented sender state
-7. new signaling sessions are seeded from both current latest-frame and latest-encoded getters, so an already-running H264 producer path is visible immediately
-8. signaling/session inspection can now report not just source availability, but also whether the session-side sender has seen codec config, an IDR/keyframe, and enough state to start real RTP/video-track wiring
+6. the sender inspects H.264 Annex-B NAL units, preserves `codec_config`, `keyframe`, `timestamp_ns`, and `sequence_id`, skips duplicate sequence ids, and caches codec-config data for later keyframe delivery when needed
+7. once codec config + keyframe state is available, the sender packetizes H264 NAL units into RTP packets and forwards them through the libdatachannel video track
+8. new signaling sessions are seeded from both current latest-frame and latest-encoded getters, so an already-running H264 producer path is visible immediately
+9. signaling/session inspection can now report whether the session owns a video track, whether H264 delivery is active, whether codec config and keyframes have been seen, and what the latest packetization status is
 
 The current bridge state is intentionally explicit:
 
 - `awaiting-video-track-bridge` when only latest-frame snapshot state is available
 - `awaiting-h264-video-track-bridge` once encoded H.264 access units have been observed
 
-That makes the system’s status explicit: the backend now has real peer/session plumbing plus a real encoded-media source boundary and a real session-side H.264 consumer path, but it does **not** yet claim to deliver final browser playback over WebRTC.
-
-This leaves the next step well-defined: wire the sender’s delivery-oriented state into an actual libdatachannel-backed RTP/video track instead of replacing another temporary transport.
+That makes the system’s status explicit: the backend now has real peer/session plumbing, a real encoded-media source boundary, a real session-owned H264 video track, and real RTP packet emission work on the encoded path.
 
 ### Threading and lifetime
 
@@ -173,13 +173,13 @@ This leaves the next step well-defined: wire the sender’s delivery-oriented st
 
 ### What remains for later steps
 
-Not yet implemented:
+Still incomplete / for later hardening:
 
-- final libdatachannel video-track creation and packet emission
-- H.264 RTP packetization / RTCP feedback handling for a real sender track
-- turning the current sender state machine into true on-wire media transmission
+- richer RTCP handling, retransmission, bitrate adaptation, and browser feedback processing
+- stronger packet pacing / buffering policy for not-yet-open tracks
 - multi-session addressing beyond the current stream-keyed session model
 - richer signaling payloads / structured JSON bodies
+- browser-side playback validation across Chromium / Firefox / Safari with production SDP tuning
 
 ## HTTP API
 
@@ -222,8 +222,15 @@ Current session payload fields include:
 - `encoded_sender_has_pending_encoded_unit`
 - `encoded_sender_codec_config_seen`
 - `encoded_sender_ready_for_video_track`
+- `encoded_sender_video_track_exists`
+- `encoded_sender_video_track_open`
+- `encoded_sender_h264_delivery_active`
+- `encoded_sender_keyframe_seen`
+- `encoded_sender_cached_codec_config_available`
 - `encoded_sender_delivered_units`
 - `encoded_sender_duplicate_units_skipped`
+- `encoded_sender_failed_units`
+- `encoded_sender_packets_attempted`
 - `encoded_sender_last_delivered_sequence_id`
 - `encoded_sender_last_delivered_timestamp_ns`
 - `encoded_sender_last_delivered_size_bytes`
@@ -233,6 +240,8 @@ Current session payload fields include:
 - `encoded_sender_last_contains_pps`
 - `encoded_sender_last_contains_idr`
 - `encoded_sender_last_contains_non_idr`
+- `encoded_sender_last_packetization_status`
+- `encoded_sender_video_mid`
 
 Output-config JSON fields:
 `display_mode`, `mirrored`, `rotation_degrees`, `palette_min`, `palette_max`.
@@ -274,25 +283,28 @@ This subsystem currently assumes peers on the same local network and keeps signa
 The producer-facing API remains unchanged: producers can still call `push_frame()` or `push_access_unit()` with the same view types. Internally, however, the architecture is now explicitly split into two source paths:
 
 - Raw path: `push_frame()` → transforms → `LatestFrame` → media bridge
-- Encoded path: `push_access_unit(H264)` → `LatestEncodedUnit` → media bridge → `WebRtcStreamSession` → `H264EncodedVideoSender`
+- Encoded path: `push_access_unit(H264)` → `LatestEncodedUnit` → media bridge → `WebRtcStreamSession` → `H264EncodedVideoSender` → session video track → browser
 
-Raw frames remain supported for transforms, snapshots, and inspection. Encoded H264 is now the preferred media-oriented backend path because it is the path that will connect naturally to browser-native RTP/video-track delivery in the next step.
+Raw frames remain supported for transforms, snapshots, and inspection. Encoded H264 is now the preferred browser-facing media architecture because it is the path that now drives session RTP/video-track delivery.
 
 ### H.264 sender behavior in this step
 
-The sender path is intentionally lightweight but delivery-oriented:
+The sender path is now transport-facing:
 
 - it consumes immutable latest encoded units from the bridge/session boundary
 - it performs minimal H.264 Annex-B parsing to identify SPS, PPS, IDR, and non-IDR slice NAL units
-- it preserves and exposes `codec_config`, `keyframe`, and `timestamp_ns`
+- it preserves and exposes `codec_config`, `keyframe`, `timestamp_ns`, and `sequence_id`
 - it tracks duplicate suppression via `sequence_id`
-- it reports when enough state exists to start real H.264 RTP/video-track wiring (`codec_config_seen` + keyframe/IDR)
+- it caches codec-config access units so SPS/PPS can be injected ahead of later keyframes when needed
+- it packetizes NAL units into RTP payloads, including FU-A fragmentation for large NAL units
+- it forwards the generated RTP packets through the session-owned libdatachannel video track
+- it reports whether the session has a track, whether the track is open, whether packetization happened, and what the most recent packetization status was
 
-`H264EncodedVideoSender` should therefore be read as a session-side encoded delivery / packetization-prep component. It is not yet the final browser-facing RTP transmission layer; it exists to bridge the backend from encoded-unit state toward actual media delivery.
+`H264EncodedVideoSender` should therefore be read as the session-side encoded transport component for the current backend. Session lifecycle and signaling stay separate from H264 parsing / packetization logic.
 
 The current `sequence_id` is also still a temporary identity source derived from the encoded timestamp in core state. A dedicated per-stream monotonically increasing encoded-unit counter may be preferable in a later transport-focused step.
 
-This step therefore moves the backend beyond “encoded state exists” and into “the session is actively consuming H264 units and preparing them for real media transport.”
+This step therefore moves the backend beyond “encoded state exists” and into “the session is actively consuming H264 units and pushing real RTP/video-track media toward the browser path.”
 
 ## Synthetic generation path
 
