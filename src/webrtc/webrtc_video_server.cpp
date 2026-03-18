@@ -433,9 +433,21 @@ class WebRtcVideoServer::Impl {
             << bool_to_json(session->media_source.encoded_sender.codec_config_seen) << ','
             << "\"encoded_sender_ready_for_video_track\":"
             << bool_to_json(session->media_source.encoded_sender.ready_for_video_track) << ','
+            << "\"encoded_sender_video_track_exists\":"
+            << bool_to_json(session->media_source.encoded_sender.video_track_exists) << ','
+            << "\"encoded_sender_video_track_open\":"
+            << bool_to_json(session->media_source.encoded_sender.video_track_open) << ','
+            << "\"encoded_sender_h264_delivery_active\":"
+            << bool_to_json(session->media_source.encoded_sender.h264_delivery_active) << ','
+            << "\"encoded_sender_keyframe_seen\":"
+            << bool_to_json(session->media_source.encoded_sender.keyframe_seen) << ','
+            << "\"encoded_sender_cached_codec_config_available\":"
+            << bool_to_json(session->media_source.encoded_sender.cached_codec_config_available) << ','
             << "\"encoded_sender_delivered_units\":" << session->media_source.encoded_sender.delivered_units << ','
             << "\"encoded_sender_duplicate_units_skipped\":"
             << session->media_source.encoded_sender.duplicate_units_skipped << ','
+            << "\"encoded_sender_failed_units\":" << session->media_source.encoded_sender.failed_units << ','
+            << "\"encoded_sender_packets_attempted\":" << session->media_source.encoded_sender.packets_attempted << ','
             << "\"encoded_sender_last_delivered_sequence_id\":"
             << session->media_source.encoded_sender.last_delivered_sequence_id << ','
             << "\"encoded_sender_last_delivered_timestamp_ns\":"
@@ -453,7 +465,11 @@ class WebRtcVideoServer::Impl {
             << "\"encoded_sender_last_contains_idr\":"
             << bool_to_json(session->media_source.encoded_sender.last_contains_idr) << ','
             << "\"encoded_sender_last_contains_non_idr\":"
-            << bool_to_json(session->media_source.encoded_sender.last_contains_non_idr) << '}';
+            << bool_to_json(session->media_source.encoded_sender.last_contains_non_idr) << ','
+            << "\"encoded_sender_last_packetization_status\":\""
+            << json_escape(session->media_source.encoded_sender.last_packetization_status) << "\","
+            << "\"encoded_sender_video_mid\":\""
+            << json_escape(session->media_source.encoded_sender.video_mid) << "\"}";
         return HttpResponse{200, out.str(), "application/json"};
       }
     }

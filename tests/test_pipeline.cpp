@@ -201,7 +201,9 @@ TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) {
 
   push_test_frame(server, cfg, 8888, 99);
 
-  std::array<uint8_t, 6> encoded_bytes{0x00, 0x00, 0x00, 0x01, 0x65, 0x88};
+  std::array<uint8_t, 23> encoded_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f,
+                                        0x00, 0x00, 0x00, 0x01, 0x68, 0xeb, 0xec, 0xb2,
+                                        0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84};
   video_server::EncodedAccessUnitView access_unit{};
   access_unit.data = encoded_bytes.data();
   access_unit.size_bytes = encoded_bytes.size();
@@ -254,6 +256,8 @@ TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) {
       send_raw_request(host, port, http_request("GET", "/api/video/signaling/pipeline-stream/session"));
   CHECK_TRUE(session_resp.find("200 OK") != std::string::npos);
   CHECK_TRUE(session_resp.find("\"preferred_media_path\":\"encoded-access-unit\"") != std::string::npos);
+  CHECK_TRUE(session_resp.find("\"encoded_sender_video_track_exists\":true") != std::string::npos);
+  CHECK_TRUE(session_resp.find("\"encoded_sender_h264_delivery_active\":true") != std::string::npos);
   CHECK_TRUE(session_resp.find("\"encoded_sender_delivered_units\":1") != std::string::npos);
 
   server.stop();

@@ -1,8 +1,13 @@
 #include "webrtc_stream.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
 #include <exception>
 #include <memory>
+#include <random>
+#include <sstream>
 #include <utility>
 
 #include <rtc/configuration.hpp>
@@ -32,6 +37,74 @@ bool is_start_code_at(const std::vector<uint8_t>& bytes, size_t offset, size_t* 
     return true;
   }
   return false;
+}
+
+constexpr uint8_t kH264PayloadType = 102;
+constexpr uint64_t kH264ClockRate = 90000;
+constexpr size_t kMaxRtpPayloadSize = 1200;
+
+uint32_t timestamp_ns_to_h264_rtp_timestamp(uint64_t timestamp_ns) {
+  constexpr uint64_t kClockRate = kH264ClockRate;
+  constexpr uint64_t kNsPerSecond = 1000000000ull;
+  return static_cast<uint32_t>((timestamp_ns * kClockRate) / kNsPerSecond);
+}
+
+uint32_t make_random_ssrc() {
+  static std::mt19937 generator(std::random_device{}());
+  static std::uniform_int_distribution<uint32_t> distribution(1u, 0xffffffffu);
+  return distribution(generator);
+}
+
+std::vector<std::vector<uint8_t>> split_annex_b_nalus(const std::vector<uint8_t>& bytes) {
+  std::vector<std::vector<uint8_t>> nalus;
+  size_t nal_start = 0;
+  while (nal_start < bytes.size()) {
+    size_t start_code_size = 0;
+    while (nal_start < bytes.size() && !is_start_code_at(bytes, nal_start, &start_code_size)) {
+      ++nal_start;
+    }
+    if (nal_start >= bytes.size()) {
+      break;
+    }
+    const size_t payload_offset = nal_start + start_code_size;
+    if (payload_offset >= bytes.size()) {
+      break;
+    }
+    size_t nal_end = payload_offset;
+    size_t next_start_code_size = 0;
+    while (nal_end < bytes.size() && !is_start_code_at(bytes, nal_end, &next_start_code_size)) {
+      ++nal_end;
+    }
+    if (nal_end > payload_offset) {
+      nalus.emplace_back(bytes.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+                         bytes.begin() + static_cast<std::ptrdiff_t>(nal_end));
+    }
+    nal_start = nal_end;
+  }
+
+  if (nalus.empty() && !bytes.empty()) {
+    nalus.push_back(bytes);
+  }
+  return nalus;
+}
+
+std::vector<uint8_t> make_rtp_packet(const uint8_t* payload, size_t payload_size, uint16_t sequence_number,
+                                     uint32_t timestamp, uint32_t ssrc, bool marker) {
+  std::vector<uint8_t> packet(12 + payload_size);
+  packet[0] = 0x80;
+  packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | kH264PayloadType);
+  packet[2] = static_cast<uint8_t>(sequence_number >> 8);
+  packet[3] = static_cast<uint8_t>(sequence_number & 0xff);
+  packet[4] = static_cast<uint8_t>(timestamp >> 24);
+  packet[5] = static_cast<uint8_t>((timestamp >> 16) & 0xff);
+  packet[6] = static_cast<uint8_t>((timestamp >> 8) & 0xff);
+  packet[7] = static_cast<uint8_t>(timestamp & 0xff);
+  packet[8] = static_cast<uint8_t>(ssrc >> 24);
+  packet[9] = static_cast<uint8_t>((ssrc >> 16) & 0xff);
+  packet[10] = static_cast<uint8_t>((ssrc >> 8) & 0xff);
+  packet[11] = static_cast<uint8_t>(ssrc & 0xff);
+  std::copy(payload, payload + payload_size, packet.begin() + 12);
+  return packet;
 }
 
 class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
@@ -128,44 +201,142 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
 
 class H264EncodedVideoSender : public IEncodedVideoSender {
  public:
-  // This sender currently prepares session-side encoded delivery state so the next
-  // step can attach real RTP/video-track transmission without changing producer APIs.
+  H264EncodedVideoSender(std::shared_ptr<rtc::Track> video_track, std::string track_mid)
+      : video_track_(std::move(video_track)), video_mid_(std::move(track_mid)), ssrc_(make_random_ssrc()) {}
+
   void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
     if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid) {
       return;
     }
 
-    const H264AccessUnitDescriptor descriptor = inspect_h264_access_unit(*latest_encoded_unit);
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    has_pending_encoded_unit_ = true;
-    codec_ = codec_to_string(latest_encoded_unit->codec);
-
-    if (last_delivered_sequence_id_ == latest_encoded_unit->sequence_id) {
-      ++duplicate_units_skipped_;
+    if (latest_encoded_unit->codec != VideoCodec::H264 || latest_encoded_unit->bytes.empty()) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++failed_units_;
+      sender_state_ = "rejected-non-h264-access-unit";
+      last_packetization_status_ = "rejected-invalid-input";
       return;
     }
 
-    last_delivered_sequence_id_ = latest_encoded_unit->sequence_id;
-    last_delivered_timestamp_ns_ = latest_encoded_unit->timestamp_ns;
-    last_delivered_size_bytes_ = latest_encoded_unit->bytes.size();
-    last_delivered_keyframe_ = latest_encoded_unit->keyframe;
-    last_delivered_codec_config_ = latest_encoded_unit->codec_config;
-    last_contains_sps_ = descriptor.has_sps;
-    last_contains_pps_ = descriptor.has_pps;
-    last_contains_idr_ = descriptor.has_idr;
-    last_contains_non_idr_ = descriptor.has_non_idr_slice;
-    codec_config_seen_ = codec_config_seen_ || latest_encoded_unit->codec_config ||
-                         (descriptor.has_sps && descriptor.has_pps);
-    ready_for_video_track_ = codec_config_seen_ && (latest_encoded_unit->keyframe || descriptor.has_idr);
-    ++delivered_units_;
+    const H264AccessUnitDescriptor descriptor = inspect_h264_access_unit(*latest_encoded_unit);
+    const bool contains_codec_config = latest_encoded_unit->codec_config || (descriptor.has_sps && descriptor.has_pps);
+    const bool is_keyframe = latest_encoded_unit->keyframe || descriptor.has_idr;
+    bool should_send = false;
+    bool has_track = false;
+    bool track_open = false;
+    std::shared_ptr<rtc::Track> track;
 
-    if (ready_for_video_track_) {
-      sender_state_ = "ready-for-h264-rtp-packetization";
-    } else if (codec_config_seen_) {
-      sender_state_ = "waiting-for-h264-keyframe";
-    } else {
-      sender_state_ = "waiting-for-h264-codec-config";
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      has_pending_encoded_unit_ = true;
+      codec_ = codec_to_string(latest_encoded_unit->codec);
+      video_track_exists_ = static_cast<bool>(video_track_);
+      video_track_open_ = video_track_ && video_track_->isOpen();
+      has_track = video_track_exists_;
+      track_open = video_track_open_;
+      track = video_track_;
+
+      if (last_delivered_sequence_id_ == latest_encoded_unit->sequence_id) {
+        ++duplicate_units_skipped_;
+        last_packetization_status_ = "duplicate-sequence-skipped";
+        return;
+      }
+
+      if (contains_codec_config) {
+        cached_codec_config_ = latest_encoded_unit;
+        cached_codec_config_available_ = true;
+      }
+
+      codec_config_seen_ = codec_config_seen_ || contains_codec_config;
+      keyframe_seen_ = keyframe_seen_ || is_keyframe;
+      ready_for_video_track_ = has_track && codec_config_seen_ && keyframe_seen_;
+
+      last_delivered_sequence_id_ = latest_encoded_unit->sequence_id;
+      last_delivered_timestamp_ns_ = latest_encoded_unit->timestamp_ns;
+      last_delivered_size_bytes_ = latest_encoded_unit->bytes.size();
+      last_delivered_keyframe_ = latest_encoded_unit->keyframe;
+      last_delivered_codec_config_ = latest_encoded_unit->codec_config;
+      last_contains_sps_ = descriptor.has_sps;
+      last_contains_pps_ = descriptor.has_pps;
+      last_contains_idr_ = descriptor.has_idr;
+      last_contains_non_idr_ = descriptor.has_non_idr_slice;
+
+      ++delivered_units_;
+      should_send = ready_for_video_track_ && has_track && track_open;
+      if (!has_track) {
+        sender_state_ = "video-track-missing";
+        last_packetization_status_ = "no-video-track";
+      } else if (!codec_config_seen_) {
+        sender_state_ = "waiting-for-h264-codec-config";
+        last_packetization_status_ = "codec-config-required";
+      } else if (!keyframe_seen_) {
+        sender_state_ = "waiting-for-h264-keyframe";
+        last_packetization_status_ = "keyframe-required";
+      } else if (!track_open) {
+        sender_state_ = "waiting-for-video-track-open";
+        last_packetization_status_ = "track-not-open-yet";
+      } else {
+        sender_state_ = "sending-h264-rtp";
+        last_packetization_status_ = "packetization-attempt-pending";
+      }
+    }
+
+    if (!should_send || !track) {
+      return;
+    }
+
+    const uint32_t rtp_timestamp = timestamp_ns_to_h264_rtp_timestamp(latest_encoded_unit->timestamp_ns);
+    std::vector<std::vector<uint8_t>> nalus_to_send;
+    if (cached_codec_config_available_ && is_keyframe && !contains_codec_config && cached_codec_config_ != nullptr) {
+      auto cached_nalus = split_annex_b_nalus(cached_codec_config_->bytes);
+      nalus_to_send.insert(nalus_to_send.end(), cached_nalus.begin(), cached_nalus.end());
+    }
+    auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
+    nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
+
+    uint64_t packet_count = 0;
+    for (size_t nal_index = 0; nal_index < nalus_to_send.size(); ++nal_index) {
+      const auto& nal = nalus_to_send[nal_index];
+      const bool is_last_nal = nal_index + 1 == nalus_to_send.size();
+      if (nal.empty()) {
+        continue;
+      }
+
+      if (nal.size() <= kMaxRtpPayloadSize) {
+        auto packet = make_rtp_packet(nal.data(), nal.size(), sequence_number_++, rtp_timestamp, ssrc_, is_last_nal);
+        track->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
+        ++packet_count;
+        continue;
+      }
+
+      const uint8_t nal_header = nal[0];
+      const uint8_t fu_indicator = static_cast<uint8_t>((nal_header & 0xe0) | 28u);
+      const uint8_t nal_type = static_cast<uint8_t>(nal_header & 0x1f);
+      const size_t fragment_payload_capacity = kMaxRtpPayloadSize - 2;
+      size_t offset = 1;
+      while (offset < nal.size()) {
+        const size_t remaining = nal.size() - offset;
+        const size_t fragment_size = std::min(fragment_payload_capacity, remaining);
+        const bool start = offset == 1;
+        const bool end = fragment_size == remaining;
+        std::vector<uint8_t> fu_payload(2 + fragment_size);
+        fu_payload[0] = fu_indicator;
+        fu_payload[1] = static_cast<uint8_t>((start ? 0x80 : 0x00) | (end ? 0x40 : 0x00) | nal_type);
+        std::copy(nal.begin() + static_cast<std::ptrdiff_t>(offset),
+                  nal.begin() + static_cast<std::ptrdiff_t>(offset + fragment_size), fu_payload.begin() + 2);
+        auto packet = make_rtp_packet(fu_payload.data(), fu_payload.size(), sequence_number_++, rtp_timestamp, ssrc_,
+                                      is_last_nal && end);
+        track->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
+        ++packet_count;
+        offset += fragment_size;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      packets_attempted_ += packet_count;
+      h264_delivery_active_ = true;
+      video_track_open_ = video_track_ && video_track_->isOpen();
+      last_packetization_status_ = packet_count > 0 ? "rtp-packets-sent" : "no-rtp-packets-generated";
     }
   }
 
@@ -177,8 +348,15 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
     snapshot.codec_config_seen = codec_config_seen_;
     snapshot.ready_for_video_track = ready_for_video_track_;
+    snapshot.video_track_exists = video_track_exists_;
+    snapshot.video_track_open = video_track_open_;
+    snapshot.h264_delivery_active = h264_delivery_active_;
+    snapshot.keyframe_seen = keyframe_seen_;
+    snapshot.cached_codec_config_available = cached_codec_config_available_;
     snapshot.delivered_units = delivered_units_;
     snapshot.duplicate_units_skipped = duplicate_units_skipped_;
+    snapshot.failed_units = failed_units_;
+    snapshot.packets_attempted = packets_attempted_;
     snapshot.last_delivered_sequence_id = last_delivered_sequence_id_;
     snapshot.last_delivered_timestamp_ns = last_delivered_timestamp_ns_;
     snapshot.last_delivered_size_bytes = last_delivered_size_bytes_;
@@ -188,18 +366,32 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.last_contains_pps = last_contains_pps_;
     snapshot.last_contains_idr = last_contains_idr_;
     snapshot.last_contains_non_idr = last_contains_non_idr_;
+    snapshot.last_packetization_status = last_packetization_status_;
+    snapshot.video_mid = video_mid_;
     return snapshot;
   }
 
  private:
   mutable std::mutex mutex_;
+  std::shared_ptr<rtc::Track> video_track_;
+  std::shared_ptr<const LatestEncodedUnit> cached_codec_config_;
   std::string sender_state_{"waiting-for-encoded-input"};
   std::string codec_;
+  std::string video_mid_;
+  uint32_t ssrc_{0};
+  uint16_t sequence_number_{0};
   bool has_pending_encoded_unit_{false};
   bool codec_config_seen_{false};
   bool ready_for_video_track_{false};
+  bool video_track_exists_{false};
+  bool video_track_open_{false};
+  bool h264_delivery_active_{false};
+  bool keyframe_seen_{false};
+  bool cached_codec_config_available_{false};
   uint64_t delivered_units_{0};
   uint64_t duplicate_units_skipped_{0};
+  uint64_t failed_units_{0};
+  uint64_t packets_attempted_{0};
   uint64_t last_delivered_sequence_id_{0};
   uint64_t last_delivered_timestamp_ns_{0};
   size_t last_delivered_size_bytes_{0};
@@ -209,6 +401,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   bool last_contains_pps_{false};
   bool last_contains_idr_{false};
   bool last_contains_non_idr_{false};
+  std::string last_packetization_status_{"awaiting-encoded-input"};
 };
 
 }  // namespace
@@ -296,7 +489,12 @@ WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGette
   config.disableAutoNegotiation = false;
   peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
   media_source_ = std::make_unique<StreamMediaSourceBridge>();
-  encoded_sender_ = std::make_unique<H264EncodedVideoSender>();
+  const uint32_t video_ssrc = make_random_ssrc();
+  rtc::Description::Video media("video", rtc::Description::Direction::SendOnly);
+  media.addH264Codec(kH264PayloadType);
+  media.addSSRC(video_ssrc, "video-server-video", stream_id_, "h264-track");
+  auto video_track = peer_connection_->addTrack(media);
+  encoded_sender_ = std::make_unique<H264EncodedVideoSender>(video_track, video_track ? video_track->mid() : "");
   media_source_->on_latest_frame(latest_frame_getter(stream_id_));
   auto latest_encoded = latest_encoded_unit_getter(stream_id_);
   media_source_->on_latest_encoded_unit(latest_encoded);
