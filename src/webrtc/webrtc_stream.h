@@ -32,7 +32,15 @@ struct WebRtcMediaSourceSnapshot {
 class IWebRtcMediaSourceBridge {
  public:
   virtual ~IWebRtcMediaSourceBridge() = default;
+
+  // Temporary path: raw transformed frames currently arrive here as immutable snapshots.
+  // Long-term path: the backend should prefer encoded media delivery instead of raw-frame transport.
+  virtual void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame) = 0;
+
+  // Long-term path: encoded access units (notably H264) should become the primary media source for
+  // browser-native video delivery. This hook exists now so the bridge contract is format-agnostic.
   virtual void on_encoded_access_unit(const EncodedAccessUnitView& access_unit) = 0;
+
   virtual WebRtcMediaSourceSnapshot snapshot() const = 0;
 };
 
@@ -59,6 +67,7 @@ class WebRtcStreamSession {
   bool apply_offer(const std::string& offer_sdp, std::string* error_message = nullptr);
   bool apply_answer(const std::string& answer_sdp, std::string* error_message = nullptr);
   bool add_remote_candidate(const std::string& candidate_sdp, std::string* error_message = nullptr);
+  void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame);
   void on_encoded_access_unit(const EncodedAccessUnitView& access_unit);
   WebRtcSessionSnapshot snapshot() const;
   void stop();

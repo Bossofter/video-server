@@ -104,7 +104,7 @@ A session is currently keyed by `stream_id`, and the signaling layer currently e
 
 ### Current media-source bridge state
 
-This milestone keeps the backend media path honest: it does **not** pretend that snapshot-over-datachannel is the final video transport. Instead, each active signaling session now owns an explicit media-source abstraction backed by the immutable latest-frame snapshots.
+This milestone keeps the backend media path honest: WebRTC **DataChannels are not used for video transport**. Instead, each active signaling session now owns an explicit media-source bridge abstraction that can observe temporary raw-frame snapshots today and future encoded H264 access units later.
 
 For each active signaling session, the backend now owns:
 
@@ -118,8 +118,8 @@ Current bridge behavior:
 
 1. producer pushes raw frames through the unchanged producer API
 2. core transforms and publishes a new immutable latest-frame snapshot
-3. the per-session media-source bridge observes that snapshot state without mutating shared data
-4. the same bridge can also record incoming encoded access-unit metadata from `push_access_unit()`
+3. `push_frame()` forwards the latest immutable transformed frame snapshot into the bridge through `on_latest_frame(...)`
+4. `push_access_unit()` forwards encoded access-unit metadata into the bridge through `on_encoded_access_unit(...)`
 5. signaling/session inspection can report what raw or encoded source state is currently available to a future real sender path
 
 The current bridge state is intentionally explicit:
@@ -206,7 +206,7 @@ PPM was chosen for this milestone because the core already stores transformed ou
 
 ## LAN-only assumptions
 
-This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple. The current WebRTC work is optimized for that environment: a single stream-scoped session, lightweight candidate forwarding, and an explicit latest-frame media-source bridge that is ready to be connected to a real video sender implementation.
+This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple. The current WebRTC work is optimized for that environment: a single stream-scoped session, lightweight candidate forwarding, and an explicit media-source bridge that is ready to be connected to a real video sender implementation. DataChannels are not the intended video path.
 
 ## Future encoded H.264 path
 

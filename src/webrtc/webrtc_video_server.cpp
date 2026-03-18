@@ -433,7 +433,11 @@ bool WebRtcVideoServer::remove_stream(const std::string& stream_id) {
 }
 
 bool WebRtcVideoServer::push_frame(const std::string& stream_id, const VideoFrameView& frame) {
-  return impl_->core_.push_frame(stream_id, frame);
+  if (!impl_->core_.push_frame(stream_id, frame)) {
+    return false;
+  }
+  impl_->signaling_.on_latest_frame(stream_id, impl_->core_.get_latest_frame_for_stream(stream_id));
+  return true;
 }
 
 bool WebRtcVideoServer::push_access_unit(const std::string& stream_id,
