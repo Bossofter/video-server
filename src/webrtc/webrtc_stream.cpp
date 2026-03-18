@@ -128,6 +128,8 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
 
 class H264EncodedVideoSender : public IEncodedVideoSender {
  public:
+  // This sender currently prepares session-side encoded delivery state so the next
+  // step can attach real RTP/video-track transmission without changing producer APIs.
   void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
     if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid) {
       return;
@@ -307,10 +309,19 @@ WebRtcStreamSession::~WebRtcStreamSession() { stop(); }
 
 bool WebRtcStreamSession::apply_offer(const std::string& offer_sdp, std::string* error_message) {
   try {
+    std::shared_ptr<rtc::PeerConnection> peer_connection;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      peer_connection = peer_connection_;
+    }
+
+    // PeerConnection calls may synchronously invoke onLocalDescription/onLocalCandidate/onStateChange,
+    // so the session mutex must not be held across libdatachannel API calls.
+    peer_connection->setRemoteDescription(rtc::Description(offer_sdp, "offer"));
+    peer_connection->setLocalDescription();
+
     std::lock_guard<std::mutex> lock(mutex_);
     offer_sdp_ = offer_sdp;
-    peer_connection_->setRemoteDescription(rtc::Description(offer_sdp, "offer"));
-    peer_connection_->setLocalDescription();
     return true;
   } catch (const std::exception& e) {
     if (error_message != nullptr) {
@@ -322,9 +333,17 @@ bool WebRtcStreamSession::apply_offer(const std::string& offer_sdp, std::string*
 
 bool WebRtcStreamSession::apply_answer(const std::string& answer_sdp, std::string* error_message) {
   try {
+    std::shared_ptr<rtc::PeerConnection> peer_connection;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      peer_connection = peer_connection_;
+    }
+
+    // PeerConnection callbacks may reenter the session synchronously here too.
+    peer_connection->setRemoteDescription(rtc::Description(answer_sdp, "answer"));
+
     std::lock_guard<std::mutex> lock(mutex_);
     answer_sdp_ = answer_sdp;
-    peer_connection_->setRemoteDescription(rtc::Description(answer_sdp, "answer"));
     return true;
   } catch (const std::exception& e) {
     if (error_message != nullptr) {
@@ -336,9 +355,17 @@ bool WebRtcStreamSession::apply_answer(const std::string& answer_sdp, std::strin
 
 bool WebRtcStreamSession::add_remote_candidate(const std::string& candidate_sdp, std::string* error_message) {
   try {
+    std::shared_ptr<rtc::PeerConnection> peer_connection;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      peer_connection = peer_connection_;
+    }
+
+    // Keep candidate insertion callback-safe for synchronous libdatachannel reentrancy.
+    peer_connection->addRemoteCandidate(rtc::Candidate(candidate_sdp));
+
     std::lock_guard<std::mutex> lock(mutex_);
     last_remote_candidate_ = candidate_sdp;
-    peer_connection_->addRemoteCandidate(rtc::Candidate(candidate_sdp));
     return true;
   } catch (const std::exception& e) {
     if (error_message != nullptr) {
@@ -383,6 +410,7 @@ void WebRtcStreamSession::stop() {
   }
 
   if (peer_connection) {
+    // close() may also trigger state callbacks, so do not hold the session mutex here.
     peer_connection->close();
   }
 }
@@ -406,6 +434,8 @@ std::string WebRtcStreamSession::peer_state_to_string(rtc::PeerConnection::State
 }
 
 void WebRtcStreamSession::configure_callbacks() {
+  // These callbacks may run synchronously while PeerConnection API calls are still on the stack.
+  // They only touch session-local state under mutex_ and therefore must stay independent.
   peer_connection_->onLocalDescription([this](rtc::Description description) {
     std::lock_guard<std::mutex> lock(mutex_);
     answer_sdp_ = std::string(description);

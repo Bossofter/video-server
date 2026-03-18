@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -138,7 +139,152 @@ bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
   return predicate();
 }
 
+struct ClientPeerOffer {
+  std::shared_ptr<rtc::PeerConnection> peer_connection;
+  std::mutex mutex;
+  std::string offer_sdp;
+  std::vector<std::string> candidates;
+};
+
+std::unique_ptr<ClientPeerOffer> make_client_offer(const std::string& channel_label) {
+  auto client_offer = std::make_unique<ClientPeerOffer>();
+  rtc::Configuration rtc_config;
+  client_offer->peer_connection = std::make_shared<rtc::PeerConnection>(rtc_config);
+  auto bootstrap_channel = client_offer->peer_connection->createDataChannel(channel_label);
+  (void)bootstrap_channel;
+
+  client_offer->peer_connection->onLocalDescription([client_offer = client_offer.get()](rtc::Description description) {
+    std::lock_guard<std::mutex> lock(client_offer->mutex);
+    client_offer->offer_sdp = std::string(description);
+  });
+  client_offer->peer_connection->onLocalCandidate([client_offer = client_offer.get()](rtc::Candidate candidate) {
+    std::lock_guard<std::mutex> lock(client_offer->mutex);
+    client_offer->candidates.push_back(std::string(candidate));
+  });
+  client_offer->peer_connection->setLocalDescription(rtc::Description::Type::Offer);
+
+  CHECK_TRUE(wait_until([&]() {
+    {
+      std::lock_guard<std::mutex> lock(client_offer->mutex);
+      if (!client_offer->offer_sdp.empty()) {
+        return true;
+      }
+    }
+    const auto description = client_offer->peer_connection->localDescription();
+    if (!description.has_value()) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(client_offer->mutex);
+    client_offer->offer_sdp = std::string(*description);
+    return true;
+  }));
+
+  return client_offer;
+}
+
 }  // namespace
+
+TEST(WebRtcHttpTest, SignalingCallbacksRemainResponsive) {
+  const uint16_t port = static_cast<uint16_t>(21000 + (::getpid() % 10000));
+  const std::string host = "127.0.0.1";
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+  video_server::StreamConfig cfg{"signal-stability", "signal", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  CHECK_TRUE(server.register_stream(cfg));
+  CHECK_TRUE(server.start());
+
+  auto client_offer = make_client_offer("stability");
+  {
+    std::lock_guard<std::mutex> lock(client_offer->mutex);
+    CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-stability/offer",
+                                                   client_offer->offer_sdp)
+                   .status == 200);
+  }
+
+  video_server::WebRtcHttpResponse session_response{};
+  CHECK_TRUE(wait_until([&]() {
+    session_response = server.handle_http_request_for_test("GET", "/api/video/signaling/signal-stability/session");
+    return session_response.status == 200 && !json_string_field(session_response.body, "answer_sdp").empty() &&
+           !json_string_field(session_response.body, "peer_state").empty();
+  }));
+
+  const auto invalid_answer =
+      server.handle_http_request_for_test("POST", "/api/video/signaling/signal-stability/answer", "not-an-answer");
+  CHECK_TRUE(invalid_answer.status == 400);
+
+  std::string candidate;
+  if (wait_until([&]() {
+        std::lock_guard<std::mutex> lock(client_offer->mutex);
+        if (client_offer->candidates.empty()) {
+          return false;
+        }
+        candidate = client_offer->candidates.front();
+        return true;
+      },
+      1000)) {
+    CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-stability/candidate", candidate)
+                   .status == 200);
+    const auto after_candidate =
+        server.handle_http_request_for_test("GET", "/api/video/signaling/signal-stability/session");
+    CHECK_TRUE(after_candidate.status == 200);
+    CHECK_TRUE(json_string_field(after_candidate.body, "last_remote_candidate") == candidate);
+  }
+
+  server.stop();
+}
+
+TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive) {
+  const uint16_t port = static_cast<uint16_t>(22000 + (::getpid() % 10000));
+  const std::string host = "127.0.0.1";
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+  video_server::StreamConfig cfg{"signal-repeat", "signal-repeat", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  CHECK_TRUE(server.register_stream(cfg));
+  CHECK_TRUE(server.start());
+
+  uint64_t previous_generation = 0;
+  for (int round = 0; round < 3; ++round) {
+    auto client_offer = make_client_offer("repeat-" + std::to_string(round));
+    {
+      std::lock_guard<std::mutex> lock(client_offer->mutex);
+      CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-repeat/offer",
+                                                     client_offer->offer_sdp)
+                     .status == 200);
+    }
+
+    std::string session_json;
+    CHECK_TRUE(wait_until([&]() {
+      const auto response = server.handle_http_request_for_test("GET", "/api/video/signaling/signal-repeat/session");
+      if (response.status != 200) {
+        return false;
+      }
+      session_json = response.body;
+      return json_uint_field(session_json, "session_generation") > previous_generation &&
+             !json_string_field(session_json, "answer_sdp").empty();
+    }));
+
+    previous_generation = json_uint_field(session_json, "session_generation");
+    CHECK_TRUE(previous_generation == static_cast<uint64_t>(round + 1));
+
+    std::string candidate;
+    if (wait_until([&]() {
+          std::lock_guard<std::mutex> lock(client_offer->mutex);
+          if (client_offer->candidates.empty()) {
+            return false;
+          }
+          candidate = client_offer->candidates.front();
+          return true;
+        },
+        1000)) {
+      CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-repeat/candidate", candidate)
+                     .status == 200);
+      const auto after_candidate =
+          server.handle_http_request_for_test("GET", "/api/video/signaling/signal-repeat/session");
+      CHECK_TRUE(after_candidate.status == 200);
+      CHECK_TRUE(json_uint_field(after_candidate.body, "session_generation") == previous_generation);
+    }
+  }
+
+  server.stop();
+}
 
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
   const uint16_t port = static_cast<uint16_t>(20000 + (::getpid() % 10000));

@@ -288,6 +288,10 @@ The sender path is intentionally lightweight but delivery-oriented:
 - it tracks duplicate suppression via `sequence_id`
 - it reports when enough state exists to start real H.264 RTP/video-track wiring (`codec_config_seen` + keyframe/IDR)
 
+`H264EncodedVideoSender` should therefore be read as a session-side encoded delivery / packetization-prep component. It is not yet the final browser-facing RTP transmission layer; it exists to bridge the backend from encoded-unit state toward actual media delivery.
+
+The current `sequence_id` is also still a temporary identity source derived from the encoded timestamp in core state. A dedicated per-stream monotonically increasing encoded-unit counter may be preferable in a later transport-focused step.
+
 This step therefore moves the backend beyond “encoded state exists” and into “the session is actively consuming H264 units and preparing them for real media transport.”
 
 ## Synthetic generation path

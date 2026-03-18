@@ -91,6 +91,8 @@ struct WebRtcSessionSnapshot {
 class IEncodedVideoSender {
  public:
   virtual ~IEncodedVideoSender() = default;
+  // Session-side delivery/payloading-prep boundary for encoded units.
+  // This is not yet the final browser-facing RTP/video-track sender.
   virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
