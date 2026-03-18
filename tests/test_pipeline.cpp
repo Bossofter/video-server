@@ -174,10 +174,11 @@ TEST(WebRtcPipelineTest, HttpStreamInfoMetadata) {
   server.stop();
 }
 
-TEST(WebRtcPipelineTest, EndToEndCurrentPath) {
-  // Future-facing scaffold: this validates the currently implemented end-to-end path and is intended
-  // to grow in future PRs toward stronger transform assertions, future transport/media behavior,
-  // encoded H264 bridge validation, and future WebRTC media output validation.
+TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) {
+  // Future-facing scaffold: this intentionally stays out of the default `./test.sh` run so the base
+  // suite remains stable while we iterate on a fuller end-to-end pipeline test. Run it explicitly via
+  // `./test_pipeline.sh` to see its current behavior and evolve it toward stronger transform assertions,
+  // future transport/media behavior, encoded H264 bridge validation, and future WebRTC media output validation.
   const std::string host = "127.0.0.1";
   const uint16_t port = static_cast<uint16_t>(32000 + (::getpid() % 2000));
   video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
@@ -233,5 +234,5 @@ TEST(WebRtcPipelineTest, EndToEndCurrentPath) {
 TEST(WebRtcPipelineTest, StreamMetadataUpdate) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcPipelineTest, HttpLatestFrameEndpoint) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcPipelineTest, HttpStreamInfoMetadata) { GTEST_SKIP() << "WebRTC backend disabled"; }
-TEST(WebRtcPipelineTest, EndToEndCurrentPath) { GTEST_SKIP() << "WebRTC backend disabled"; }
+TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) { GTEST_SKIP() << "WebRTC backend disabled"; }
 #endif

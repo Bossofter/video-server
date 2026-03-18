@@ -35,6 +35,7 @@ cd /workspace/video-server
 export VCPKG_ROOT=/path/to/vcpkg
 ./build.sh
 ./test.sh
+./test_pipeline.sh
 ```
 
 `build.sh` configures with:
@@ -46,7 +47,9 @@ export VCPKG_ROOT=/path/to/vcpkg
 
 It then builds via `cmake --build build -j`.
 
-`test.sh` runs `build/video_server_tests --gtest_color=yes`, which prints each GoogleTest case as it runs, and automatically calls `./build.sh` if the build directory is missing.
+`test.sh` runs the base GoogleTest suite via `build/video_server_tests --gtest_color=yes`, which prints each default test case as it runs and automatically calls `./build.sh` if the build directory is missing.
+
+`test_pipeline.sh` runs the intentionally disabled future pipeline test via `--gtest_also_run_disabled_tests --gtest_filter=WebRtcPipelineTest.DISABLED_EndToEndCurrentPath` so it stays visible and runnable without affecting the default `./test.sh` result.
 
 If you intentionally want a no-backend build, configure manually with `-DENABLE_WEBRTC_BACKEND=OFF`.
 
