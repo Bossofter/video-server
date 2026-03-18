@@ -455,6 +455,13 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
   CHECK_TRUE(json_uint_field(session_after_updates.body, "latest_encoded_size_bytes") == access_unit.size_bytes);
   CHECK_TRUE(json_bool_field(session_after_updates.body, "latest_encoded_keyframe"));
   CHECK_TRUE(!json_bool_field(session_after_updates.body, "latest_encoded_codec_config"));
+  CHECK_TRUE(json_string_field(session_after_updates.body, "encoded_sender_state") ==
+             "ready-for-h264-rtp-packetization");
+  CHECK_TRUE(json_uint_field(session_after_updates.body, "encoded_sender_delivered_units") == 2);
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_has_pending_encoded_unit"));
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_codec_config_seen"));
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_ready_for_video_track"));
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_last_contains_idr"));
 
   CHECK_TRUE(server.remove_stream(cfg.stream_id));
   const auto removed_session = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");

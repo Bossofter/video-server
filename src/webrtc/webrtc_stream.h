@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <rtc/peerconnection.hpp>
 
@@ -12,6 +13,41 @@
 #include "video_server/encoded_access_unit_view.h"
 
 namespace video_server {
+
+struct H264NalUnitInfo {
+  uint8_t nal_type{0};
+  size_t offset{0};
+  size_t size_bytes{0};
+};
+
+struct H264AccessUnitDescriptor {
+  bool valid{false};
+  bool has_sps{false};
+  bool has_pps{false};
+  bool has_idr{false};
+  bool has_non_idr_slice{false};
+  bool has_aud{false};
+  std::vector<H264NalUnitInfo> nal_units;
+};
+
+struct EncodedVideoSenderSnapshot {
+  std::string sender_state;
+  std::string codec;
+  bool has_pending_encoded_unit{false};
+  bool codec_config_seen{false};
+  bool ready_for_video_track{false};
+  uint64_t delivered_units{0};
+  uint64_t duplicate_units_skipped{0};
+  uint64_t last_delivered_sequence_id{0};
+  uint64_t last_delivered_timestamp_ns{0};
+  size_t last_delivered_size_bytes{0};
+  bool last_delivered_keyframe{false};
+  bool last_delivered_codec_config{false};
+  bool last_contains_sps{false};
+  bool last_contains_pps{false};
+  bool last_contains_idr{false};
+  bool last_contains_non_idr{false};
+};
 
 struct WebRtcMediaSourceSnapshot {
   std::string bridge_state;
@@ -28,18 +64,14 @@ struct WebRtcMediaSourceSnapshot {
   size_t latest_encoded_size_bytes{0};
   bool latest_encoded_keyframe{false};
   bool latest_encoded_codec_config{false};
+  EncodedVideoSenderSnapshot encoded_sender;
 };
 
 class IWebRtcMediaSourceBridge {
  public:
   virtual ~IWebRtcMediaSourceBridge() = default;
 
-  // Temporary path: raw transformed frames currently arrive here as immutable snapshots.
-  // Long-term path: the backend should prefer encoded media delivery instead of raw-frame transport.
   virtual void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame) = 0;
-
-  // Long-term path: encoded access units (notably H264) should become the primary media source for
-  // browser-native video delivery. This hook exists now so the bridge contract is format-agnostic.
   virtual void on_latest_encoded_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
   virtual std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit() const = 0;
 
@@ -54,6 +86,13 @@ struct WebRtcSessionSnapshot {
   std::string last_local_candidate;
   std::string peer_state;
   WebRtcMediaSourceSnapshot media_source;
+};
+
+class IEncodedVideoSender {
+ public:
+  virtual ~IEncodedVideoSender() = default;
+  virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
+  virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
 
 class WebRtcStreamSession {
@@ -85,11 +124,14 @@ class WebRtcStreamSession {
   mutable std::mutex mutex_;
   std::shared_ptr<rtc::PeerConnection> peer_connection_;
   std::unique_ptr<IWebRtcMediaSourceBridge> media_source_;
+  std::unique_ptr<IEncodedVideoSender> encoded_sender_;
   std::string offer_sdp_;
   std::string answer_sdp_;
   std::string last_remote_candidate_;
   std::string last_local_candidate_;
   std::string peer_state_{"new"};
 };
+
+H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit);
 
 }  // namespace video_server

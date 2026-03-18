@@ -2,9 +2,12 @@
 
 #include <gtest/gtest.h>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define CHECK_TRUE(expr) do { if (!(expr)) throw std::runtime_error(#expr); } while(false)
@@ -13,6 +16,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <rtc/peerconnection.hpp>
 
 #include "video_server/webrtc_video_server.h"
 
@@ -225,6 +230,31 @@ TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) {
   CHECK_TRUE(stream_info_resp.find("\"latest_encoded_codec\":\"H264\"") != std::string::npos);
   CHECK_TRUE(stream_info_resp.find("\"latest_encoded_timestamp_ns\":9999") != std::string::npos);
   CHECK_TRUE(stream_info_resp.find("\"latest_encoded_keyframe\":true") != std::string::npos);
+
+  rtc::Configuration rtc_config;
+  auto client = std::make_shared<rtc::PeerConnection>(rtc_config);
+  auto channel = client->createDataChannel("pipeline-test");
+  (void)channel;
+  std::string offer;
+  client->onLocalDescription([&offer](rtc::Description description) { offer = std::string(description); });
+  client->setLocalDescription(rtc::Description::Type::Offer);
+  for (int i = 0; i < 20 && offer.empty(); ++i) {
+    const auto description = client->localDescription();
+    if (description.has_value()) {
+      offer = std::string(*description);
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  CHECK_TRUE(!offer.empty());
+  const std::string offer_resp =
+      send_raw_request(host, port, http_request("POST", "/api/video/signaling/pipeline-stream/offer", offer));
+  CHECK_TRUE(offer_resp.find("200 OK") != std::string::npos);
+  const std::string session_resp =
+      send_raw_request(host, port, http_request("GET", "/api/video/signaling/pipeline-stream/session"));
+  CHECK_TRUE(session_resp.find("200 OK") != std::string::npos);
+  CHECK_TRUE(session_resp.find("\"preferred_media_path\":\"encoded-access-unit\"") != std::string::npos);
+  CHECK_TRUE(session_resp.find("\"encoded_sender_delivered_units\":1") != std::string::npos);
 
   server.stop();
 }

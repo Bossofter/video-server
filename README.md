@@ -7,7 +7,7 @@ Portable C++17 video streaming subsystem focused on a stable producer-facing API
 - Core reusable interfaces and types (`IVideoServer`, `VideoFrameView`, `EncodedAccessUnitView`, stream config/info types).
 - Core in-memory stream state management, latest-frame snapshots, latest encoded H264 access-unit snapshots, and stats updates.
 - Modular output/display transform stage with runtime display mode configuration and rotation/mirroring support.
-- WebRTC backend shell (`WebRtcVideoServer`) with lightweight HTTP/signaling control surface and a real encoded-media bridge path for H264 access units.
+- WebRTC backend shell (`WebRtcVideoServer`) with lightweight HTTP/signaling control surface, a real encoded-media bridge path for H264 access units, and a first session-side H264 sender architecture.
 - Internal synthetic frame generator for server-side validation without external producers.
 - CMake + vcpkg manifest + tests.
 

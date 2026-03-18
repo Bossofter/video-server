@@ -73,6 +73,7 @@ if(BUILD_TESTING)
     tests/test_video_types.cpp
     tests/test_pipeline.cpp
     tests/test_webrtc_http.cpp
+    tests/test_webrtc_stream.cpp
   )
 
   add_executable(video_server_tests ${TEST_SOURCES})
