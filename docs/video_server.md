@@ -70,7 +70,7 @@ These fields are intended for lightweight operational visibility and backend rea
 
 ## Backend-ready latest-frame access
 
-The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). This keeps transport/backend concerns separate while preparing the next step where WebRTC delivery consumes the latest transformed frame. The new HTTP frame endpoint is the first concrete backend consumer using this snapshot contract, and it establishes a reusable boundary for future WebRTC media and encoded access-unit delivery paths.
+The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). The HTTP frame endpoint uses this directly today, and the WebRTC backend now exposes an explicit media-source bridge abstraction that observes the same snapshot boundary for the upcoming real video sender path.
 
 ## WebRTC backend notes
 
@@ -78,10 +78,74 @@ The core exposes an internal getter (`get_latest_frame_for_stream`) that returns
 
 - core stream/state manager
 - transform stage
-- signaling state holder
+- signaling/session manager
 - HTTP API host
+- per-session WebRTC media-source bridge state
 
-The current implementation is intentionally lightweight and LAN-oriented, with explicit extension points for full libdatachannel peer connection wiring and encoded frame transport.
+### Current signaling/session architecture
+
+The signaling endpoints now create and manage **real libdatachannel `rtc::PeerConnection` objects** per stream-scoped session.
+
+Current mapping:
+
+- `POST /api/video/signaling/{stream_id}/offer`
+  - validates the stream exists
+  - creates a new backend WebRTC session for that stream
+  - applies the remote SDP offer to the backend peer connection
+  - triggers generation of the backend local description (answer)
+- `POST /api/video/signaling/{stream_id}/candidate`
+  - forwards the remote ICE candidate into the matching peer connection
+- `GET /api/video/signaling/{stream_id}/session`
+  - exposes the current backend session snapshot, including answer SDP, latest candidates, peer state, and media-bridge snapshot metadata
+- `POST /api/video/signaling/{stream_id}/answer`
+  - is retained for API stability and supports the reverse direction if the backend later originates offers
+
+A session is currently keyed by `stream_id`, and the signaling layer currently exposes a **single session slot per stream**. A new offer for the same stream replaces the previous slot and increments the reported `session_generation`. This keeps the current LAN-focused step explicit while making the present single-viewer limitation visible instead of implicit.
+
+### Current media-source bridge state
+
+This milestone keeps the backend media path honest: WebRTC **DataChannels are not used for video transport**. Instead, each active signaling session now owns an explicit media-source bridge abstraction that can observe temporary raw-frame snapshots today and future encoded H264 access units later.
+
+For each active signaling session, the backend now owns:
+
+- a real `rtc::PeerConnection`
+- a media-source bridge object tied to the stream id
+- raw-snapshot observation for current transformed-frame state
+- encoded-access-unit observation for the future H.264 sender path
+- bridge status (`media_bridge_state`, `preferred_media_path`, snapshot metadata, encoded access-unit metadata)
+
+Current bridge behavior:
+
+1. producer pushes raw frames through the unchanged producer API
+2. core transforms and publishes a new immutable latest-frame snapshot
+3. `push_frame()` forwards the latest immutable transformed frame snapshot into the bridge through `on_latest_frame(...)`
+4. `push_access_unit()` forwards encoded access-unit metadata into the bridge through `on_encoded_access_unit(...)`
+5. signaling/session inspection can report what raw or encoded source state is currently available to a future real sender path
+
+The current bridge state is intentionally explicit:
+
+- `awaiting-video-track-bridge` when only latest-frame snapshot state is available
+- `awaiting-h264-video-track-bridge` once encoded H.264 access units have been observed
+
+That makes the system’s status explicit: the backend now has real peer/session plumbing plus a real backend-side media source boundary, but it does **not** yet claim to deliver final video media over WebRTC.
+
+This leaves the next step well-defined: attach a real encoded/RTP video sender implementation to the bridge rather than replacing another temporary transport.
+
+### Threading and lifetime
+
+- Session inspection queries the media-source bridge for latest snapshot metadata without mutating shared frame state.
+- Replacing a stream session on a new offer cleanly stops the old peer connection and bridge state object.
+- Removing a stream or stopping the server also closes all session peer connections and releases bridge state objects.
+
+### What remains for later steps
+
+Not yet implemented:
+
+- RTP video-track delivery from encoded frames
+- H.264 packetization / RTCP feedback handling for a real video sender track
+- wiring the current bridge to an actual encoded/video media sender
+- multi-session addressing beyond the current stream-keyed session model
+- richer signaling payloads / structured JSON bodies
 
 ## HTTP API
 
@@ -96,6 +160,28 @@ Implemented endpoints:
 - `POST /api/video/signaling/{stream_id}/answer`
 - `POST /api/video/signaling/{stream_id}/candidate`
 - `GET /api/video/signaling/{stream_id}/session`
+
+Current session payload fields include:
+
+- `session_generation`
+- `offer_sdp`
+- `answer_sdp`
+- `last_remote_candidate`
+- `last_local_candidate`
+- `peer_state`
+- `media_bridge_state`
+- `preferred_media_path`
+- `latest_snapshot_available`
+- `latest_snapshot_frame_id`
+- `latest_snapshot_timestamp_ns`
+- `latest_snapshot_width`
+- `latest_snapshot_height`
+- `latest_encoded_access_unit_available`
+- `latest_encoded_codec`
+- `latest_encoded_timestamp_ns`
+- `latest_encoded_size_bytes`
+- `latest_encoded_keyframe`
+- `latest_encoded_codec_config`
 
 Output-config JSON fields:
 `display_mode`, `mirrored`, `rotation_degrees`, `palette_min`, `palette_max`.
@@ -120,13 +206,13 @@ PPM was chosen for this milestone because the core already stores transformed ou
 
 ## LAN-only assumptions
 
-This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple.
+This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple. The current WebRTC work is optimized for that environment: a single stream-scoped session, lightweight candidate forwarding, and an explicit media-source bridge that is ready to be connected to a real video sender implementation. DataChannels are not the intended video path.
 
 ## Future encoded H.264 path
 
 `push_access_unit` and `EncodedAccessUnitView` are already part of the core interface, so producers can later provide direct H.264 access units without breaking API shape.
 
-The internal latest-frame storage introduced for raw frame ingestion does not block encoded ingestion. Encoded path work can be added in parallel and later integrated with transport selection policy.
+The media bridge now observes both latest transformed frames and, when present, encoded access-unit metadata. That keeps the raw-frame path and the future encoded H.264 path structurally separate while making it obvious how a real browser-native sender can prefer encoded input once that transport step lands.
 
 ## Synthetic generation path
 
