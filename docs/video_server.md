@@ -144,15 +144,34 @@ Dependencies are kept minimal and explicit to simplify long-term portability wor
 
 ## Build
 
-Use vcpkg manifest mode and CMake options:
+Supported flow (repo root):
+
+```bash
+export VCPKG_ROOT=/path/to/vcpkg
+./build.sh
+./test.sh
+```
+
+`build.sh` explicitly configures with:
 
 ```bash
 cmake -S . -B build \
-  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
-  -DVCPKG_TARGET_TRIPLET=x64-linux \
+  -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
   -DENABLE_VIDEO_SERVER=ON \
   -DENABLE_WEBRTC_BACKEND=ON \
   -DBUILD_TESTING=ON
+```
+
+Then runs:
+
+```bash
 cmake --build build -j
+```
+
+`test.sh` runs:
+
+```bash
 ctest --test-dir build --output-on-failure
 ```
+
+If `build/` is missing, `test.sh` calls `build.sh` first.
