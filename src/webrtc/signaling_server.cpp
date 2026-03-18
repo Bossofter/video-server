@@ -89,9 +89,7 @@ std::optional<SignalingSession> SignalingServer::get_session(const std::string& 
                           snapshot.last_remote_candidate,
                           snapshot.last_local_candidate,
                           snapshot.peer_state,
-                          snapshot.data_channel_open,
-                          snapshot.frames_sent,
-                          snapshot.last_frame_id};
+                          snapshot.media_source};
 }
 
 void SignalingServer::remove_stream(const std::string& stream_id) {

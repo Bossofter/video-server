@@ -21,9 +21,7 @@ struct SignalingSession {
   std::string last_remote_candidate;
   std::string last_local_candidate;
   std::string peer_state;
-  bool data_channel_open{false};
-  uint64_t frames_sent{0};
-  uint64_t last_frame_id{0};
+  WebRtcMediaSourceSnapshot media_source;
 };
 
 class SignalingServer {

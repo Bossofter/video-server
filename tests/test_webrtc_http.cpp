@@ -109,21 +109,6 @@ uint64_t json_uint_field(const std::string& json, const std::string& key) {
   return std::stoull(json.substr(pos, end - pos));
 }
 
-bool json_bool_field(const std::string& json, const std::string& key) {
-  const std::string needle = "\"" + key + "\":";
-  const auto start = json.find(needle);
-  assert(start != std::string::npos);
-  const auto value_start = start + needle.size();
-  if (json.compare(value_start, 4, "true") == 0) {
-    return true;
-  }
-  if (json.compare(value_start, 5, "false") == 0) {
-    return false;
-  }
-  assert(false);
-  return false;
-}
-
 template <typename Predicate>
 bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -287,10 +272,15 @@ int test_webrtc_http() {
 
   std::mutex callback_mutex;
   std::string local_offer_sdp;
+  std::vector<std::string> client_candidates;
 
   client->onLocalDescription([&](rtc::Description description) {
     std::lock_guard<std::mutex> lock(callback_mutex);
     local_offer_sdp = std::string(description);
+  });
+  client->onLocalCandidate([&](rtc::Candidate candidate) {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    client_candidates.push_back(std::string(candidate));
   });
   client->setLocalDescription(rtc::Description::Type::Offer);
 
@@ -328,7 +318,27 @@ int test_webrtc_http() {
   }));
 
   assert(session_json.find("peer_state") != std::string::npos);
-  assert(session_json.find("frames_sent") != std::string::npos);
+  assert(session_json.find("media_bridge_state") != std::string::npos);
+
+  std::string client_candidate;
+  wait_until([&]() {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    if (client_candidates.empty()) {
+      return false;
+    }
+    client_candidate = client_candidates.front();
+    return true;
+  });
+
+  bool remote_candidate_recorded = false;
+  if (!client_candidate.empty()) {
+    const auto candidate_response =
+        server.handle_http_request_for_test("POST", "/api/video/signaling/stream-1/candidate", client_candidate);
+    assert(candidate_response.status == 200);
+    const auto session_after_candidate = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
+    assert(session_after_candidate.status == 200);
+    remote_candidate_recorded = !json_string_field(session_after_candidate.body, "last_remote_candidate").empty();
+  }
 
   std::vector<uint8_t> webrtc_frame(cfg.width * cfg.height, 200);
   frame_view.data = webrtc_frame.data();
@@ -344,9 +354,15 @@ int test_webrtc_http() {
 
   const auto session_after_updates = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
   assert(session_after_updates.status == 200);
-  assert(json_uint_field(session_after_updates.body, "frames_sent") == 0);
-  assert(json_uint_field(session_after_updates.body, "last_frame_id") == 0);
   assert(!json_string_field(session_after_updates.body, "answer_sdp").empty());
+  assert(json_string_field(session_after_updates.body, "media_bridge_state") == "awaiting-encoded-video-bridge");
+  if (remote_candidate_recorded) {
+    assert(!json_string_field(session_after_updates.body, "last_remote_candidate").empty());
+  }
+  assert(json_uint_field(session_after_updates.body, "latest_snapshot_frame_id") == frame_view.frame_id);
+  assert(json_uint_field(session_after_updates.body, "latest_snapshot_timestamp_ns") == frame_view.timestamp_ns);
+  assert(json_uint_field(session_after_updates.body, "latest_snapshot_width") == cfg.width);
+  assert(json_uint_field(session_after_updates.body, "latest_snapshot_height") == cfg.height);
 
   assert(server.remove_stream(cfg.stream_id));
   const auto removed_session = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");

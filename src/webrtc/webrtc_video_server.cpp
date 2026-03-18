@@ -389,9 +389,13 @@ class WebRtcVideoServer::Impl {
             << "\"last_remote_candidate\":\"" << json_escape(session->last_remote_candidate) << "\","
             << "\"last_local_candidate\":\"" << json_escape(session->last_local_candidate) << "\","
             << "\"peer_state\":\"" << json_escape(session->peer_state) << "\","
-            << "\"data_channel_open\":" << bool_to_json(session->data_channel_open) << ','
-            << "\"frames_sent\":" << session->frames_sent << ','
-            << "\"last_frame_id\":" << session->last_frame_id << '}';
+            << "\"media_bridge_state\":\"" << json_escape(session->media_source.bridge_state) << "\","
+            << "\"latest_snapshot_available\":" << bool_to_json(session->media_source.latest_snapshot_available)
+            << ','
+            << "\"latest_snapshot_frame_id\":" << session->media_source.latest_snapshot_frame_id << ','
+            << "\"latest_snapshot_timestamp_ns\":" << session->media_source.latest_snapshot_timestamp_ns << ','
+            << "\"latest_snapshot_width\":" << session->media_source.latest_snapshot_width << ','
+            << "\"latest_snapshot_height\":" << session->media_source.latest_snapshot_height << '}';
         return HttpResponse{200, out.str(), "application/json"};
       }
     }
