@@ -100,7 +100,7 @@ Current mapping:
 - `POST /api/video/signaling/{stream_id}/answer`
   - is retained for API stability and supports the reverse direction if the backend later originates offers
 
-A session is currently keyed by `stream_id`, which keeps the first LAN-focused backend step simple while still making the stream/session relationship explicit.
+A session is currently keyed by `stream_id`, and the signaling layer currently exposes a **single session slot per stream**. A new offer for the same stream replaces the previous slot and increments the reported `session_generation`. This keeps the current LAN-focused step explicit while making the present single-viewer limitation visible instead of implicit.
 
 ### Current media-source bridge state
 
@@ -155,6 +155,7 @@ Implemented endpoints:
 
 Current session payload fields include:
 
+- `session_generation`
 - `offer_sdp`
 - `answer_sdp`
 - `last_remote_candidate`

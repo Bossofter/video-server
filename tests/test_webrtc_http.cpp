@@ -319,14 +319,53 @@ int test_webrtc_http() {
 
   assert(session_json.find("peer_state") != std::string::npos);
   assert(session_json.find("media_bridge_state") != std::string::npos);
+  const uint64_t first_generation = json_uint_field(session_json, "session_generation");
+  assert(first_generation >= 1);
+
+  auto replacement_client = std::make_shared<rtc::PeerConnection>(rtc_config);
+  auto replacement_bootstrap_channel = replacement_client->createDataChannel("bootstrap-replacement");
+  (void)replacement_bootstrap_channel;
+  std::string replacement_offer_sdp;
+  std::vector<std::string> replacement_candidates;
+  replacement_client->onLocalDescription([&](rtc::Description description) {
+    replacement_offer_sdp = std::string(description);
+  });
+  replacement_client->onLocalCandidate([&](rtc::Candidate candidate) {
+    replacement_candidates.push_back(std::string(candidate));
+  });
+  replacement_client->setLocalDescription(rtc::Description::Type::Offer);
+  assert(wait_until([&]() {
+    if (!replacement_offer_sdp.empty()) {
+      return true;
+    }
+    const auto description = replacement_client->localDescription();
+    if (!description.has_value()) {
+      return false;
+    }
+    replacement_offer_sdp = std::string(*description);
+    return true;
+  }));
+
+  const auto replacement_offer_response =
+      server.handle_http_request_for_test("POST", "/api/video/signaling/stream-1/offer", replacement_offer_sdp);
+  assert(replacement_offer_response.status == 200);
+  assert(wait_until([&]() {
+    const auto response = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
+    if (response.status != 200) {
+      return false;
+    }
+    session_json = response.body;
+    return json_uint_field(session_json, "session_generation") > first_generation &&
+           json_string_field(session_json, "offer_sdp") == replacement_offer_sdp;
+  }));
+
 
   std::string client_candidate;
   wait_until([&]() {
-    std::lock_guard<std::mutex> lock(callback_mutex);
-    if (client_candidates.empty()) {
+    if (replacement_candidates.empty()) {
       return false;
     }
-    client_candidate = client_candidates.front();
+    client_candidate = replacement_candidates.front();
     return true;
   });
 
@@ -352,9 +391,11 @@ int test_webrtc_http() {
     assert(server.push_frame(cfg.stream_id, frame_view));
   }
 
-  const auto session_after_updates = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
-  assert(session_after_updates.status == 200);
-  assert(!json_string_field(session_after_updates.body, "answer_sdp").empty());
+  video_server::WebRtcHttpResponse session_after_updates{};
+  assert(wait_until([&]() {
+    session_after_updates = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
+    return session_after_updates.status == 200 && !json_string_field(session_after_updates.body, "answer_sdp").empty();
+  }));
   assert(json_string_field(session_after_updates.body, "media_bridge_state") == "awaiting-encoded-video-bridge");
   if (remote_candidate_recorded) {
     assert(!json_string_field(session_after_updates.body, "last_remote_candidate").empty());

@@ -383,7 +383,8 @@ class WebRtcVideoServer::Impl {
           return json_error(404, "session not found");
         }
         std::ostringstream out;
-        out << "{\"stream_id\":\"" << json_escape(session->stream_id) << "\","
+        out << "{\"session_generation\":" << session->session_generation << ','
+            << "\"stream_id\":\"" << json_escape(session->stream_id) << "\","
             << "\"offer_sdp\":\"" << json_escape(session->offer_sdp) << "\","
             << "\"answer_sdp\":\"" << json_escape(session->answer_sdp) << "\","
             << "\"last_remote_candidate\":\"" << json_escape(session->last_remote_candidate) << "\","

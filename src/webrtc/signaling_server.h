@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -15,6 +16,7 @@ using StreamExistsFn = std::function<bool(const std::string&)>;
 using LatestFrameGetterFn = WebRtcStreamSession::LatestFrameGetter;
 
 struct SignalingSession {
+  uint64_t session_generation{0};
   std::string stream_id;
   std::string offer_sdp;
   std::string answer_sdp;
@@ -38,11 +40,16 @@ class SignalingServer {
   void stop();
 
  private:
+  struct StreamSessionSlot {
+    uint64_t session_generation{0};
+    std::shared_ptr<WebRtcStreamSession> session;
+  };
+
   StreamExistsFn stream_exists_;
   LatestFrameGetterFn latest_frame_getter_;
 
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, std::shared_ptr<WebRtcStreamSession>> sessions_;
+  std::unordered_map<std::string, StreamSessionSlot> sessions_;
 };
 
 }  // namespace video_server
