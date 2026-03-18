@@ -70,7 +70,7 @@ These fields are intended for lightweight operational visibility and backend rea
 
 ## Backend-ready latest-frame access
 
-The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). This keeps transport/backend concerns separate while preparing the next step where WebRTC delivery consumes the latest transformed frame. The new HTTP frame endpoint is the first concrete backend consumer using this snapshot contract, and it establishes a reusable boundary for future WebRTC media and encoded access-unit delivery paths.
+The core exposes an internal getter (`get_latest_frame_for_stream`) that returns an immutable `std::shared_ptr<const LatestFrame>` snapshot when available. This avoids copying full frame buffers on read while giving clear lifetime semantics for backend consumers (older snapshots remain valid after newer frames are published). The same snapshot boundary is now consumed by both the HTTP frame endpoint and the first real WebRTC delivery loop.
 
 ## WebRTC backend notes
 
@@ -78,10 +78,69 @@ The core exposes an internal getter (`get_latest_frame_for_stream`) that returns
 
 - core stream/state manager
 - transform stage
-- signaling state holder
+- signaling/session manager
 - HTTP API host
+- per-session WebRTC transport workers
 
-The current implementation is intentionally lightweight and LAN-oriented, with explicit extension points for full libdatachannel peer connection wiring and encoded frame transport.
+### Current signaling/session architecture
+
+The signaling endpoints now create and manage **real libdatachannel `rtc::PeerConnection` objects** per stream-scoped session.
+
+Current mapping:
+
+- `POST /api/video/signaling/{stream_id}/offer`
+  - validates the stream exists
+  - creates a new backend WebRTC session for that stream
+  - applies the remote SDP offer to the backend peer connection
+  - triggers generation of the backend local description (answer)
+- `POST /api/video/signaling/{stream_id}/candidate`
+  - forwards the remote ICE candidate into the matching peer connection
+- `GET /api/video/signaling/{stream_id}/session`
+  - exposes the current backend session snapshot, including answer SDP, latest candidates, peer state, channel state, and delivery counters
+- `POST /api/video/signaling/{stream_id}/answer`
+  - is retained for API stability and supports the reverse direction if the backend later originates offers
+
+A session is currently keyed by `stream_id`, which keeps the first LAN-focused backend step simple while still making the stream/session relationship explicit.
+
+### Current media-delivery path
+
+This milestone makes the backend media path real by using the immutable latest-frame snapshots as the WebRTC source.
+
+For each active signaling session, the backend now owns:
+
+- a real `rtc::PeerConnection`
+- a `video-snapshots` WebRTC data channel
+- a delivery thread that periodically checks `get_latest_frame_for_stream(stream_id)`
+- per-session delivery counters (`frames_sent`, `last_frame_id`)
+
+Delivery flow:
+
+1. producer pushes raw frames through the unchanged producer API
+2. core transforms and publishes a new immutable latest-frame snapshot
+3. the per-session WebRTC delivery loop reads the snapshot without mutating shared state
+4. when a new frame id appears and the data channel is open, the backend encodes the snapshot as PPM
+5. the backend sends:
+   - a JSON metadata message (`type=latest-frame`, stream/frame/timestamp/dimensions/content-type)
+   - followed by the binary PPM payload over the same WebRTC connection
+
+This is intentionally a **snapshot-driven WebRTC bridge**, not yet the final RTP video track path. It is nevertheless a real backend delivery path: signaling now drives actual peer connections, and latest transformed frames now leave the backend over WebRTC instead of only through HTTP.
+
+### Threading and lifetime
+
+- Each stream session owns its own delivery thread.
+- The delivery thread only grabs lightweight session state under lock, then fetches and encodes the immutable latest-frame snapshot outside long critical sections.
+- Replacing a stream session on a new offer cleanly stops the old peer connection and worker thread.
+- Removing a stream or stopping the server also stops and joins all session workers.
+
+### What remains for later steps
+
+Not yet implemented:
+
+- RTP video-track delivery from encoded frames
+- H.264 packetization / RTCP feedback handling for a real video sender track
+- multi-session addressing beyond the current stream-keyed session model
+- richer signaling payloads / structured JSON bodies
+- transport selection between raw-snapshot fallback and final encoded real-time media
 
 ## HTTP API
 
@@ -96,6 +155,17 @@ Implemented endpoints:
 - `POST /api/video/signaling/{stream_id}/answer`
 - `POST /api/video/signaling/{stream_id}/candidate`
 - `GET /api/video/signaling/{stream_id}/session`
+
+Current session payload fields include:
+
+- `offer_sdp`
+- `answer_sdp`
+- `last_remote_candidate`
+- `last_local_candidate`
+- `peer_state`
+- `data_channel_open`
+- `frames_sent`
+- `last_frame_id`
 
 Output-config JSON fields:
 `display_mode`, `mirrored`, `rotation_degrees`, `palette_min`, `palette_max`.
@@ -120,7 +190,7 @@ PPM was chosen for this milestone because the core already stores transformed ou
 
 ## LAN-only assumptions
 
-This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple.
+This subsystem currently assumes peers on the same local network and keeps signaling/control intentionally simple. The current WebRTC delivery path is optimized for that environment: a single stream-scoped session, lightweight candidate forwarding, and snapshot delivery over a WebRTC data channel.
 
 ## Future encoded H.264 path
 

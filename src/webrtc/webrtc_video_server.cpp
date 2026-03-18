@@ -201,6 +201,8 @@ class WebRtcVideoServer::Impl {
  public:
   explicit Impl(WebRtcVideoServerConfig config)
       : config_(std::move(config)),
+        signaling_([this](const std::string& stream_id) { return core_.get_stream_info(stream_id).has_value(); },
+                   [this](const std::string& stream_id) { return core_.get_latest_frame_for_stream(stream_id); }),
         http_server_(std::make_unique<HttpApiServer>(config_.http_host, config_.http_port)) {}
 
   bool start() {
@@ -211,6 +213,7 @@ class WebRtcVideoServer::Impl {
   }
 
   void stop() {
+    signaling_.stop();
     if (http_server_) {
       http_server_->stop();
     }
@@ -354,15 +357,24 @@ class WebRtcVideoServer::Impl {
       const std::string action = slash == std::string::npos ? "offer" : tail.substr(slash + 1);
 
       if (request.method == "POST" && action == "offer") {
-        signaling_.set_offer(stream_id, request.body);
+        std::string error_message;
+        if (!signaling_.set_offer(stream_id, request.body, &error_message)) {
+          return json_error(error_message == "stream not found" ? 404 : 400, error_message.c_str());
+        }
         return HttpResponse{200, "{\"ok\":true}", "application/json"};
       }
       if (request.method == "POST" && action == "answer") {
-        signaling_.set_answer(stream_id, request.body);
+        std::string error_message;
+        if (!signaling_.set_answer(stream_id, request.body, &error_message)) {
+          return json_error(error_message == "session not found" ? 404 : 400, error_message.c_str());
+        }
         return HttpResponse{200, "{\"ok\":true}", "application/json"};
       }
       if (request.method == "POST" && action == "candidate") {
-        signaling_.add_ice_candidate(stream_id, request.body);
+        std::string error_message;
+        if (!signaling_.add_ice_candidate(stream_id, request.body, &error_message)) {
+          return json_error(error_message == "session not found" ? 404 : 400, error_message.c_str());
+        }
         return HttpResponse{200, "{\"ok\":true}", "application/json"};
       }
       if (request.method == "GET" && action == "session") {
@@ -374,7 +386,12 @@ class WebRtcVideoServer::Impl {
         out << "{\"stream_id\":\"" << json_escape(session->stream_id) << "\","
             << "\"offer_sdp\":\"" << json_escape(session->offer_sdp) << "\","
             << "\"answer_sdp\":\"" << json_escape(session->answer_sdp) << "\","
-            << "\"last_ice_candidate\":\"" << json_escape(session->last_ice_candidate) << "\"}";
+            << "\"last_remote_candidate\":\"" << json_escape(session->last_remote_candidate) << "\","
+            << "\"last_local_candidate\":\"" << json_escape(session->last_local_candidate) << "\","
+            << "\"peer_state\":\"" << json_escape(session->peer_state) << "\","
+            << "\"data_channel_open\":" << bool_to_json(session->data_channel_open) << ','
+            << "\"frames_sent\":" << session->frames_sent << ','
+            << "\"last_frame_id\":" << session->last_frame_id << '}';
         return HttpResponse{200, out.str(), "application/json"};
       }
     }
@@ -396,7 +413,10 @@ void WebRtcVideoServer::stop() { impl_->stop(); }
 
 bool WebRtcVideoServer::register_stream(const StreamConfig& config) { return impl_->core_.register_stream(config); }
 
-bool WebRtcVideoServer::remove_stream(const std::string& stream_id) { return impl_->core_.remove_stream(stream_id); }
+bool WebRtcVideoServer::remove_stream(const std::string& stream_id) {
+  impl_->signaling_.remove_stream(stream_id);
+  return impl_->core_.remove_stream(stream_id);
+}
 
 bool WebRtcVideoServer::push_frame(const std::string& stream_id, const VideoFrameView& frame) {
   return impl_->core_.push_frame(stream_id, frame);

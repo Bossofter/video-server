@@ -1,5 +1,7 @@
 #include <cassert>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -10,6 +12,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <rtc/description.hpp>
+#include <rtc/peerconnection.hpp>
 
 #include "video_server/webrtc_video_server.h"
 
@@ -80,6 +85,55 @@ void assert_ppm_payload(const std::string& body, uint32_t width, uint32_t height
 void assert_json_response_headers(const std::string& response) {
   assert(response.find("Content-Type: application/json") != std::string::npos);
   assert(response.find("Content-Length:") != std::string::npos);
+}
+
+std::string json_string_field(const std::string& json, const std::string& key) {
+  const std::string needle = "\"" + key + "\":\"";
+  const auto start = json.find(needle);
+  assert(start != std::string::npos);
+  const auto value_start = start + needle.size();
+  const auto end = json.find('"', value_start);
+  assert(end != std::string::npos);
+  return json.substr(value_start, end - value_start);
+}
+
+uint64_t json_uint_field(const std::string& json, const std::string& key) {
+  const std::string needle = "\"" + key + "\":";
+  const auto start = json.find(needle);
+  assert(start != std::string::npos);
+  size_t pos = start + needle.size();
+  size_t end = pos;
+  while (end < json.size() && json[end] >= '0' && json[end] <= '9') {
+    ++end;
+  }
+  return std::stoull(json.substr(pos, end - pos));
+}
+
+bool json_bool_field(const std::string& json, const std::string& key) {
+  const std::string needle = "\"" + key + "\":";
+  const auto start = json.find(needle);
+  assert(start != std::string::npos);
+  const auto value_start = start + needle.size();
+  if (json.compare(value_start, 4, "true") == 0) {
+    return true;
+  }
+  if (json.compare(value_start, 5, "false") == 0) {
+    return false;
+  }
+  assert(false);
+  return false;
+}
+
+template <typename Predicate>
+bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+  }
+  return predicate();
 }
 
 }  // namespace
@@ -226,9 +280,77 @@ int test_webrtc_http() {
   assert(stream_with_latest.find("latest_frame_pixel_format") != std::string::npos);
   assert(stream_with_latest.find("\"latest_frame_pixel_format\":\"RGB24\"") != std::string::npos);
 
-  const std::string offer_resp =
-      send_raw_request(host, port, http_request("POST", "/api/video/signaling/stream-1/offer", "offer-sdp"));
-  assert(offer_resp.find("200 OK") != std::string::npos);
+  rtc::Configuration rtc_config;
+  auto client = std::make_shared<rtc::PeerConnection>(rtc_config);
+  auto bootstrap_channel = client->createDataChannel("bootstrap");
+  (void)bootstrap_channel;
+
+  std::mutex callback_mutex;
+  std::string local_offer_sdp;
+
+  client->onLocalDescription([&](rtc::Description description) {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    local_offer_sdp = std::string(description);
+  });
+  client->setLocalDescription(rtc::Description::Type::Offer);
+
+  assert(wait_until([&]() {
+    {
+      std::lock_guard<std::mutex> lock(callback_mutex);
+      if (!local_offer_sdp.empty()) {
+        return true;
+      }
+    }
+    const auto description = client->localDescription();
+    if (!description.has_value()) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    local_offer_sdp = std::string(*description);
+    return true;
+  }));
+
+  const auto offer_response =
+      ([&]() {
+        std::lock_guard<std::mutex> lock(callback_mutex);
+        return server.handle_http_request_for_test("POST", "/api/video/signaling/stream-1/offer", local_offer_sdp);
+      })();
+  assert(offer_response.status == 200);
+
+  std::string session_json;
+  assert(wait_until([&]() {
+    const auto response = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
+    if (response.status != 200) {
+      return false;
+    }
+    session_json = response.body;
+    return !json_string_field(session_json, "answer_sdp").empty();
+  }));
+
+  assert(session_json.find("peer_state") != std::string::npos);
+  assert(session_json.find("frames_sent") != std::string::npos);
+
+  std::vector<uint8_t> webrtc_frame(cfg.width * cfg.height, 200);
+  frame_view.data = webrtc_frame.data();
+  frame_view.timestamp_ns = 9999;
+  frame_view.frame_id = 777;
+  assert(server.push_frame(cfg.stream_id, frame_view));
+
+  for (int i = 0; i < 8; ++i) {
+    frame_view.timestamp_ns += 1;
+    frame_view.frame_id += 1;
+    assert(server.push_frame(cfg.stream_id, frame_view));
+  }
+
+  const auto session_after_updates = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
+  assert(session_after_updates.status == 200);
+  assert(json_uint_field(session_after_updates.body, "frames_sent") == 0);
+  assert(json_uint_field(session_after_updates.body, "last_frame_id") == 0);
+  assert(!json_string_field(session_after_updates.body, "answer_sdp").empty());
+
+  assert(server.remove_stream(cfg.stream_id));
+  const auto removed_session = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
+  assert(removed_session.status == 404);
 
   server.stop();
   return 0;
