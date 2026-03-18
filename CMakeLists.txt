@@ -64,6 +64,7 @@ endif()
 
 if(BUILD_TESTING)
   include(CTest)
+  find_package(GTest CONFIG REQUIRED)
   set(TEST_SOURCES
     tests/test_main.cpp
     tests/test_core.cpp
@@ -82,6 +83,7 @@ if(BUILD_TESTING)
   )
 
   target_compile_definitions(video_server_tests PRIVATE VIDEO_SERVER_TEST_WEBRTC=$<BOOL:${ENABLE_WEBRTC_BACKEND}>)
+  target_link_libraries(video_server_tests PRIVATE GTest::gtest)
 
   if(ENABLE_WEBRTC_BACKEND)
     target_link_libraries(video_server_tests PRIVATE video_server_webrtc)
@@ -89,5 +91,7 @@ if(BUILD_TESTING)
     target_link_libraries(video_server_tests PRIVATE video_server_core)
   endif()
 
+  include(GoogleTest)
+  gtest_discover_tests(video_server_tests)
   add_test(NAME video_server_tests COMMAND video_server_tests)
 endif()

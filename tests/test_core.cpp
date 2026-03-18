@@ -1,6 +1,7 @@
-#include <cassert>
 #include <cstdint>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "video_server/stream_config.h"
 #include "video_server/video_frame_view.h"
@@ -15,97 +16,92 @@ video_server::VideoFrameView make_gray_frame(const std::vector<uint8_t>& data, u
                                       timestamp_ns, frame_id};
 }
 
-}  // namespace
-
-int test_core() {
+TEST(VideoServerCoreTest, ManagesFramesAndEncodedUnits) {
   video_server::VideoServerCore server;
 
   video_server::StreamConfig cfg{"stream-a", "primary", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8};
-  assert(server.register_stream(cfg));
-  assert(!server.register_stream(cfg));
+  EXPECT_TRUE(server.register_stream(cfg));
+  EXPECT_FALSE(server.register_stream(cfg));
 
   auto info = server.get_stream_info(cfg.stream_id);
-  assert(info.has_value());
-  assert(!info->has_latest_frame);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_FALSE(info->has_latest_frame);
 
   std::vector<uint8_t> frame_data = {10, 20, 30, 40};
   auto frame = make_gray_frame(frame_data, cfg.width, cfg.height, 100, 1);
-  assert(server.push_frame(cfg.stream_id, frame));
+  EXPECT_TRUE(server.push_frame(cfg.stream_id, frame));
 
   info = server.get_stream_info(cfg.stream_id);
-  assert(info.has_value());
-  assert(info->frames_received == 1);
-  assert(info->frames_transformed == 1);
-  assert(info->frames_dropped == 0);
-  assert(info->last_input_timestamp_ns == 100);
-  assert(info->last_output_timestamp_ns == 100);
-  assert(info->last_frame_id == 1);
-  assert(info->has_latest_frame);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->frames_received, 1);
+  EXPECT_EQ(info->frames_transformed, 1);
+  EXPECT_EQ(info->frames_dropped, 0);
+  EXPECT_EQ(info->last_input_timestamp_ns, 100);
+  EXPECT_EQ(info->last_output_timestamp_ns, 100);
+  EXPECT_EQ(info->last_frame_id, 1);
+  EXPECT_TRUE(info->has_latest_frame);
 
   auto latest = server.get_latest_frame_for_stream(cfg.stream_id);
-  assert(latest != nullptr);
-  assert(latest->valid);
-  assert(latest->pixel_format == video_server::VideoPixelFormat::RGB24);
-  assert(latest->width == 2);
-  assert(latest->height == 2);
-  assert(latest->timestamp_ns == 100);
-  assert(latest->frame_id == 1);
-  assert(latest->bytes.size() == 12);
+  ASSERT_NE(latest, nullptr);
+  EXPECT_TRUE(latest->valid);
+  EXPECT_EQ(latest->pixel_format, video_server::VideoPixelFormat::RGB24);
+  EXPECT_EQ(latest->width, 2);
+  EXPECT_EQ(latest->height, 2);
+  EXPECT_EQ(latest->timestamp_ns, 100);
+  EXPECT_EQ(latest->frame_id, 1);
+  ASSERT_EQ(latest->bytes.size(), 12u);
+  EXPECT_EQ(latest->bytes[0], 10);
+  EXPECT_EQ(latest->bytes[1], 10);
+  EXPECT_EQ(latest->bytes[2], 10);
+  EXPECT_EQ(latest->bytes[9], 40);
+  EXPECT_EQ(latest->bytes[10], 40);
+  EXPECT_EQ(latest->bytes[11], 40);
 
-  // Passthrough for GRAY8 produces RGB triplets with equal channels.
-  assert(latest->bytes[0] == 10 && latest->bytes[1] == 10 && latest->bytes[2] == 10);
-  assert(latest->bytes[9] == 40 && latest->bytes[10] == 40 && latest->bytes[11] == 40);
-
-  // Snapshot access should not copy: multiple gets without publish return same object.
   auto latest_again = server.get_latest_frame_for_stream(cfg.stream_id);
-  assert(latest_again != nullptr);
-  assert(latest_again.get() == latest.get());
+  ASSERT_NE(latest_again, nullptr);
+  EXPECT_EQ(latest_again.get(), latest.get());
 
   video_server::StreamOutputConfig out_cfg;
   out_cfg.display_mode = video_server::VideoDisplayMode::Rainbow;
   out_cfg.rotation_degrees = 90;
   out_cfg.mirrored = true;
-  assert(server.set_stream_output_config(cfg.stream_id, out_cfg));
+  EXPECT_TRUE(server.set_stream_output_config(cfg.stream_id, out_cfg));
 
   std::vector<uint8_t> frame_data_2 = {0, 64, 128, 255};
   auto frame2 = make_gray_frame(frame_data_2, cfg.width, cfg.height, 200, 2);
-  assert(server.push_frame(cfg.stream_id, frame2));
+  EXPECT_TRUE(server.push_frame(cfg.stream_id, frame2));
 
   auto newest = server.get_latest_frame_for_stream(cfg.stream_id);
-  assert(newest != nullptr);
-  assert(newest->frame_id == 2);
-  assert(newest->timestamp_ns == 200);
-  assert(newest->width == 2);
-  assert(newest->height == 2);
-  // Rainbow mapping for grayscale should produce colored output for mid values.
-  assert(!(newest->bytes[3] == newest->bytes[4] && newest->bytes[4] == newest->bytes[5]));
+  ASSERT_NE(newest, nullptr);
+  EXPECT_EQ(newest->frame_id, 2);
+  EXPECT_EQ(newest->timestamp_ns, 200);
+  EXPECT_EQ(newest->width, 2);
+  EXPECT_EQ(newest->height, 2);
+  EXPECT_FALSE(newest->bytes[3] == newest->bytes[4] && newest->bytes[4] == newest->bytes[5]);
 
-  // Previously retrieved snapshot remains valid after a newer publish.
-  assert(latest->frame_id == 1);
-  assert(latest->timestamp_ns == 100);
-  assert(latest->bytes[0] == 10);
-  assert(latest.get() != newest.get());
+  EXPECT_EQ(latest->frame_id, 1);
+  EXPECT_EQ(latest->timestamp_ns, 100);
+  EXPECT_EQ(latest->bytes[0], 10);
+  EXPECT_NE(latest.get(), newest.get());
 
   info = server.get_stream_info(cfg.stream_id);
-  assert(info.has_value());
-  assert(info->frames_received == 2);
-  assert(info->frames_transformed == 2);
-  assert(info->frames_dropped == 0);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->frames_received, 2);
+  EXPECT_EQ(info->frames_transformed, 2);
+  EXPECT_EQ(info->frames_dropped, 0);
 
-  // Invalid stream path fails cleanly.
-  assert(!server.push_frame("missing", frame));
-  assert(server.get_latest_frame_for_stream("missing") == nullptr);
+  EXPECT_FALSE(server.push_frame("missing", frame));
+  EXPECT_EQ(server.get_latest_frame_for_stream("missing"), nullptr);
 
-  // Invalid shape increments dropped counter and keeps latest frame unchanged.
   std::vector<uint8_t> bad_data = {1, 2, 3};
   auto bad_frame = make_gray_frame(bad_data, 3, 1, 300, 3);
-  assert(!server.push_frame(cfg.stream_id, bad_frame));
+  EXPECT_FALSE(server.push_frame(cfg.stream_id, bad_frame));
   info = server.get_stream_info(cfg.stream_id);
-  assert(info.has_value());
-  assert(info->frames_dropped == 1);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->frames_dropped, 1);
   newest = server.get_latest_frame_for_stream(cfg.stream_id);
-  assert(newest != nullptr);
-  assert(newest->frame_id == 2);
+  ASSERT_NE(newest, nullptr);
+  EXPECT_EQ(newest->frame_id, 2);
 
   std::vector<uint8_t> encoded_bytes = {0x00, 0x00, 0x00, 0x01, 0x67, 0x64};
   video_server::EncodedAccessUnitView encoded{};
@@ -115,43 +111,42 @@ int test_core() {
   encoded.timestamp_ns = 250;
   encoded.keyframe = true;
   encoded.codec_config = true;
-  assert(server.push_access_unit(cfg.stream_id, encoded));
+  EXPECT_TRUE(server.push_access_unit(cfg.stream_id, encoded));
 
   auto latest_encoded = server.get_latest_encoded_unit_for_stream(cfg.stream_id);
-  assert(latest_encoded != nullptr);
-  assert(latest_encoded->valid);
-  assert(latest_encoded->codec == video_server::VideoCodec::H264);
-  assert(latest_encoded->timestamp_ns == 250);
-  assert(latest_encoded->sequence_id == 250);
-  assert(latest_encoded->keyframe);
-  assert(latest_encoded->codec_config);
-  assert(latest_encoded->bytes == encoded_bytes);
+  ASSERT_NE(latest_encoded, nullptr);
+  EXPECT_TRUE(latest_encoded->valid);
+  EXPECT_EQ(latest_encoded->codec, video_server::VideoCodec::H264);
+  EXPECT_EQ(latest_encoded->timestamp_ns, 250);
+  EXPECT_EQ(latest_encoded->sequence_id, 250);
+  EXPECT_TRUE(latest_encoded->keyframe);
+  EXPECT_TRUE(latest_encoded->codec_config);
+  EXPECT_EQ(latest_encoded->bytes, encoded_bytes);
 
   info = server.get_stream_info(cfg.stream_id);
-  assert(info.has_value());
-  assert(info->access_units_received == 1);
-  assert(info->has_latest_encoded_unit);
-  assert(info->last_encoded_codec == video_server::VideoCodec::H264);
-  assert(info->last_encoded_timestamp_ns == 250);
-  assert(info->last_encoded_sequence_id == 250);
-  assert(info->last_encoded_size_bytes == encoded_bytes.size());
-  assert(info->last_encoded_keyframe);
-  assert(info->last_encoded_codec_config);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->access_units_received, 1);
+  EXPECT_TRUE(info->has_latest_encoded_unit);
+  EXPECT_EQ(info->last_encoded_codec, video_server::VideoCodec::H264);
+  EXPECT_EQ(info->last_encoded_timestamp_ns, 250);
+  EXPECT_EQ(info->last_encoded_sequence_id, 250);
+  EXPECT_EQ(info->last_encoded_size_bytes, encoded_bytes.size());
+  EXPECT_TRUE(info->last_encoded_keyframe);
+  EXPECT_TRUE(info->last_encoded_codec_config);
 
-  // Encoded snapshots keep immutable publication semantics too.
   auto latest_encoded_again = server.get_latest_encoded_unit_for_stream(cfg.stream_id);
-  assert(latest_encoded_again != nullptr);
-  assert(latest_encoded_again.get() == latest_encoded.get());
+  ASSERT_NE(latest_encoded_again, nullptr);
+  EXPECT_EQ(latest_encoded_again.get(), latest_encoded.get());
 
-  assert(!server.push_access_unit("missing", encoded));
+  EXPECT_FALSE(server.push_access_unit("missing", encoded));
   video_server::EncodedAccessUnitView empty_encoded{};
-  assert(!server.push_access_unit(cfg.stream_id, empty_encoded));
+  EXPECT_FALSE(server.push_access_unit(cfg.stream_id, empty_encoded));
   video_server::EncodedAccessUnitView invalid_codec = encoded;
   invalid_codec.codec = static_cast<video_server::VideoCodec>(99);
-  assert(!server.push_access_unit(cfg.stream_id, invalid_codec));
+  EXPECT_FALSE(server.push_access_unit(cfg.stream_id, invalid_codec));
 
-  assert(server.remove_stream(cfg.stream_id));
-  assert(!server.remove_stream(cfg.stream_id));
-
-  return 0;
+  EXPECT_TRUE(server.remove_stream(cfg.stream_id));
+  EXPECT_FALSE(server.remove_stream(cfg.stream_id));
 }
+
+}  // namespace
