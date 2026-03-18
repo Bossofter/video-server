@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "../src/core/video_server_core.h"
@@ -22,6 +23,29 @@ std::shared_ptr<const video_server::LatestEncodedUnit> make_encoded_unit(std::ve
   unit->valid = true;
   return unit;
 }
+
+std::shared_ptr<const video_server::LatestEncodedUnit> make_large_idr_unit(uint64_t timestamp_ns, size_t payload_size) {
+  std::vector<uint8_t> bytes{0x00, 0x00, 0x00, 0x01, 0x65};
+  bytes.resize(bytes.size() + payload_size, 0xab);
+  return make_encoded_unit(std::move(bytes), timestamp_ns, true, false);
+}
+
+class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
+ public:
+  explicit FakeEncodedVideoTrackSink(bool open = true) : open_(open) {}
+
+  bool exists() const override { return true; }
+  bool is_open() const override { return open_; }
+  void send(const std::byte* data, size_t size) override {
+    std::lock_guard<std::mutex> lock(mutex);
+    sent_packets.emplace_back(data, data + size);
+  }
+
+  std::mutex mutex;
+  std::vector<std::vector<std::byte>> sent_packets;
+ private:
+  bool open_{true};
+};
 
 TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
   auto latest = make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f,
@@ -47,6 +71,48 @@ TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
   EXPECT_TRUE(snapshot.media_source.encoded_sender.packets_attempted == 0u ||
               snapshot.media_source.encoded_sender.packets_attempted >= 1u);
   EXPECT_FALSE(snapshot.media_source.encoded_sender.last_packetization_status.empty());
+}
+
+TEST(WebRtcStreamSessionTest, PacketizesFragmentedH264AfterCodecConfigAndKeyframe) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>();
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, "video");
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  const auto after_codec_config = sender->snapshot();
+  EXPECT_EQ(after_codec_config.packets_attempted, 0u);
+  EXPECT_EQ(after_codec_config.last_packetization_status, "keyframe-required");
+
+  sender->on_encoded_access_unit(make_large_idr_unit(2000, 2500));
+
+  const auto after_idr = sender->snapshot();
+  EXPECT_TRUE(after_idr.video_track_exists);
+  EXPECT_TRUE(after_idr.video_track_open);
+  EXPECT_TRUE(after_idr.ready_for_video_track);
+  EXPECT_TRUE(after_idr.h264_delivery_active);
+  EXPECT_EQ(after_idr.sender_state, "sending-h264-rtp");
+  EXPECT_EQ(after_idr.last_packetization_status, "rtp-packets-sent");
+  EXPECT_TRUE(after_idr.codec_config_seen);
+  EXPECT_TRUE(after_idr.keyframe_seen);
+  EXPECT_EQ(after_idr.delivered_units, 2u);
+  EXPECT_GE(after_idr.packets_attempted, 4u);
+
+  std::lock_guard<std::mutex> lock(track_sink->mutex);
+  ASSERT_EQ(track_sink->sent_packets.size(), after_idr.packets_attempted);
+  ASSERT_GE(track_sink->sent_packets.size(), 4u);
+  for (const auto& packet : track_sink->sent_packets) {
+    ASSERT_GE(packet.size(), 12u);
+    EXPECT_EQ(static_cast<uint8_t>(packet[0]), 0x80);
+    EXPECT_EQ(static_cast<uint8_t>(packet[1]) & 0x7f, 102u);
+  }
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.front()[12]) & 0x1f, 7u);
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets[1][12]) & 0x1f, 8u);
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets[2][12]) & 0x1f, 28u);
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets[2][13]) & 0x80, 0x80);
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[12]) & 0x1f, 28u);
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[13]) & 0x40, 0x40);
+  EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[1]) & 0x80, 0x80);
 }
 
 TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserved) {

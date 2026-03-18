@@ -94,5 +94,4 @@ if(BUILD_TESTING)
 
   include(GoogleTest)
   gtest_discover_tests(video_server_tests)
-  add_test(NAME video_server_tests COMMAND video_server_tests)
 endif()
