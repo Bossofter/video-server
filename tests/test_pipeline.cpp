@@ -9,7 +9,6 @@
 
 #define CHECK_TRUE(expr) do { if (!(expr)) throw std::runtime_error(#expr); } while(false)
 
-#if VIDEO_SERVER_TEST_WEBRTC
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -229,10 +228,3 @@ TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) {
 
   server.stop();
 }
-
-#else
-TEST(WebRtcPipelineTest, StreamMetadataUpdate) { GTEST_SKIP() << "WebRTC backend disabled"; }
-TEST(WebRtcPipelineTest, HttpLatestFrameEndpoint) { GTEST_SKIP() << "WebRTC backend disabled"; }
-TEST(WebRtcPipelineTest, HttpStreamInfoMetadata) { GTEST_SKIP() << "WebRTC backend disabled"; }
-TEST(WebRtcPipelineTest, DISABLED_EndToEndCurrentPath) { GTEST_SKIP() << "WebRTC backend disabled"; }
-#endif
