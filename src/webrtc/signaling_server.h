@@ -14,6 +14,7 @@ namespace video_server {
 
 using StreamExistsFn = std::function<bool(const std::string&)>;
 using LatestFrameGetterFn = WebRtcStreamSession::LatestFrameGetter;
+using LatestEncodedUnitGetterFn = WebRtcStreamSession::LatestEncodedUnitGetter;
 
 struct SignalingSession {
   uint64_t session_generation{0};
@@ -28,7 +29,8 @@ struct SignalingSession {
 
 class SignalingServer {
  public:
-  SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter);
+  SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter,
+                  LatestEncodedUnitGetterFn latest_encoded_unit_getter);
   ~SignalingServer();
 
   bool set_offer(const std::string& stream_id, const std::string& offer_sdp, std::string* error_message = nullptr);
@@ -36,7 +38,8 @@ class SignalingServer {
   bool add_ice_candidate(const std::string& stream_id, const std::string& candidate,
                          std::string* error_message = nullptr);
   void on_latest_frame(const std::string& stream_id, std::shared_ptr<const LatestFrame> latest_frame);
-  void on_encoded_access_unit(const std::string& stream_id, const EncodedAccessUnitView& access_unit);
+  void on_encoded_access_unit(const std::string& stream_id,
+                              std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit);
   std::optional<SignalingSession> get_session(const std::string& stream_id) const;
   void remove_stream(const std::string& stream_id);
   void stop();
@@ -49,6 +52,7 @@ class SignalingServer {
 
   StreamExistsFn stream_exists_;
   LatestFrameGetterFn latest_frame_getter_;
+  LatestEncodedUnitGetterFn latest_encoded_unit_getter_;
 
   // Temporary limitation: only one active WebRTC session slot is tracked per stream.
   // TODO: extend this to support multiple simultaneous peer sessions per stream.

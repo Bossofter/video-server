@@ -118,15 +118,43 @@ bool VideoServerCore::push_frame(const std::string& stream_id, const VideoFrameV
 
 bool VideoServerCore::push_access_unit(const std::string& stream_id,
                                        const EncodedAccessUnitView& access_unit) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = streams_.find(stream_id);
-  if (it == streams_.end() || access_unit.data == nullptr || access_unit.size_bytes == 0) {
+  if (access_unit.data == nullptr || access_unit.size_bytes == 0) {
     return false;
   }
 
-  VideoStreamInfo& info = it->second.info;
+  if (access_unit.codec != VideoCodec::H264) {
+    return false;
+  }
+
+  auto published_unit = std::make_shared<LatestEncodedUnit>();
+  published_unit->bytes.assign(static_cast<const uint8_t*>(access_unit.data),
+                               static_cast<const uint8_t*>(access_unit.data) + access_unit.size_bytes);
+  published_unit->codec = access_unit.codec;
+  published_unit->timestamp_ns = access_unit.timestamp_ns;
+  published_unit->sequence_id = access_unit.timestamp_ns;
+  published_unit->keyframe = access_unit.keyframe;
+  published_unit->codec_config = access_unit.codec_config;
+  published_unit->valid = true;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
+    return false;
+  }
+
+  StreamState& stream = it->second;
+  VideoStreamInfo& info = stream.info;
+  stream.latest_encoded_unit = published_unit;
+
   ++info.access_units_received;
   info.last_frame_timestamp_ns = access_unit.timestamp_ns;
+  info.has_latest_encoded_unit = true;
+  info.last_encoded_codec = access_unit.codec;
+  info.last_encoded_timestamp_ns = access_unit.timestamp_ns;
+  info.last_encoded_sequence_id = published_unit->sequence_id;
+  info.last_encoded_size_bytes = access_unit.size_bytes;
+  info.last_encoded_keyframe = access_unit.keyframe;
+  info.last_encoded_codec_config = access_unit.codec_config;
   return true;
 }
 
@@ -183,6 +211,17 @@ std::shared_ptr<const LatestFrame> VideoServerCore::get_latest_frame_for_stream(
     return nullptr;
   }
   return it->second.latest_frame;
+}
+
+
+std::shared_ptr<const LatestEncodedUnit> VideoServerCore::get_latest_encoded_unit_for_stream(
+    const std::string& stream_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
+    return nullptr;
+  }
+  return it->second.latest_encoded_unit;
 }
 
 bool VideoServerCore::is_valid_rotation(int degrees) {

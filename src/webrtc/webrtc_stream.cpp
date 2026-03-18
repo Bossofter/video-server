@@ -39,18 +39,31 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
     latest_snapshot_height_ = latest_frame->height;
   }
 
-  void on_encoded_access_unit(const EncodedAccessUnitView& access_unit) override {
-    if (access_unit.data == nullptr || access_unit.size_bytes == 0) {
+  void on_latest_encoded_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_encoded_unit_ = std::move(latest_encoded_unit);
+    latest_encoded_access_unit_available_ = latest_encoded_unit_ != nullptr && latest_encoded_unit_->valid;
+    if (!latest_encoded_access_unit_available_) {
+      latest_encoded_codec_.clear();
+      latest_encoded_timestamp_ns_ = 0;
+      latest_encoded_sequence_id_ = 0;
+      latest_encoded_size_bytes_ = 0;
+      latest_encoded_keyframe_ = false;
+      latest_encoded_codec_config_ = false;
       return;
     }
 
+    latest_encoded_codec_ = codec_to_string(latest_encoded_unit_->codec);
+    latest_encoded_timestamp_ns_ = latest_encoded_unit_->timestamp_ns;
+    latest_encoded_sequence_id_ = latest_encoded_unit_->sequence_id;
+    latest_encoded_size_bytes_ = latest_encoded_unit_->bytes.size();
+    latest_encoded_keyframe_ = latest_encoded_unit_->keyframe;
+    latest_encoded_codec_config_ = latest_encoded_unit_->codec_config;
+  }
+
+  std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit() const override {
     std::lock_guard<std::mutex> lock(mutex_);
-    latest_encoded_access_unit_available_ = true;
-    latest_encoded_codec_ = codec_to_string(access_unit.codec);
-    latest_encoded_timestamp_ns_ = access_unit.timestamp_ns;
-    latest_encoded_size_bytes_ = access_unit.size_bytes;
-    latest_encoded_keyframe_ = access_unit.keyframe;
-    latest_encoded_codec_config_ = access_unit.codec_config;
+    return latest_encoded_unit_;
   }
 
   WebRtcMediaSourceSnapshot snapshot() const override {
@@ -68,6 +81,7 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
       snapshot.latest_encoded_access_unit_available = latest_encoded_access_unit_available_;
       snapshot.latest_encoded_codec = latest_encoded_codec_;
       snapshot.latest_encoded_timestamp_ns = latest_encoded_timestamp_ns_;
+      snapshot.latest_encoded_sequence_id = latest_encoded_sequence_id_;
       snapshot.latest_encoded_size_bytes = latest_encoded_size_bytes_;
       snapshot.latest_encoded_keyframe = latest_encoded_keyframe_;
       snapshot.latest_encoded_codec_config = latest_encoded_codec_config_;
@@ -91,20 +105,24 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
   bool latest_encoded_access_unit_available_{false};
   std::string latest_encoded_codec_;
   uint64_t latest_encoded_timestamp_ns_{0};
+  uint64_t latest_encoded_sequence_id_{0};
   size_t latest_encoded_size_bytes_{0};
+  std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit_;
   bool latest_encoded_keyframe_{false};
   bool latest_encoded_codec_config_{false};
 };
 
 }  // namespace
 
-WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter)
+WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
+                                       LatestEncodedUnitGetter latest_encoded_unit_getter)
     : stream_id_(std::move(stream_id)) {
   rtc::Configuration config;
   config.disableAutoNegotiation = false;
   peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
   media_source_ = std::make_unique<StreamMediaSourceBridge>();
   media_source_->on_latest_frame(latest_frame_getter(stream_id_));
+  media_source_->on_latest_encoded_unit(latest_encoded_unit_getter(stream_id_));
   peer_state_ = peer_state_to_string(peer_connection_->state());
   configure_callbacks();
 }
@@ -159,9 +177,9 @@ void WebRtcStreamSession::on_latest_frame(std::shared_ptr<const LatestFrame> lat
   media_source_->on_latest_frame(std::move(latest_frame));
 }
 
-void WebRtcStreamSession::on_encoded_access_unit(const EncodedAccessUnitView& access_unit) {
+void WebRtcStreamSession::on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) {
   std::lock_guard<std::mutex> lock(mutex_);
-  media_source_->on_encoded_access_unit(access_unit);
+  media_source_->on_latest_encoded_unit(std::move(latest_encoded_unit));
 }
 
 WebRtcSessionSnapshot WebRtcStreamSession::snapshot() const {

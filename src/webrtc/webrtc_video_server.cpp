@@ -202,7 +202,10 @@ class WebRtcVideoServer::Impl {
   explicit Impl(WebRtcVideoServerConfig config)
       : config_(std::move(config)),
         signaling_([this](const std::string& stream_id) { return core_.get_stream_info(stream_id).has_value(); },
-                   [this](const std::string& stream_id) { return core_.get_latest_frame_for_stream(stream_id); }),
+                   [this](const std::string& stream_id) { return core_.get_latest_frame_for_stream(stream_id); },
+                   [this](const std::string& stream_id) {
+                     return core_.get_latest_encoded_unit_for_stream(stream_id);
+                   }),
         http_server_(std::make_unique<HttpApiServer>(config_.http_host, config_.http_port)) {}
 
   bool start() {
@@ -244,6 +247,7 @@ class WebRtcVideoServer::Impl {
           return json_error(404, "stream not found");
         }
         auto latest = core_.get_latest_frame_for_stream(tail);
+        auto latest_encoded = core_.get_latest_encoded_unit_for_stream(tail);
         std::ostringstream out;
         out << "{\"stream_id\":\"" << json_escape(info->stream_id) << "\","
             << "\"label\":\"" << json_escape(info->label) << "\","
@@ -255,11 +259,24 @@ class WebRtcVideoServer::Impl {
             << "\"last_output_timestamp_ns\":" << info->last_output_timestamp_ns << ','
             << "\"last_frame_id\":" << info->last_frame_id << ','
             << "\"has_latest_frame\":" << bool_to_json(info->has_latest_frame) << ','
+            << "\"has_latest_encoded_unit\":" << bool_to_json(info->has_latest_encoded_unit) << ','
             << "\"latest_frame_width\":" << (latest ? latest->width : 0) << ','
             << "\"latest_frame_height\":" << (latest ? latest->height : 0) << ','
             << "\"latest_frame_pixel_format\":\""
-            << (latest ? to_string(latest->pixel_format) : "") << "\"," 
+            << (latest ? to_string(latest->pixel_format) : "") << "\","
             << "\"latest_frame_timestamp_ns\":" << (latest ? latest->timestamp_ns : 0) << ','
+            << "\"latest_encoded_codec\":\""
+            << (latest_encoded ? to_string(latest_encoded->codec) : "") << "\","
+            << "\"latest_encoded_timestamp_ns\":"
+            << (latest_encoded ? latest_encoded->timestamp_ns : 0) << ','
+            << "\"latest_encoded_sequence_id\":"
+            << (latest_encoded ? latest_encoded->sequence_id : 0) << ','
+            << "\"latest_encoded_size_bytes\":"
+            << (latest_encoded ? latest_encoded->bytes.size() : 0) << ','
+            << "\"latest_encoded_keyframe\":"
+            << bool_to_json(latest_encoded ? latest_encoded->keyframe : false) << ','
+            << "\"latest_encoded_codec_config\":"
+            << bool_to_json(latest_encoded ? latest_encoded->codec_config : false) << ','
             << "\"active\":" << bool_to_json(info->active) << '}';
         return HttpResponse{200, out.str(), "application/json"};
       }
@@ -402,6 +419,7 @@ class WebRtcVideoServer::Impl {
             << bool_to_json(session->media_source.latest_encoded_access_unit_available) << ','
             << "\"latest_encoded_codec\":\"" << json_escape(session->media_source.latest_encoded_codec) << "\","
             << "\"latest_encoded_timestamp_ns\":" << session->media_source.latest_encoded_timestamp_ns << ','
+            << "\"latest_encoded_sequence_id\":" << session->media_source.latest_encoded_sequence_id << ','
             << "\"latest_encoded_size_bytes\":" << session->media_source.latest_encoded_size_bytes << ','
             << "\"latest_encoded_keyframe\":" << bool_to_json(session->media_source.latest_encoded_keyframe) << ','
             << "\"latest_encoded_codec_config\":"
@@ -445,7 +463,7 @@ bool WebRtcVideoServer::push_access_unit(const std::string& stream_id,
   if (!impl_->core_.push_access_unit(stream_id, access_unit)) {
     return false;
   }
-  impl_->signaling_.on_encoded_access_unit(stream_id, access_unit);
+  impl_->signaling_.on_encoded_access_unit(stream_id, impl_->core_.get_latest_encoded_unit_for_stream(stream_id));
   return true;
 }
 

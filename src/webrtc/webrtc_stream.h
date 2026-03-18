@@ -24,6 +24,7 @@ struct WebRtcMediaSourceSnapshot {
   bool latest_encoded_access_unit_available{false};
   std::string latest_encoded_codec;
   uint64_t latest_encoded_timestamp_ns{0};
+  uint64_t latest_encoded_sequence_id{0};
   size_t latest_encoded_size_bytes{0};
   bool latest_encoded_keyframe{false};
   bool latest_encoded_codec_config{false};
@@ -39,7 +40,8 @@ class IWebRtcMediaSourceBridge {
 
   // Long-term path: encoded access units (notably H264) should become the primary media source for
   // browser-native video delivery. This hook exists now so the bridge contract is format-agnostic.
-  virtual void on_encoded_access_unit(const EncodedAccessUnitView& access_unit) = 0;
+  virtual void on_latest_encoded_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
+  virtual std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit() const = 0;
 
   virtual WebRtcMediaSourceSnapshot snapshot() const = 0;
 };
@@ -57,8 +59,10 @@ struct WebRtcSessionSnapshot {
 class WebRtcStreamSession {
  public:
   using LatestFrameGetter = std::function<std::shared_ptr<const LatestFrame>(const std::string&)>;
+  using LatestEncodedUnitGetter = std::function<std::shared_ptr<const LatestEncodedUnit>(const std::string&)>;
 
-  WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter);
+  WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
+                      LatestEncodedUnitGetter latest_encoded_unit_getter);
   ~WebRtcStreamSession();
 
   WebRtcStreamSession(const WebRtcStreamSession&) = delete;
@@ -68,7 +72,7 @@ class WebRtcStreamSession {
   bool apply_answer(const std::string& answer_sdp, std::string* error_message = nullptr);
   bool add_remote_candidate(const std::string& candidate_sdp, std::string* error_message = nullptr);
   void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame);
-  void on_encoded_access_unit(const EncodedAccessUnitView& access_unit);
+  void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit);
   WebRtcSessionSnapshot snapshot() const;
   void stop();
 
