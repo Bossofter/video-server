@@ -106,6 +106,14 @@ class IEncodedVideoSender {
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
 
+class IEncodedVideoTrackSink {
+ public:
+  virtual ~IEncodedVideoTrackSink() = default;
+  virtual bool exists() const = 0;
+  virtual bool is_open() const = 0;
+  virtual void send(const std::byte* data, size_t size) = 0;
+};
+
 class WebRtcStreamSession {
  public:
   using LatestFrameGetter = std::function<std::shared_ptr<const LatestFrame>(const std::string&)>;
@@ -144,5 +152,7 @@ class WebRtcStreamSession {
 };
 
 H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit);
+std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
+                                                                    std::string track_mid);
 
 }  // namespace video_server
