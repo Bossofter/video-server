@@ -7,36 +7,83 @@
 #include <rtc/configuration.hpp>
 #include <rtc/description.hpp>
 
+#include "video_server/video_types.h"
+
 namespace video_server {
 namespace {
 
-class LatestFrameVideoSourceBridge : public IWebRtcMediaSource {
+std::string codec_to_string(VideoCodec codec) {
+  switch (codec) {
+    case VideoCodec::H264:
+      return "H264";
+  }
+  return "Unknown";
+}
+
+class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
  public:
   using LatestFrameGetter = WebRtcStreamSession::LatestFrameGetter;
 
-  LatestFrameVideoSourceBridge(std::string stream_id, LatestFrameGetter latest_frame_getter)
+  StreamMediaSourceBridge(std::string stream_id, LatestFrameGetter latest_frame_getter)
       : stream_id_(std::move(stream_id)), latest_frame_getter_(std::move(latest_frame_getter)) {}
+
+  void on_encoded_access_unit(const EncodedAccessUnitView& access_unit) override {
+    if (access_unit.data == nullptr || access_unit.size_bytes == 0) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_encoded_access_unit_available_ = true;
+    latest_encoded_codec_ = codec_to_string(access_unit.codec);
+    latest_encoded_timestamp_ns_ = access_unit.timestamp_ns;
+    latest_encoded_size_bytes_ = access_unit.size_bytes;
+    latest_encoded_keyframe_ = access_unit.keyframe;
+    latest_encoded_codec_config_ = access_unit.codec_config;
+  }
 
   WebRtcMediaSourceSnapshot snapshot() const override {
     WebRtcMediaSourceSnapshot snapshot;
-    snapshot.bridge_state = "awaiting-encoded-video-bridge";
+    snapshot.bridge_state = "awaiting-video-track-bridge";
+    snapshot.preferred_media_path = "latest-frame-snapshot";
 
     const auto latest_frame = latest_frame_getter_(stream_id_);
-    if (!latest_frame || !latest_frame->valid) {
-      return snapshot;
+    if (latest_frame && latest_frame->valid) {
+      snapshot.latest_snapshot_available = true;
+      snapshot.latest_snapshot_frame_id = latest_frame->frame_id;
+      snapshot.latest_snapshot_timestamp_ns = latest_frame->timestamp_ns;
+      snapshot.latest_snapshot_width = latest_frame->width;
+      snapshot.latest_snapshot_height = latest_frame->height;
     }
 
-    snapshot.latest_snapshot_available = true;
-    snapshot.latest_snapshot_frame_id = latest_frame->frame_id;
-    snapshot.latest_snapshot_timestamp_ns = latest_frame->timestamp_ns;
-    snapshot.latest_snapshot_width = latest_frame->width;
-    snapshot.latest_snapshot_height = latest_frame->height;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      snapshot.latest_encoded_access_unit_available = latest_encoded_access_unit_available_;
+      snapshot.latest_encoded_codec = latest_encoded_codec_;
+      snapshot.latest_encoded_timestamp_ns = latest_encoded_timestamp_ns_;
+      snapshot.latest_encoded_size_bytes = latest_encoded_size_bytes_;
+      snapshot.latest_encoded_keyframe = latest_encoded_keyframe_;
+      snapshot.latest_encoded_codec_config = latest_encoded_codec_config_;
+    }
+
+    if (snapshot.latest_encoded_access_unit_available) {
+      snapshot.preferred_media_path = "encoded-access-unit";
+      snapshot.bridge_state = "awaiting-h264-video-track-bridge";
+    }
+
     return snapshot;
   }
 
  private:
   std::string stream_id_;
   LatestFrameGetter latest_frame_getter_;
+
+  mutable std::mutex mutex_;
+  bool latest_encoded_access_unit_available_{false};
+  std::string latest_encoded_codec_;
+  uint64_t latest_encoded_timestamp_ns_{0};
+  size_t latest_encoded_size_bytes_{0};
+  bool latest_encoded_keyframe_{false};
+  bool latest_encoded_codec_config_{false};
 };
 
 }  // namespace
@@ -46,7 +93,7 @@ WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGette
   rtc::Configuration config;
   config.disableAutoNegotiation = false;
   peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
-  media_source_ = std::make_unique<LatestFrameVideoSourceBridge>(stream_id_, std::move(latest_frame_getter));
+  media_source_ = std::make_unique<StreamMediaSourceBridge>(stream_id_, std::move(latest_frame_getter));
   peer_state_ = peer_state_to_string(peer_connection_->state());
   configure_callbacks();
 }
@@ -94,6 +141,11 @@ bool WebRtcStreamSession::add_remote_candidate(const std::string& candidate_sdp,
     }
     return false;
   }
+}
+
+void WebRtcStreamSession::on_encoded_access_unit(const EncodedAccessUnitView& access_unit) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  media_source_->on_encoded_access_unit(access_unit);
 }
 
 WebRtcSessionSnapshot WebRtcStreamSession::snapshot() const {

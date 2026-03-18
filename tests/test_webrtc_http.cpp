@@ -1,3 +1,4 @@
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -379,6 +380,16 @@ int test_webrtc_http() {
     remote_candidate_recorded = !json_string_field(session_after_candidate.body, "last_remote_candidate").empty();
   }
 
+  std::array<uint8_t, 5> access_unit_bytes{0x00, 0x00, 0x00, 0x01, 0x65};
+  video_server::EncodedAccessUnitView access_unit{};
+  access_unit.data = access_unit_bytes.data();
+  access_unit.size_bytes = access_unit_bytes.size();
+  access_unit.codec = video_server::VideoCodec::H264;
+  access_unit.timestamp_ns = 123456;
+  access_unit.keyframe = true;
+  access_unit.codec_config = false;
+  assert(server.push_access_unit(cfg.stream_id, access_unit));
+
   std::vector<uint8_t> webrtc_frame(cfg.width * cfg.height, 200);
   frame_view.data = webrtc_frame.data();
   frame_view.timestamp_ns = 9999;
@@ -396,7 +407,8 @@ int test_webrtc_http() {
     session_after_updates = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");
     return session_after_updates.status == 200 && !json_string_field(session_after_updates.body, "answer_sdp").empty();
   }));
-  assert(json_string_field(session_after_updates.body, "media_bridge_state") == "awaiting-encoded-video-bridge");
+  assert(json_string_field(session_after_updates.body, "media_bridge_state") == "awaiting-h264-video-track-bridge");
+  assert(json_string_field(session_after_updates.body, "preferred_media_path") == "encoded-access-unit");
   if (remote_candidate_recorded) {
     assert(!json_string_field(session_after_updates.body, "last_remote_candidate").empty());
   }
@@ -404,6 +416,9 @@ int test_webrtc_http() {
   assert(json_uint_field(session_after_updates.body, "latest_snapshot_timestamp_ns") == frame_view.timestamp_ns);
   assert(json_uint_field(session_after_updates.body, "latest_snapshot_width") == cfg.width);
   assert(json_uint_field(session_after_updates.body, "latest_snapshot_height") == cfg.height);
+  assert(json_string_field(session_after_updates.body, "latest_encoded_codec") == "H264");
+  assert(json_uint_field(session_after_updates.body, "latest_encoded_timestamp_ns") == access_unit.timestamp_ns);
+  assert(json_uint_field(session_after_updates.body, "latest_encoded_size_bytes") == access_unit.size_bytes);
 
   assert(server.remove_stream(cfg.stream_id));
   const auto removed_session = server.handle_http_request_for_test("GET", "/api/video/signaling/stream-1/session");

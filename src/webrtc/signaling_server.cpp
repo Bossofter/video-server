@@ -72,6 +72,20 @@ bool SignalingServer::add_ice_candidate(const std::string& stream_id, const std:
   return session->add_remote_candidate(candidate, error_message);
 }
 
+
+void SignalingServer::on_encoded_access_unit(const std::string& stream_id,
+                                             const EncodedAccessUnitView& access_unit) {
+  std::shared_ptr<WebRtcStreamSession> session;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = sessions_.find(stream_id);
+    if (it == sessions_.end()) {
+      return;
+    }
+    session = it->second.session;
+  }
+  session->on_encoded_access_unit(access_unit);
+}
 std::optional<SignalingSession> SignalingServer::get_session(const std::string& stream_id) const {
   uint64_t session_generation = 0;
   std::shared_ptr<WebRtcStreamSession> session;

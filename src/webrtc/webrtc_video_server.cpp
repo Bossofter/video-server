@@ -391,12 +391,21 @@ class WebRtcVideoServer::Impl {
             << "\"last_local_candidate\":\"" << json_escape(session->last_local_candidate) << "\","
             << "\"peer_state\":\"" << json_escape(session->peer_state) << "\","
             << "\"media_bridge_state\":\"" << json_escape(session->media_source.bridge_state) << "\","
+            << "\"preferred_media_path\":\"" << json_escape(session->media_source.preferred_media_path) << "\","
             << "\"latest_snapshot_available\":" << bool_to_json(session->media_source.latest_snapshot_available)
             << ','
             << "\"latest_snapshot_frame_id\":" << session->media_source.latest_snapshot_frame_id << ','
             << "\"latest_snapshot_timestamp_ns\":" << session->media_source.latest_snapshot_timestamp_ns << ','
             << "\"latest_snapshot_width\":" << session->media_source.latest_snapshot_width << ','
-            << "\"latest_snapshot_height\":" << session->media_source.latest_snapshot_height << '}';
+            << "\"latest_snapshot_height\":" << session->media_source.latest_snapshot_height << ','
+            << "\"latest_encoded_access_unit_available\":"
+            << bool_to_json(session->media_source.latest_encoded_access_unit_available) << ','
+            << "\"latest_encoded_codec\":\"" << json_escape(session->media_source.latest_encoded_codec) << "\","
+            << "\"latest_encoded_timestamp_ns\":" << session->media_source.latest_encoded_timestamp_ns << ','
+            << "\"latest_encoded_size_bytes\":" << session->media_source.latest_encoded_size_bytes << ','
+            << "\"latest_encoded_keyframe\":" << bool_to_json(session->media_source.latest_encoded_keyframe) << ','
+            << "\"latest_encoded_codec_config\":"
+            << bool_to_json(session->media_source.latest_encoded_codec_config) << '}';
         return HttpResponse{200, out.str(), "application/json"};
       }
     }
@@ -429,7 +438,11 @@ bool WebRtcVideoServer::push_frame(const std::string& stream_id, const VideoFram
 
 bool WebRtcVideoServer::push_access_unit(const std::string& stream_id,
                                          const EncodedAccessUnitView& access_unit) {
-  return impl_->core_.push_access_unit(stream_id, access_unit);
+  if (!impl_->core_.push_access_unit(stream_id, access_unit)) {
+    return false;
+  }
+  impl_->signaling_.on_encoded_access_unit(stream_id, access_unit);
+  return true;
 }
 
 std::vector<VideoStreamInfo> WebRtcVideoServer::list_streams() const { return impl_->core_.list_streams(); }

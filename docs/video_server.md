@@ -110,16 +110,24 @@ For each active signaling session, the backend now owns:
 
 - a real `rtc::PeerConnection`
 - a media-source bridge object tied to the stream id
-- snapshot-facing bridge status (`media_bridge_state`, latest snapshot availability, latest snapshot frame metadata)
+- raw-snapshot observation for current transformed-frame state
+- encoded-access-unit observation for the future H.264 sender path
+- bridge status (`media_bridge_state`, `preferred_media_path`, snapshot metadata, encoded access-unit metadata)
 
 Current bridge behavior:
 
 1. producer pushes raw frames through the unchanged producer API
 2. core transforms and publishes a new immutable latest-frame snapshot
 3. the per-session media-source bridge observes that snapshot state without mutating shared data
-4. signaling/session inspection can report what snapshot metadata is currently available to a future real sender path
+4. the same bridge can also record incoming encoded access-unit metadata from `push_access_unit()`
+5. signaling/session inspection can report what raw or encoded source state is currently available to a future real sender path
 
-The current bridge state is intentionally reported as `awaiting-encoded-video-bridge`. That makes the system’s status explicit: the backend now has real peer/session plumbing plus a real backend-side media source boundary, but it does **not** yet claim to deliver final video media over WebRTC.
+The current bridge state is intentionally explicit:
+
+- `awaiting-video-track-bridge` when only latest-frame snapshot state is available
+- `awaiting-h264-video-track-bridge` once encoded H.264 access units have been observed
+
+That makes the system’s status explicit: the backend now has real peer/session plumbing plus a real backend-side media source boundary, but it does **not** yet claim to deliver final video media over WebRTC.
 
 This leaves the next step well-defined: attach a real encoded/RTP video sender implementation to the bridge rather than replacing another temporary transport.
 
@@ -135,7 +143,7 @@ Not yet implemented:
 
 - RTP video-track delivery from encoded frames
 - H.264 packetization / RTCP feedback handling for a real video sender track
-- wiring the current snapshot bridge to an actual encoded/video media sender
+- wiring the current bridge to an actual encoded/video media sender
 - multi-session addressing beyond the current stream-keyed session model
 - richer signaling payloads / structured JSON bodies
 
@@ -162,11 +170,18 @@ Current session payload fields include:
 - `last_local_candidate`
 - `peer_state`
 - `media_bridge_state`
+- `preferred_media_path`
 - `latest_snapshot_available`
 - `latest_snapshot_frame_id`
 - `latest_snapshot_timestamp_ns`
 - `latest_snapshot_width`
 - `latest_snapshot_height`
+- `latest_encoded_access_unit_available`
+- `latest_encoded_codec`
+- `latest_encoded_timestamp_ns`
+- `latest_encoded_size_bytes`
+- `latest_encoded_keyframe`
+- `latest_encoded_codec_config`
 
 Output-config JSON fields:
 `display_mode`, `mirrored`, `rotation_degrees`, `palette_min`, `palette_max`.
@@ -197,7 +212,7 @@ This subsystem currently assumes peers on the same local network and keeps signa
 
 `push_access_unit` and `EncodedAccessUnitView` are already part of the core interface, so producers can later provide direct H.264 access units without breaking API shape.
 
-The internal latest-frame storage introduced for raw frame ingestion does not block encoded ingestion. Encoded path work can be added in parallel and later integrated with transport selection policy.
+The media bridge now observes both latest transformed frames and, when present, encoded access-unit metadata. That keeps the raw-frame path and the future encoded H.264 path structurally separate while making it obvious how a real browser-native sender can prefer encoded input once that transport step lands.
 
 ## Synthetic generation path
 
