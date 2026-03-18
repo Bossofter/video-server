@@ -131,6 +131,8 @@ bool VideoServerCore::push_access_unit(const std::string& stream_id,
                                static_cast<const uint8_t*>(access_unit.data) + access_unit.size_bytes);
   published_unit->codec = access_unit.codec;
   published_unit->timestamp_ns = access_unit.timestamp_ns;
+  // Temporary identity: timestamp_ns is also used as sequence_id for now.
+  // TODO: consider a dedicated per-stream monotonically increasing encoded-unit counter.
   published_unit->sequence_id = access_unit.timestamp_ns;
   published_unit->keyframe = access_unit.keyframe;
   published_unit->codec_config = access_unit.codec_config;

@@ -423,7 +423,37 @@ class WebRtcVideoServer::Impl {
             << "\"latest_encoded_size_bytes\":" << session->media_source.latest_encoded_size_bytes << ','
             << "\"latest_encoded_keyframe\":" << bool_to_json(session->media_source.latest_encoded_keyframe) << ','
             << "\"latest_encoded_codec_config\":"
-            << bool_to_json(session->media_source.latest_encoded_codec_config) << '}';
+            << bool_to_json(session->media_source.latest_encoded_codec_config) << ','
+            << "\"encoded_sender_state\":\"" << json_escape(session->media_source.encoded_sender.sender_state)
+            << "\","
+            << "\"encoded_sender_codec\":\"" << json_escape(session->media_source.encoded_sender.codec) << "\","
+            << "\"encoded_sender_has_pending_encoded_unit\":"
+            << bool_to_json(session->media_source.encoded_sender.has_pending_encoded_unit) << ','
+            << "\"encoded_sender_codec_config_seen\":"
+            << bool_to_json(session->media_source.encoded_sender.codec_config_seen) << ','
+            << "\"encoded_sender_ready_for_video_track\":"
+            << bool_to_json(session->media_source.encoded_sender.ready_for_video_track) << ','
+            << "\"encoded_sender_delivered_units\":" << session->media_source.encoded_sender.delivered_units << ','
+            << "\"encoded_sender_duplicate_units_skipped\":"
+            << session->media_source.encoded_sender.duplicate_units_skipped << ','
+            << "\"encoded_sender_last_delivered_sequence_id\":"
+            << session->media_source.encoded_sender.last_delivered_sequence_id << ','
+            << "\"encoded_sender_last_delivered_timestamp_ns\":"
+            << session->media_source.encoded_sender.last_delivered_timestamp_ns << ','
+            << "\"encoded_sender_last_delivered_size_bytes\":"
+            << session->media_source.encoded_sender.last_delivered_size_bytes << ','
+            << "\"encoded_sender_last_delivered_keyframe\":"
+            << bool_to_json(session->media_source.encoded_sender.last_delivered_keyframe) << ','
+            << "\"encoded_sender_last_delivered_codec_config\":"
+            << bool_to_json(session->media_source.encoded_sender.last_delivered_codec_config) << ','
+            << "\"encoded_sender_last_contains_sps\":"
+            << bool_to_json(session->media_source.encoded_sender.last_contains_sps) << ','
+            << "\"encoded_sender_last_contains_pps\":"
+            << bool_to_json(session->media_source.encoded_sender.last_contains_pps) << ','
+            << "\"encoded_sender_last_contains_idr\":"
+            << bool_to_json(session->media_source.encoded_sender.last_contains_idr) << ','
+            << "\"encoded_sender_last_contains_non_idr\":"
+            << bool_to_json(session->media_source.encoded_sender.last_contains_non_idr) << '}';
         return HttpResponse{200, out.str(), "application/json"};
       }
     }
