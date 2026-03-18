@@ -8,4 +8,4 @@ if [[ ! -d "${BUILD_DIR}" || ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
   ./build.sh
 fi
 
-ctest --test-dir "${BUILD_DIR}" --output-on-failure
+"${BUILD_DIR}/video_server_tests" --gtest_color=yes

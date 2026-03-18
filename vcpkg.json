@@ -3,6 +3,7 @@
   "version-string": "0.1.0",
   "description": "Portable C++ video streaming subsystem",
   "dependencies": [
+    "gtest",
     "libdatachannel",
     "libjuice",
     "openssl",

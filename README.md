@@ -16,6 +16,7 @@ Portable C++17 video streaming subsystem focused on a stable producer-facing API
 Managed via vcpkg manifest (`vcpkg.json`):
 
 - libdatachannel
+- gtest
 - libjuice
 - openssl
 - libsrtp
@@ -45,7 +46,7 @@ export VCPKG_ROOT=/path/to/vcpkg
 
 It then builds via `cmake --build build -j`.
 
-`test.sh` runs `ctest --test-dir build --output-on-failure`, and automatically calls `./build.sh` if the build directory is missing.
+`test.sh` runs `build/video_server_tests --gtest_color=yes`, which prints each GoogleTest case as it runs, and automatically calls `./build.sh` if the build directory is missing.
 
 If you intentionally want a no-backend build, configure manually with `-DENABLE_WEBRTC_BACKEND=OFF`.
 
