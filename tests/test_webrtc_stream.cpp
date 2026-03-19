@@ -148,7 +148,7 @@ TEST(WebRtcStreamSessionTest, SnapshotReflectsTrackAvailabilityAfterLateBind) {
   track_sink->set_exists(true);
 
   const auto after_exists = sender->snapshot();
-  EXPECT_EQ(after_exists.sender_state, "waiting-for-video-track-open");
+  EXPECT_EQ(after_exists.sender_state, "waiting-for-decoded-startup-idr");
   EXPECT_TRUE(after_exists.video_track_exists);
   EXPECT_FALSE(after_exists.video_track_open);
   EXPECT_TRUE(after_exists.ready_for_video_track);
@@ -195,6 +195,30 @@ TEST(WebRtcStreamSessionTest, SendsStartupSequenceFromCachedCodecConfigAndIdrAft
   EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[12]) & 0x1f, 1u);
 }
 
+TEST(WebRtcStreamSessionTest, StartsPacketizationWhenTrackExistsEvenIfTrackNeverReportsOpen) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", true);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 2468);
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+  sender->on_encoded_access_unit(make_non_idr_unit(3000));
+
+  const auto snapshot = sender->snapshot();
+  EXPECT_TRUE(snapshot.video_track_exists);
+  EXPECT_FALSE(snapshot.video_track_open);
+  EXPECT_TRUE(snapshot.cached_codec_config_available);
+  EXPECT_TRUE(snapshot.cached_idr_available);
+  EXPECT_TRUE(snapshot.first_decodable_frame_sent);
+  EXPECT_TRUE(snapshot.startup_sequence_sent);
+  EXPECT_EQ(snapshot.sender_state, "sending-h264-rtp");
+  EXPECT_GT(snapshot.packets_attempted, 0u);
+
+  std::lock_guard<std::mutex> lock(track_sink->mutex);
+  EXPECT_FALSE(track_sink->sent_packets.empty());
+}
+
 TEST(WebRtcStreamSessionTest, DoesNotStartFromNonIdrOnlyUnits) {
   auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>();
   auto sender = video_server::make_h264_encoded_video_sender(track_sink, 8765);
@@ -215,6 +239,31 @@ TEST(WebRtcStreamSessionTest, DoesNotStartFromNonIdrOnlyUnits) {
 
   std::lock_guard<std::mutex> lock(track_sink->mutex);
   EXPECT_TRUE(track_sink->sent_packets.empty());
+}
+
+TEST(WebRtcStreamSessionTest, RetainsCachedStartupStateAcrossSubsequentNonIdrUnits) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", true);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 9753);
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+
+  auto before_follow_up = sender->snapshot();
+  EXPECT_TRUE(before_follow_up.cached_codec_config_available);
+  EXPECT_TRUE(before_follow_up.cached_idr_available);
+
+  sender->on_encoded_access_unit(make_non_idr_unit(3000));
+  sender->on_encoded_access_unit(make_non_idr_unit(4000));
+
+  const auto after_follow_up = sender->snapshot();
+  EXPECT_TRUE(after_follow_up.cached_codec_config_available);
+  EXPECT_TRUE(after_follow_up.cached_idr_available);
+  EXPECT_TRUE(after_follow_up.startup_sequence_sent);
+  EXPECT_TRUE(after_follow_up.first_decodable_frame_sent);
+  EXPECT_EQ(after_follow_up.sender_state, "sending-h264-rtp");
+  EXPECT_GT(after_follow_up.packets_attempted, 0u);
 }
 
 TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserved) {

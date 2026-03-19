@@ -407,6 +407,18 @@ TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
   video_server::StreamConfig cfg{"signal-video-offer", "signal-video-offer", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
   CHECK_TRUE(server.register_stream(cfg));
 
+  std::array<uint8_t, 23> access_unit_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f,
+                                            0x00, 0x00, 0x00, 0x01, 0x68, 0xeb, 0xec, 0xb2,
+                                            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84};
+  video_server::EncodedAccessUnitView access_unit{};
+  access_unit.data = access_unit_bytes.data();
+  access_unit.size_bytes = access_unit_bytes.size();
+  access_unit.codec = video_server::VideoCodec::H264;
+  access_unit.timestamp_ns = 123456;
+  access_unit.keyframe = true;
+  access_unit.codec_config = false;
+  CHECK_TRUE(server.push_access_unit(cfg.stream_id, access_unit));
+
   rtc::Configuration rtc_config;
   auto client = std::make_shared<rtc::PeerConnection>(rtc_config);
   rtc::Description::Video offered_video_description("0", rtc::Description::Direction::RecvOnly);
@@ -452,6 +464,11 @@ TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
   CHECK_TRUE(answer_sdp.find("a=setup:active") != std::string::npos ||
              answer_sdp.find("a=setup:passive") != std::string::npos);
   CHECK_TRUE(json_string_field(session_response.body, "encoded_sender_video_mid") == "0");
+  CHECK_TRUE(json_string_field(session_response.body, "encoded_sender_state") != "waiting-for-video-track-open");
+  CHECK_TRUE(json_bool_field(session_response.body, "encoded_sender_cached_codec_config_available"));
+  CHECK_TRUE(json_bool_field(session_response.body, "encoded_sender_cached_idr_available"));
+  CHECK_TRUE(!json_bool_field(session_response.body, "encoded_sender_first_decodable_frame_sent"));
+  CHECK_TRUE(!json_bool_field(session_response.body, "encoded_sender_startup_sequence_sent"));
 }
 
 TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive) {
