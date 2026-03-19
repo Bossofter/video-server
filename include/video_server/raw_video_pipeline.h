@@ -47,6 +47,8 @@ class IRawVideoPipeline {
   virtual void stop() = 0;
 };
 
+// Returning false from the sink is treated as a hard pipeline failure; the pipeline records
+// the error, stops the ffmpeg subprocess bridge, and later push_frame() calls fail with that error.
 using EncodedAccessUnitSink = std::function<bool(const EncodedAccessUnitView& access_unit)>;
 
 std::unique_ptr<IRawVideoPipeline> make_raw_to_h264_pipeline(std::string stream_id,

@@ -351,6 +351,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
       }
       const int local_errno = (rc < 0) ? errno : EPIPE;
       set_error_locked(std::string("ffmpeg stdin write failed: ") + std::strerror(local_errno), error_message);
+      fail_pipeline_locked();
       return false;
     }
     return true;
@@ -370,12 +371,9 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     if (!sink_(view)) {
       set_error_locked(
           "encoded access-unit sink rejected H264 access unit for stream '" + stream_id_ +
-              "'; pipeline will stop",
+              "'; pipeline will stop and reject later push_frame() calls",
           nullptr);
-      failed_ = true;
-      running_ = false;
-      close_fd_if_open(stdin_fd_);
-      stdin_fd_ = -1;
+      fail_pipeline_locked();
       return false;
     }
     return true;
@@ -458,8 +456,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!failed_) {
         set_error_locked(std::string("ffmpeg stdout read failed: ") + std::strerror(errno), nullptr);
-        failed_ = true;
-        running_ = false;
+        fail_pipeline_locked();
       }
       break;
     }
@@ -525,6 +522,15 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     args.emplace_back("h264");
     args.emplace_back("pipe:1");
     return args;
+  }
+
+  void fail_pipeline_locked() {
+    failed_ = true;
+    running_ = false;
+    close_fd_if_open(stdin_fd_);
+    close_fd_if_open(stdout_fd_);
+    stdin_fd_ = -1;
+    stdout_fd_ = -1;
   }
 
   void set_error_locked(const std::string& value, std::string* error_message) {
