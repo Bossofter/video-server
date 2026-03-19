@@ -34,10 +34,12 @@ http://127.0.0.1:8090/
 
 The page is now a more useful day-to-day debug client instead of a basic smoke test:
 
-- **Settings UI:** use the visible **Settings** button or right-click the video area.
+- **Two views:** a full **Smoke debug** tab and a compact **Widget preview** tab for the future embeddable box layout.
+- **Settings UI:** use the visible **Settings** button or the widget preview right-click menu.
 - **Config persistence:** server URL, stream ID, debug mode, reconnect mode, and poll interval are saved in browser storage.
 - **Connection controls:** explicit **Connect**, **Reconnect**, **Disconnect**, and **Refresh debug** buttons.
-- **Summary row:** quick status badges for connection, remote track, playback, offer/answer, candidate handling, and generation.
+- **Summary row:** quick status badges for connection, remote track, playback, offer/answer, candidate handling, and generation in the smoke tab.
+- **Widget preview box:** keeps the video plus its action buttons/debug badges inside a single div for future dynamic placement work.
 - **Debug telemetry panel:** shows peer connection state, signaling state, ICE state, selected stream/server, remote description/track status, playback state, session summary, and browser stats.
 - **Video state widget:** shows `readyState`, `paused`, `currentTime`, rendered size, `networkState`, and mute state.
 - **Logs:** timestamped category logs with filtering and copy-to-clipboard support.
@@ -57,7 +59,7 @@ python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --
 Open the settings panel either by:
 
 - clicking **Settings** in the toolbar, or
-- right-clicking the video area.
+- right-clicking the **Widget preview** video box to open the grouped context menu and then jumping into local settings.
 
 Current controls include:
 
@@ -71,6 +73,27 @@ Current controls include:
 - placeholder controls for future verbosity / display options
 
 The settings are saved in browser local storage so a page reload keeps the previous session target and behavior.
+
+
+## Widget preview tab
+
+The **Widget preview** tab is a compact single-box layout intended to mirror the future embeddable widget form:
+
+- the video and its action buttons stay inside one container
+- the base display only keeps a simple health indicator and the stream ID
+- additional in-box debug details are controlled from settings
+- right-clicking the widget opens grouped menu sections for:
+  - connection actions (`Connect`, `Reload / reconnect`, `Disconnect`, `Refresh`)
+  - local widget settings (`Open settings panel`, `Toggle in-box debug`)
+  - placeholder server-request grouping for future stream-setting calls
+
+Widget debug controls now support:
+
+- enable/disable debug info inside the widget box
+- debug level selection: `Basic`, `Detailed`, `Full`
+- field toggles for connection/signaling, playback/track, video element details, and session summary data
+
+The original full **Smoke debug** tab remains available for the all-info smoke-test workflow.
 
 ## Debug telemetry
 

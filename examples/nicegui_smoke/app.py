@@ -177,6 +177,7 @@ window.videoSmokeHarness = (() => {{
     const el = byId(id);
     if (el) el.style.display = value;
   }};
+  const setVisible = (id, value) => setDisplay(id, value ? 'block' : 'none');
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -195,6 +196,13 @@ window.videoSmokeHarness = (() => {{
     state.config.logFilter = state.config.logFilter || 'all';
     state.config.placeholderDisplay = state.config.placeholderDisplay || 'default';
     state.config.logVerbosity = state.config.logVerbosity || 'normal';
+    state.config.widgetShowDebug = !!state.config.widgetShowDebug;
+    state.config.widgetDebugLevel = state.config.widgetDebugLevel || 'basic';
+    state.config.widgetShowConnection = state.config.widgetShowConnection !== false;
+    state.config.widgetShowPlayback = state.config.widgetShowPlayback !== false;
+    state.config.widgetShowVideo = !!state.config.widgetShowVideo;
+    state.config.widgetShowSession = !!state.config.widgetShowSession;
+    state.config.activeTab = state.config.activeTab || 'smoke';
     return state.config;
   }}
 
@@ -241,6 +249,25 @@ window.videoSmokeHarness = (() => {{
       return {{text: `connecting (${{state.pc.connectionState}})`, className: 'warn'}};
     }}
     return {{text: state.disconnectReason === 'manual disconnect' ? 'disconnected' : 'idle', className: ''}};
+  }}
+
+  function applyStreamToVideos(stream) {{
+    ['smoke-video', 'widget-video'].forEach((id) => {{
+      const video = byId(id);
+      if (!video) return;
+      video.srcObject = stream;
+      video.play().catch((error) => appendLog('media', `${{id}}.play() warning: ${{error}}`));
+    }});
+  }}
+
+  function clearVideos() {{
+    ['smoke-video', 'widget-video'].forEach((id) => {{
+      const video = byId(id);
+      if (!video) return;
+      try {{ video.pause(); }} catch (error) {{}}
+      video.srcObject = null;
+      video.load();
+    }});
   }}
 
   function updateSummary() {{
@@ -299,6 +326,36 @@ window.videoSmokeHarness = (() => {{
     setText('stats-frames-dropped', String(stats.framesDropped ?? 'n/a'));
     setText('stats-resolution', stats.frameWidth && stats.frameHeight ? `${{stats.frameWidth}}x${{stats.frameHeight}}` : 'n/a');
     setText('stats-fps', String(stats.framesPerSecond ?? 'n/a'));
+
+    const healthClass = status.className || '';
+    const healthText = status.text;
+    const healthDot = byId('widget-health-dot');
+    if (healthDot) healthDot.className = `health-dot ${{healthClass || 'idle'}}`;
+    setText('widget-health-text', healthText);
+    setText('widget-stream-id', cfg.streamId || '');
+
+    const widgetShowDebug = !!cfg.widgetShowDebug;
+    const widgetLevelOrder = ['basic', 'detailed', 'full'];
+    const widgetLevel = cfg.widgetDebugLevel || 'basic';
+    const levelIndex = widgetLevelOrder.indexOf(widgetLevel);
+    const detailEnabled = widgetShowDebug && levelIndex >= 0;
+    const showConnection = detailEnabled && cfg.widgetShowConnection;
+    const showPlayback = detailEnabled && (levelIndex >= 0) && cfg.widgetShowPlayback;
+    const showVideo = detailEnabled && (levelIndex >= 1) && cfg.widgetShowVideo;
+    const showSession = detailEnabled && (levelIndex >= 2) && cfg.widgetShowSession;
+    setVisible('widget-debug-sections', widgetShowDebug);
+    setVisible('widget-connection-section', showConnection);
+    setVisible('widget-playback-section', showPlayback);
+    setVisible('widget-video-section', showVideo);
+    setVisible('widget-session-section', showSession);
+    setText('widget-connection-state', pc ? pc.connectionState : 'closed');
+    setText('widget-signaling-state', pc ? pc.signalingState : 'closed');
+    setText('widget-playback-state', state.playbackActive ? 'rendering' : 'waiting');
+    setText('widget-track-state', state.remoteTrackReceived ? 'yes' : 'no');
+    setText('widget-video-size', video ? `${{video.videoWidth}}x${{video.videoHeight}}` : 'n/a');
+    setText('widget-video-time', video ? video.currentTime.toFixed(2) : 'n/a');
+    setText('widget-session-peer', session.peer_state || 'n/a');
+    setText('widget-session-sender', session.encoded_sender_state || 'n/a');
   }}
 
   function bindDebugHooks() {{
@@ -315,6 +372,29 @@ window.videoSmokeHarness = (() => {{
     window.__videoSmokeStats = async () => state.pc ? summarizeStats(await state.pc.getStats()) : null;
   }}
 
+  function switchTab(tabName) {{
+    const cfg = state.config || loadConfig();
+    cfg.activeTab = tabName;
+    state.config = cfg;
+    saveConfig();
+    setDisplay('smoke-tab-panel', tabName === 'smoke' ? 'block' : 'none');
+    setDisplay('widget-tab-panel', tabName === 'widget' ? 'block' : 'none');
+    byId('tab-smoke')?.classList.toggle('active', tabName === 'smoke');
+    byId('tab-widget')?.classList.toggle('active', tabName === 'widget');
+  }}
+
+  function showContextMenu(x, y) {{
+    const menu = byId('widget-context-menu');
+    if (!menu) return;
+    menu.style.display = 'block';
+    menu.style.left = `${{x}}px`;
+    menu.style.top = `${{y}}px`;
+  }}
+
+  function hideContextMenu() {{
+    setDisplay('widget-context-menu', 'none');
+  }}
+
   function syncFormFromConfig() {{
     const cfg = state.config || loadConfig();
     setValue('config-server-url', cfg.serverBase || '');
@@ -322,14 +402,21 @@ window.videoSmokeHarness = (() => {{
     setChecked('config-debug-mode', cfg.debugMode);
     setChecked('config-auto-reconnect', cfg.autoReconnect);
     setChecked('config-auto-connect', cfg.autoConnect);
+    setChecked('config-widget-show-debug', cfg.widgetShowDebug);
     setValue('config-session-poll-ms', String(cfg.sessionPollMs || 500));
     setValue('config-log-filter', cfg.logFilter || 'all');
     setValue('config-log-verbosity', cfg.logVerbosity || 'normal');
     setValue('config-placeholder-display', cfg.placeholderDisplay || 'default');
+    setValue('config-widget-debug-level', cfg.widgetDebugLevel || 'basic');
+    setChecked('config-widget-show-connection', cfg.widgetShowConnection);
+    setChecked('config-widget-show-playback', cfg.widgetShowPlayback);
+    setChecked('config-widget-show-video', cfg.widgetShowVideo);
+    setChecked('config-widget-show-session', cfg.widgetShowSession);
     setText('active-mode-label', cfg.modeLabel || 'consume existing video server');
     setText('managed-server-note', cfg.smokeServerManaged ? 'NiceGUI launched the local smoke server for this session.' : 'Harness is attaching to an existing server process.');
     setText('page-reload-note', cfg.autoConnect ? 'Page reload will reconnect automatically using the saved settings.' : 'Page reload keeps the settings but waits for a manual connect.');
     setDisplay('debug-panel', cfg.debugMode ? 'block' : 'none');
+    switchTab(cfg.activeTab || 'smoke');
   }}
 
   function readConfigForm() {{
@@ -339,10 +426,16 @@ window.videoSmokeHarness = (() => {{
     cfg.debugMode = !!byId('config-debug-mode')?.checked;
     cfg.autoReconnect = !!byId('config-auto-reconnect')?.checked;
     cfg.autoConnect = !!byId('config-auto-connect')?.checked;
+    cfg.widgetShowDebug = !!byId('config-widget-show-debug')?.checked;
     cfg.sessionPollMs = Math.max(200, Number(byId('config-session-poll-ms')?.value) || 500);
     cfg.logFilter = byId('config-log-filter')?.value || 'all';
     cfg.logVerbosity = byId('config-log-verbosity')?.value || 'normal';
     cfg.placeholderDisplay = byId('config-placeholder-display')?.value || 'default';
+    cfg.widgetDebugLevel = byId('config-widget-debug-level')?.value || 'basic';
+    cfg.widgetShowConnection = !!byId('config-widget-show-connection')?.checked;
+    cfg.widgetShowPlayback = !!byId('config-widget-show-playback')?.checked;
+    cfg.widgetShowVideo = !!byId('config-widget-show-video')?.checked;
+    cfg.widgetShowSession = !!byId('config-widget-show-session')?.checked;
     state.config = cfg;
     saveConfig();
     syncFormFromConfig();
@@ -397,12 +490,7 @@ window.videoSmokeHarness = (() => {{
       state.pc.close();
       state.pc = null;
     }}
-    const video = byId('smoke-video');
-    if (video) {{
-      try {{ video.pause(); }} catch (error) {{}}
-      video.srcObject = null;
-      video.load();
-    }}
+    clearVideos();
     resetRuntimeState(reason);
     bindDebugHooks();
     updateSummary();
@@ -564,8 +652,7 @@ window.videoSmokeHarness = (() => {{
     pc.ontrack = (event) => {{
       state.remoteTrackReceived = true;
       appendLog('media', `remote track received (${{event.track.kind}})`);
-      video.srcObject = event.streams[0];
-      video.play().catch((error) => appendLog('media', `video.play() warning: ${{error}}`));
+      applyStreamToVideos(event.streams[0]);
       updateSummary();
     }};
     pc.onconnectionstatechange = () => {{
@@ -688,6 +775,8 @@ window.videoSmokeHarness = (() => {{
     refs.initialized = true;
     byId('open-settings')?.addEventListener('click', () => showSettings(true));
     byId('close-settings')?.addEventListener('click', () => showSettings(false));
+    byId('tab-smoke')?.addEventListener('click', () => switchTab('smoke'));
+    byId('tab-widget')?.addEventListener('click', () => switchTab('widget'));
     byId('save-settings')?.addEventListener('click', () => {{
       readConfigForm();
       showSettings(false);
@@ -702,14 +791,34 @@ window.videoSmokeHarness = (() => {{
     }});
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
+    byId('widget-action-connect')?.addEventListener('click', () => connect('widget connect'));
+    byId('widget-action-reconnect')?.addEventListener('click', () => connect('widget reconnect'));
+    byId('widget-action-disconnect')?.addEventListener('click', () => disconnect('widget disconnect'));
+    byId('widget-action-refresh')?.addEventListener('click', async () => {{
+      appendLog('ui', 'widget manual refresh requested');
+      await refreshSession();
+      await refreshStats();
+    }});
+    byId('context-connect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context connect'); }});
+    byId('context-reconnect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context reconnect'); }});
+    byId('context-disconnect')?.addEventListener('click', () => {{ hideContextMenu(); disconnect('context disconnect'); }});
+    byId('context-refresh')?.addEventListener('click', async () => {{ hideContextMenu(); await refreshSession(); await refreshStats(); }});
+    byId('context-open-settings')?.addEventListener('click', () => {{ hideContextMenu(); showSettings(true); }});
+    byId('context-toggle-widget-debug')?.addEventListener('click', () => {{
+      const input = byId('config-widget-show-debug');
+      if (input) input.checked = !input.checked;
+      readConfigForm();
+      hideContextMenu();
+    }});
     document.addEventListener('keydown', (event) => {{
       if (event.key === 'Escape') showSettings(false);
     }});
-    const videoWrap = byId('video-shell');
-    videoWrap?.addEventListener('contextmenu', (event) => {{
+    document.addEventListener('click', () => hideContextMenu());
+    const widgetWrap = byId('widget-shell');
+    widgetWrap?.addEventListener('contextmenu', (event) => {{
       event.preventDefault();
-      showSettings(true);
-      appendLog('ui', 'opened settings from video context menu');
+      showContextMenu(event.clientX, event.clientY);
+      appendLog('ui', 'opened widget context menu');
     }});
   }}
 
@@ -753,103 +862,191 @@ PAGE_HTML = """
     </div>
   </div>
 
+  <div class="tab-row">
+    <button id="tab-smoke" class="tab-button active">Smoke debug</button>
+    <button id="tab-widget" class="tab-button">Widget preview</button>
+  </div>
+
   <div class="info-note">
     <div><strong>Mode:</strong> <span id="active-mode-label"></span></div>
     <div id="managed-server-note"></div>
     <div id="page-reload-note"></div>
   </div>
 
-  <div class="summary-grid">
-    <div class="summary-card"><div class="summary-label">Connection</div><div id="summary-connection" class="status-badge">idle</div></div>
-    <div class="summary-card"><div class="summary-label">Remote track</div><div id="summary-track" class="status-badge">no remote track</div></div>
-    <div class="summary-card"><div class="summary-label">Playback</div><div id="summary-playback" class="status-badge">not rendering</div></div>
-    <div class="summary-card"><div class="summary-label">Offer/answer</div><div id="summary-offer" class="status-badge">idle</div></div>
-    <div class="summary-card"><div class="summary-label">Candidates</div><div id="summary-candidates" class="status-badge">idle</div></div>
-    <div class="summary-card"><div class="summary-label">Generation</div><div id="summary-generation" class="summary-value">0</div></div>
-    <div class="summary-card"><div class="summary-label">Server</div><div id="summary-server" class="summary-value"></div></div>
-    <div class="summary-card"><div class="summary-label">Stream</div><div id="summary-stream" class="summary-value"></div></div>
-    <div class="summary-card"><div class="summary-label">Last stats</div><div id="summary-last-stats" class="summary-value">never</div></div>
-  </div>
-
-  <div class="main-grid">
-    <div class="video-panel">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">Player</div>
-          <div class="panel-subtitle">Right-click the video to open settings quickly.</div>
-        </div>
-        <div class="playback-headline">
-          <div id="playback-headline">idle</div>
-          <div id="playback-detail" class="panel-subtitle">waiting</div>
-        </div>
-      </div>
-      <div id="video-shell" class="video-shell">
-        <video id="smoke-video" autoplay playsinline muted controls></video>
-      </div>
-      <div class="video-stats-grid">
-        <div><span>readyState</span><strong id="video-ready-state">n/a</strong></div>
-        <div><span>paused</span><strong id="video-paused">n/a</strong></div>
-        <div><span>currentTime</span><strong id="video-current-time">n/a</strong></div>
-        <div><span>video size</span><strong id="video-size">n/a</strong></div>
-        <div><span>networkState</span><strong id="video-network-state">n/a</strong></div>
-        <div><span>muted</span><strong id="video-muted-state">n/a</strong></div>
-      </div>
+  <div id="smoke-tab-panel">
+    <div class="summary-grid">
+      <div class="summary-card"><div class="summary-label">Connection</div><div id="summary-connection" class="status-badge">idle</div></div>
+      <div class="summary-card"><div class="summary-label">Remote track</div><div id="summary-track" class="status-badge">no remote track</div></div>
+      <div class="summary-card"><div class="summary-label">Playback</div><div id="summary-playback" class="status-badge">not rendering</div></div>
+      <div class="summary-card"><div class="summary-label">Offer/answer</div><div id="summary-offer" class="status-badge">idle</div></div>
+      <div class="summary-card"><div class="summary-label">Candidates</div><div id="summary-candidates" class="status-badge">idle</div></div>
+      <div class="summary-card"><div class="summary-label">Generation</div><div id="summary-generation" class="summary-value">0</div></div>
+      <div class="summary-card"><div class="summary-label">Server</div><div id="summary-server" class="summary-value"></div></div>
+      <div class="summary-card"><div class="summary-label">Stream</div><div id="summary-stream" class="summary-value"></div></div>
+      <div class="summary-card"><div class="summary-label">Last stats</div><div id="summary-last-stats" class="summary-value">never</div></div>
     </div>
 
-    <div class="side-panel">
-      <div class="panel-card">
-        <div class="panel-header compact">
+    <div class="main-grid">
+      <div class="video-panel">
+        <div class="panel-header">
           <div>
-            <div class="panel-title">Logs</div>
-            <div class="panel-subtitle">Timestamped by category.</div>
+            <div class="panel-title">Player</div>
+            <div class="panel-subtitle">Full smoke/debug view with all telemetry.</div>
           </div>
-          <button id="copy-logs" class="toolbar-button small">Copy</button>
+          <div class="playback-headline">
+            <div id="playback-headline">idle</div>
+            <div id="playback-detail" class="panel-subtitle">waiting</div>
+          </div>
         </div>
-        <pre id="smoke-log" class="log-area"></pre>
+        <div id="video-shell" class="video-shell">
+          <video id="smoke-video" autoplay playsinline muted controls></video>
+        </div>
+        <div class="video-stats-grid">
+          <div><span>readyState</span><strong id="video-ready-state">n/a</strong></div>
+          <div><span>paused</span><strong id="video-paused">n/a</strong></div>
+          <div><span>currentTime</span><strong id="video-current-time">n/a</strong></div>
+          <div><span>video size</span><strong id="video-size">n/a</strong></div>
+          <div><span>networkState</span><strong id="video-network-state">n/a</strong></div>
+          <div><span>muted</span><strong id="video-muted-state">n/a</strong></div>
+        </div>
       </div>
 
-      <details id="debug-panel" class="panel-card" open>
-        <summary class="panel-title">Debug telemetry</summary>
-        <div class="debug-grid">
-          <div><span>connectionState</span><strong id="debug-connection-state">closed</strong></div>
-          <div><span>iceConnectionState</span><strong id="debug-ice-connection-state">closed</strong></div>
-          <div><span>iceGatheringState</span><strong id="debug-ice-gathering-state">closed</strong></div>
-          <div><span>signalingState</span><strong id="debug-signaling-state">closed</strong></div>
-          <div><span>generation</span><strong id="debug-generation">0</strong></div>
-          <div><span>server / stream</span><strong id="debug-server-stream"></strong></div>
-          <div><span>offer status</span><strong id="debug-offer-status">idle</strong></div>
-          <div><span>candidate status</span><strong id="debug-candidate-status">idle</strong></div>
-          <div><span>remote description</span><strong id="debug-remote-description">no</strong></div>
-          <div><span>remote track</span><strong id="debug-remote-track">no</strong></div>
-          <div><span>playback</span><strong id="debug-playback">inactive</strong></div>
-          <div><span>backend candidate</span><strong id="debug-last-candidate">none</strong></div>
-          <div><span>codec</span><strong id="debug-codec">unknown</strong></div>
-          <div><span>last stats</span><strong id="debug-last-stats">never</strong></div>
+      <div class="side-panel">
+        <div class="panel-card">
+          <div class="panel-header compact">
+            <div>
+              <div class="panel-title">Logs</div>
+              <div class="panel-subtitle">Timestamped by category.</div>
+            </div>
+            <button id="copy-logs" class="toolbar-button small">Copy</button>
+          </div>
+          <pre id="smoke-log" class="log-area"></pre>
         </div>
 
-        <div class="subpanel-title">Session summary</div>
-        <div class="debug-grid">
-          <div><span>peer_state</span><strong id="session-peer-state">n/a</strong></div>
-          <div><span>media_bridge_state</span><strong id="session-media-bridge">n/a</strong></div>
-          <div><span>sender_state</span><strong id="session-sender-state">n/a</strong></div>
-          <div><span>preferred path</span><strong id="session-preferred-path">n/a</strong></div>
-          <div><span>startup sent</span><strong id="session-startup">n/a</strong></div>
-          <div><span>first decodable</span><strong id="session-first-dec">n/a</strong></div>
-          <div><span>packets after open</span><strong id="session-packets-open">n/a</strong></div>
-        </div>
-        <div id="session-json" class="json-box"><pre>{}</pre></div>
+        <details id="debug-panel" class="panel-card" open>
+          <summary class="panel-title">Debug telemetry</summary>
+          <div class="debug-grid">
+            <div><span>connectionState</span><strong id="debug-connection-state">closed</strong></div>
+            <div><span>iceConnectionState</span><strong id="debug-ice-connection-state">closed</strong></div>
+            <div><span>iceGatheringState</span><strong id="debug-ice-gathering-state">closed</strong></div>
+            <div><span>signalingState</span><strong id="debug-signaling-state">closed</strong></div>
+            <div><span>generation</span><strong id="debug-generation">0</strong></div>
+            <div><span>server / stream</span><strong id="debug-server-stream"></strong></div>
+            <div><span>offer status</span><strong id="debug-offer-status">idle</strong></div>
+            <div><span>candidate status</span><strong id="debug-candidate-status">idle</strong></div>
+            <div><span>remote description</span><strong id="debug-remote-description">no</strong></div>
+            <div><span>remote track</span><strong id="debug-remote-track">no</strong></div>
+            <div><span>playback</span><strong id="debug-playback">inactive</strong></div>
+            <div><span>backend candidate</span><strong id="debug-last-candidate">none</strong></div>
+            <div><span>codec</span><strong id="debug-codec">unknown</strong></div>
+            <div><span>last stats</span><strong id="debug-last-stats">never</strong></div>
+          </div>
 
-        <div class="subpanel-title">Browser stats</div>
-        <div class="debug-grid">
-          <div><span>packets</span><strong id="stats-packets">n/a</strong></div>
-          <div><span>bytes</span><strong id="stats-bytes">n/a</strong></div>
-          <div><span>frames received</span><strong id="stats-frames-received">n/a</strong></div>
-          <div><span>frames decoded</span><strong id="stats-frames-decoded">n/a</strong></div>
-          <div><span>frames dropped</span><strong id="stats-frames-dropped">n/a</strong></div>
-          <div><span>resolution</span><strong id="stats-resolution">n/a</strong></div>
-          <div><span>FPS</span><strong id="stats-fps">n/a</strong></div>
+          <div class="subpanel-title">Session summary</div>
+          <div class="debug-grid">
+            <div><span>peer_state</span><strong id="session-peer-state">n/a</strong></div>
+            <div><span>media_bridge_state</span><strong id="session-media-bridge">n/a</strong></div>
+            <div><span>sender_state</span><strong id="session-sender-state">n/a</strong></div>
+            <div><span>preferred path</span><strong id="session-preferred-path">n/a</strong></div>
+            <div><span>startup sent</span><strong id="session-startup">n/a</strong></div>
+            <div><span>first decodable</span><strong id="session-first-dec">n/a</strong></div>
+            <div><span>packets after open</span><strong id="session-packets-open">n/a</strong></div>
+          </div>
+          <div id="session-json" class="json-box"><pre>{}</pre></div>
+
+          <div class="subpanel-title">Browser stats</div>
+          <div class="debug-grid">
+            <div><span>packets</span><strong id="stats-packets">n/a</strong></div>
+            <div><span>bytes</span><strong id="stats-bytes">n/a</strong></div>
+            <div><span>frames received</span><strong id="stats-frames-received">n/a</strong></div>
+            <div><span>frames decoded</span><strong id="stats-frames-decoded">n/a</strong></div>
+            <div><span>frames dropped</span><strong id="stats-frames-dropped">n/a</strong></div>
+            <div><span>resolution</span><strong id="stats-resolution">n/a</strong></div>
+            <div><span>FPS</span><strong id="stats-fps">n/a</strong></div>
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <div id="widget-tab-panel" style="display:none;">
+    <div class="widget-layout">
+      <div id="widget-shell" class="widget-box">
+        <div class="widget-header">
+          <div>
+            <div class="panel-title">Widget preview</div>
+            <div class="panel-subtitle">Single box preview for future dynamic placement. Right-click for grouped actions/settings.</div>
+          </div>
         </div>
-      </details>
+        <div class="widget-video-wrap">
+          <video id="widget-video" autoplay playsinline muted controls></video>
+        </div>
+        <div class="widget-status-bar">
+          <div class="widget-status-chip">
+            <span class="summary-label">Health</span>
+            <div class="widget-health">
+              <span id="widget-health-dot" class="health-dot idle"></span>
+              <strong id="widget-health-text">idle</strong>
+            </div>
+          </div>
+          <div class="widget-status-chip">
+            <span class="summary-label">Stream</span>
+            <strong id="widget-stream-id"></strong>
+          </div>
+        </div>
+        <div id="widget-debug-sections" class="widget-debug-sections" style="display:none;">
+          <div id="widget-connection-section" class="widget-debug-card">
+            <span>Connection</span>
+            <strong id="widget-connection-state">closed</strong>
+            <span>Signaling</span>
+            <strong id="widget-signaling-state">closed</strong>
+          </div>
+          <div id="widget-playback-section" class="widget-debug-card">
+            <span>Playback</span>
+            <strong id="widget-playback-state">waiting</strong>
+            <span>Track</span>
+            <strong id="widget-track-state">no</strong>
+          </div>
+          <div id="widget-video-section" class="widget-debug-card">
+            <span>Video size</span>
+            <strong id="widget-video-size">n/a</strong>
+            <span>Current time</span>
+            <strong id="widget-video-time">n/a</strong>
+          </div>
+          <div id="widget-session-section" class="widget-debug-card">
+            <span>peer_state</span>
+            <strong id="widget-session-peer">n/a</strong>
+            <span>sender_state</span>
+            <strong id="widget-session-sender">n/a</strong>
+          </div>
+        </div>
+        <div class="widget-actions">
+          <button id="widget-action-connect" class="toolbar-button primary">Connect</button>
+          <button id="widget-action-reconnect" class="toolbar-button">Reload</button>
+          <button id="widget-action-disconnect" class="toolbar-button danger">Disconnect</button>
+          <button id="widget-action-refresh" class="toolbar-button">Refresh</button>
+          <button class="toolbar-button" onclick="window.videoSmokeHarness.showSettings(true)">Settings</button>
+        </div>
+      </div>
+
+      <div id="widget-context-menu" class="context-menu" style="display:none;">
+        <div class="context-group">
+          <div class="context-title">Actions</div>
+          <button id="context-connect" class="context-button">Connect</button>
+          <button id="context-reconnect" class="context-button">Reload / reconnect</button>
+          <button id="context-disconnect" class="context-button">Disconnect</button>
+          <button id="context-refresh" class="context-button">Refresh status</button>
+        </div>
+        <div class="context-group">
+          <div class="context-title">Local widget settings</div>
+          <button id="context-open-settings" class="context-button">Open settings panel</button>
+          <button id="context-toggle-widget-debug" class="context-button">Toggle in-box debug</button>
+        </div>
+        <div class="context-group">
+          <div class="context-title">Server request group</div>
+          <div class="context-note">Placeholder for future server-side stream/display requests.</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -893,6 +1090,19 @@ PAGE_HTML = """
       <label class="checkbox-row"><input id="config-debug-mode" type="checkbox"> Enable debug telemetry + browser console hooks</label>
       <label class="checkbox-row"><input id="config-auto-reconnect" type="checkbox"> Reconnect automatically after failures/disconnects</label>
       <label class="checkbox-row"><input id="config-auto-connect" type="checkbox"> Connect automatically after reload/open</label>
+      <div class="settings-section-title">Widget preview box</div>
+      <label class="checkbox-row"><input id="config-widget-show-debug" type="checkbox"> Show debug info inside the widget box</label>
+      <label>Widget debug level
+        <select id="config-widget-debug-level">
+          <option value="basic">Basic</option>
+          <option value="detailed">Detailed</option>
+          <option value="full">Full</option>
+        </select>
+      </label>
+      <label class="checkbox-row"><input id="config-widget-show-connection" type="checkbox"> Include connection/signaling fields</label>
+      <label class="checkbox-row"><input id="config-widget-show-playback" type="checkbox"> Include playback/track fields</label>
+      <label class="checkbox-row"><input id="config-widget-show-video" type="checkbox"> Include video element fields</label>
+      <label class="checkbox-row"><input id="config-widget-show-session" type="checkbox"> Include session summary fields</label>
       <div class="settings-actions">
         <button id="save-settings" class="toolbar-button primary">Save settings</button>
       </div>
@@ -907,6 +1117,9 @@ body { background: #111827; }
 .harness-shell { color: #e5eefc; width: min(1400px, 100%); margin: 0 auto; }
 .toolbar-row, .panel-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
 .toolbar-row { flex-wrap: wrap; margin-bottom: 1rem; }
+.tab-row { display: flex; gap: 0.75rem; margin-bottom: 1rem; }
+.tab-button { background: #0f172a; color: #cbd5e1; border: 1px solid #334155; border-radius: 999px; padding: 0.5rem 1rem; cursor: pointer; }
+.tab-button.active { background: #2563eb; color: #fff; }
 .title { font-size: 1.8rem; font-weight: 700; }
 .subtitle, .panel-subtitle, .info-note { color: #9fb0ca; }
 .toolbar-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
@@ -933,6 +1146,28 @@ body { background: #111827; }
 .log-area { min-height: 360px; max-height: 460px; overflow: auto; background: #020617; color: #8ef; padding: 1rem; border-radius: 0.75rem; white-space: pre-wrap; }
 .subpanel-title { margin-top: 1rem; font-weight: 700; }
 .json-box pre { margin: 0.75rem 0 0; max-height: 220px; overflow: auto; background: #020617; color: #cbd5e1; padding: 0.9rem; border-radius: 0.75rem; }
+.widget-layout { position: relative; }
+.widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; max-width: 760px; }
+.widget-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 0.75rem; }
+.widget-video-wrap { background: #020617; border: 1px solid #334155; border-radius: 1rem; padding: 0.75rem; }
+#widget-video { width: 100%; min-height: 260px; background: #000; border-radius: 0.75rem; }
+.widget-status-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-top: 0.9rem; }
+.widget-status-chip, .widget-debug-card { background: #111827; border: 1px solid #1f2937; border-radius: 0.75rem; padding: 0.75rem; }
+.widget-health { display: flex; align-items: center; gap: 0.5rem; }
+.health-dot { width: 0.85rem; height: 0.85rem; border-radius: 999px; display: inline-block; background: #475569; }
+.health-dot.good { background: #22c55e; }
+.health-dot.warn { background: #f59e0b; }
+.health-dot.bad { background: #ef4444; }
+.health-dot.idle { background: #64748b; }
+.widget-debug-sections { display: grid; gap: 0.75rem; margin-top: 0.9rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.widget-debug-card span { display: block; color: #94a3b8; font-size: 0.8rem; margin-bottom: 0.25rem; }
+.widget-debug-card strong { display: block; margin-bottom: 0.45rem; }
+.widget-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+.context-menu { position: fixed; z-index: 60; width: min(320px, calc(100vw - 2rem)); background: #020617; border: 1px solid #334155; border-radius: 1rem; box-shadow: 0 18px 40px rgba(0,0,0,0.35); padding: 0.75rem; }
+.context-group + .context-group { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #1e293b; }
+.context-title, .settings-section-title { font-weight: 700; margin-bottom: 0.35rem; }
+.context-button { width: 100%; text-align: left; background: #111827; color: #e5eefc; border: 1px solid #1f2937; border-radius: 0.65rem; padding: 0.55rem 0.7rem; margin-top: 0.35rem; cursor: pointer; }
+.context-note { color: #94a3b8; font-size: 0.9rem; }
 .settings-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.75); align-items: center; justify-content: center; z-index: 50; }
 .settings-card { width: min(560px, calc(100vw - 2rem)); background: #0f172a; border: 1px solid #334155; border-radius: 1rem; padding: 1rem; display: grid; gap: 0.8rem; }
 .settings-card label { display: grid; gap: 0.35rem; color: #cbd5e1; }
