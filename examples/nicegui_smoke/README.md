@@ -1,8 +1,8 @@
-# NiceGUI smoke harness
+# NiceGUI browser harness
 
-This example is a **manual smoke-test harness** for the current browser-facing H264 WebRTC path.
+This example is a **manual development/debug harness** for the browser-facing H264 WebRTC path.
 
-It is intentionally separate from the reusable server core:
+It remains intentionally separate from the reusable server core:
 
 - the C++ smoke server executable starts `WebRtcVideoServer`
 - registers a synthetic stream
@@ -10,6 +10,7 @@ It is intentionally separate from the reusable server core:
 - launches `ffmpeg` (via `imageio-ffmpeg`) to generate a moving H264 `testsrc` stream
 - feeds those H264 access units into the existing `push_access_unit()` path
 - the NiceGUI page consumes the stream using the existing HTTP signaling API and a native browser `<video>` element
+- all browser debug UX, reconnect logic, telemetry, and console hooks live in `examples/nicegui_smoke/app.py`
 
 ## Quick start
 
@@ -20,7 +21,7 @@ From the repo root:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r examples/nicegui_smoke/requirements.txt
-python examples/nicegui_smoke/app.py --start-server
+python examples/nicegui_smoke/app.py --start-server --auto-connect --debug
 ```
 
 Open:
@@ -29,11 +30,18 @@ Open:
 http://127.0.0.1:8090/
 ```
 
-When working, you should see:
+## What changed in the harness
 
-- a moving browser video generated from the WebRTC H264 path
-- log lines showing offer/answer progress and connection state changes
-- the stream sourced from the synthetic smoke server stream id `synthetic-h264`
+The page is now a more useful day-to-day debug client instead of a basic smoke test:
+
+- **Settings UI:** use the visible **Settings** button or right-click the video area.
+- **Config persistence:** server URL, stream ID, debug mode, reconnect mode, and poll interval are saved in browser storage.
+- **Connection controls:** explicit **Connect**, **Reconnect**, **Disconnect**, and **Refresh debug** buttons.
+- **Summary row:** quick status badges for connection, remote track, playback, offer/answer, candidate handling, and generation.
+- **Debug telemetry panel:** shows peer connection state, signaling state, ICE state, selected stream/server, remote description/track status, playback state, session summary, and browser stats.
+- **Video state widget:** shows `readyState`, `paused`, `currentTime`, rendered size, `networkState`, and mute state.
+- **Logs:** timestamped category logs with filtering and copy-to-clipboard support.
+- **Console hooks in debug mode:** `window.__videoSmokePc`, `window.__videoSmokeVideo`, `window.__videoSmokeState`, and `window.__videoSmokeStats()`.
 
 ## Run against an already-running server
 
@@ -41,12 +49,71 @@ If you already launched the smoke server yourself:
 
 ```bash
 ./build/video_server_nicegui_smoke_server --ffmpeg "$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
-python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream-id synthetic-h264
+python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream-id synthetic-h264 --auto-connect
 ```
+
+## Settings panel
+
+Open the settings panel either by:
+
+- clicking **Settings** in the toolbar, or
+- right-clicking the video area.
+
+Current controls include:
+
+- server URL
+- stream ID
+- debug mode toggle
+- auto reconnect toggle
+- auto connect on reload toggle
+- session poll interval
+- log filter
+- placeholder controls for future verbosity / display options
+
+The settings are saved in browser local storage so a page reload keeps the previous session target and behavior.
+
+## Debug telemetry
+
+When **debug mode** is enabled, the collapsible debug panel shows:
+
+- `connectionState`
+- `iceConnectionState`
+- `iceGatheringState`
+- `signalingState`
+- current connection/session generation
+- selected server URL + stream ID
+- offer/answer status
+- candidate exchange status
+- whether the remote description has been applied
+- whether a remote track was received
+- whether playback appears active
+- selected backend candidate observation
+- selected fields from the server session JSON
+- browser `getStats()` summary for inbound video packets/bytes/frames/codec/resolution/FPS
+
+## Reconnect / disconnect workflow
+
+- **Connect** starts a new browser peer connection using the saved settings.
+- **Reconnect** clears stale browser state first, then builds a fresh peer connection.
+- **Disconnect** tears down the active browser peer connection, clears the `<video>` element, and resets the runtime telemetry.
+- **Refresh debug** manually polls session info and browser stats without forcing a reconnect.
+- If **auto reconnect** is enabled, the harness will retry after connection failures/disconnects.
+
+## Browser console helpers
+
+When debug mode is enabled, the page exposes:
+
+- `window.__videoSmokePc` → active `RTCPeerConnection`
+- `window.__videoSmokeVideo` → active `<video>` element
+- `window.__videoSmokeState` → internal harness state object
+- `window.__videoSmokeStats()` → async helper returning the summarized `getStats()` snapshot
+
+These are intentionally debug-only helpers for manual browser investigation.
 
 ## Caveats
 
-- This is a smoke harness, not a production UI.
+- This is a debug harness, not a production UI.
 - It targets local/manual validation.
 - It keeps signaling intentionally simple and primarily relies on SDP exchange on localhost.
 - The current backend still exposes one active WebRTC session slot per stream.
+- Session and stats polling are lightweight but still periodic; increase the poll interval if you want less churn.
