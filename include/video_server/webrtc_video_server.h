@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "video_server/video_server.h"
 
@@ -16,6 +17,7 @@ struct WebRtcVideoServerConfig {
 struct WebRtcHttpResponse {
   int status{200};
   std::string body;
+  std::unordered_map<std::string, std::string> headers;
 };
 
 class WebRtcVideoServer : public IVideoServer {
@@ -40,7 +42,8 @@ class WebRtcVideoServer : public IVideoServer {
   std::optional<StreamOutputConfig> get_stream_output_config(const std::string& stream_id) const override;
 
   WebRtcHttpResponse handle_http_request_for_test(const std::string& method, const std::string& path,
-                                                  const std::string& body = "");
+                                                  const std::string& body = "",
+                                                  std::unordered_map<std::string, std::string> headers = {});
 
  private:
   class Impl;

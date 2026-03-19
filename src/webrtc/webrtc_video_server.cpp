@@ -184,6 +184,25 @@ HttpResponse json_error(int status, const char* message) {
   return HttpResponse{status, out.str(), "application/json"};
 }
 
+bool is_api_path(const std::string& path) { return path.rfind("/api/", 0) == 0; }
+
+std::string cors_allow_origin(const HttpRequest& request) {
+  const auto it = request.headers.find("origin");
+  if (it != request.headers.end() && !it->second.empty()) {
+    return it->second;
+  }
+  return "*";
+}
+
+void apply_api_cors_headers(const HttpRequest& request, HttpResponse& response) {
+  if (!is_api_path(request.path)) {
+    return;
+  }
+  response.headers["Access-Control-Allow-Origin"] = cors_allow_origin(request);
+  response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS";
+  response.headers["Access-Control-Allow-Headers"] = "Content-Type";
+}
+
 std::string output_config_json(const StreamOutputConfig& cfg) {
   std::ostringstream out;
   out << "{"
@@ -223,6 +242,17 @@ class WebRtcVideoServer::Impl {
   }
 
   HttpResponse handle_http(const HttpRequest& request) {
+    if (is_api_path(request.path) && request.method == "OPTIONS") {
+      HttpResponse response{204, "", "application/json"};
+      apply_api_cors_headers(request, response);
+      return response;
+    }
+
+    auto finalize = [&](HttpResponse response) {
+      apply_api_cors_headers(request, response);
+      return response;
+    };
+
     if (request.method == "GET" && request.path == "/api/video/streams") {
       auto streams = core_.list_streams();
       std::ostringstream out;
@@ -233,7 +263,7 @@ class WebRtcVideoServer::Impl {
             << json_escape(streams[i].label) << "\",\"active\":" << bool_to_json(streams[i].active) << '}';
       }
       out << "]}";
-      return HttpResponse{200, out.str(), "application/json"};
+      return finalize(HttpResponse{200, out.str(), "application/json"});
     }
 
     if (request.path.find("/api/video/streams/") == 0) {
@@ -244,7 +274,7 @@ class WebRtcVideoServer::Impl {
       if (request.method == "GET" && output_pos == std::string::npos && !is_frame_request) {
         auto info = core_.get_stream_info(tail);
         if (!info.has_value()) {
-          return json_error(404, "stream not found");
+          return finalize(json_error(404, "stream not found"));
         }
         auto latest = core_.get_latest_frame_for_stream(tail);
         auto latest_encoded = core_.get_latest_encoded_unit_for_stream(tail);
@@ -278,7 +308,7 @@ class WebRtcVideoServer::Impl {
             << "\"latest_encoded_codec_config\":"
             << bool_to_json(latest_encoded ? latest_encoded->codec_config : false) << ','
             << "\"active\":" << bool_to_json(info->active) << '}';
-        return HttpResponse{200, out.str(), "application/json"};
+        return finalize(HttpResponse{200, out.str(), "application/json"});
       }
 
 
@@ -286,19 +316,19 @@ class WebRtcVideoServer::Impl {
         const std::string stream_id = tail.substr(0, frame_pos);
         auto info = core_.get_stream_info(stream_id);
         if (!info.has_value()) {
-          return json_error(404, "stream not found");
+          return finalize(json_error(404, "stream not found"));
         }
 
         auto latest = core_.get_latest_frame_for_stream(stream_id);
         if (!latest || !latest->valid) {
-          return json_error(404, "latest frame not found");
+          return finalize(json_error(404, "latest frame not found"));
         }
 
         auto encoded = encode_latest_frame_as_ppm(*latest);
         if (!encoded.has_value()) {
-          return json_error(500, "failed to encode latest frame");
+          return finalize(json_error(500, "failed to encode latest frame"));
         }
-        return HttpResponse{200, std::move(encoded->body), encoded->content_type};
+        return finalize(HttpResponse{200, std::move(encoded->body), encoded->content_type});
       }
 
       if (output_pos != std::string::npos) {
@@ -306,24 +336,24 @@ class WebRtcVideoServer::Impl {
         if (request.method == "GET") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
-            return json_error(404, "stream not found");
+            return finalize(json_error(404, "stream not found"));
           }
-          return HttpResponse{200, output_config_json(*cfg), "application/json"};
+          return finalize(HttpResponse{200, output_config_json(*cfg), "application/json"});
         }
 
         if (request.method == "PUT") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
-            return json_error(404, "stream not found");
+            return finalize(json_error(404, "stream not found"));
           }
 
           if (request.body.empty()) {
-            return json_error(400, "invalid request body");
+            return finalize(json_error(400, "invalid request body"));
           }
 
           std::unordered_map<std::string, JsonValue> body_values;
           if (!parse_flat_json_object(request.body, body_values)) {
-            return json_error(400, "invalid request body");
+            return finalize(json_error(400, "invalid request body"));
           }
 
           const auto mode_it = body_values.find("display_mode");
@@ -335,7 +365,7 @@ class WebRtcVideoServer::Impl {
           if (mode_it == body_values.end() || mirrored_it == body_values.end() ||
               rotation_it == body_values.end() || min_it == body_values.end() ||
               max_it == body_values.end()) {
-            return json_error(400, "invalid request body");
+            return finalize(json_error(400, "invalid request body"));
           }
 
           if (mode_it->second.type != JsonValue::Type::String ||
@@ -343,12 +373,12 @@ class WebRtcVideoServer::Impl {
               rotation_it->second.type != JsonValue::Type::Number ||
               min_it->second.type != JsonValue::Type::Number ||
               max_it->second.type != JsonValue::Type::Number) {
-            return json_error(400, "invalid request body");
+            return finalize(json_error(400, "invalid request body"));
           }
 
           const auto parsed_mode = video_display_mode_from_string(mode_it->second.string_value.c_str());
           if (!parsed_mode.has_value()) {
-            return json_error(400, "invalid display_mode");
+            return finalize(json_error(400, "invalid display_mode"));
           }
 
           StreamOutputConfig updated = *cfg;
@@ -359,10 +389,10 @@ class WebRtcVideoServer::Impl {
           updated.palette_max = static_cast<float>(max_it->second.number_value);
 
           if (!core_.set_stream_output_config(stream_id, updated)) {
-            return json_error(400, "invalid output config");
+            return finalize(json_error(400, "invalid output config"));
           }
 
-          return HttpResponse{200, output_config_json(updated), "application/json"};
+          return finalize(HttpResponse{200, output_config_json(updated), "application/json"});
         }
       }
     }
@@ -376,28 +406,28 @@ class WebRtcVideoServer::Impl {
       if (request.method == "POST" && action == "offer") {
         std::string error_message;
         if (!signaling_.set_offer(stream_id, request.body, &error_message)) {
-          return json_error(error_message == "stream not found" ? 404 : 400, error_message.c_str());
+          return finalize(json_error(error_message == "stream not found" ? 404 : 400, error_message.c_str()));
         }
-        return HttpResponse{200, "{\"ok\":true}", "application/json"};
+        return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
       }
       if (request.method == "POST" && action == "answer") {
         std::string error_message;
         if (!signaling_.set_answer(stream_id, request.body, &error_message)) {
-          return json_error(error_message == "session not found" ? 404 : 400, error_message.c_str());
+          return finalize(json_error(error_message == "session not found" ? 404 : 400, error_message.c_str()));
         }
-        return HttpResponse{200, "{\"ok\":true}", "application/json"};
+        return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
       }
       if (request.method == "POST" && action == "candidate") {
         std::string error_message;
         if (!signaling_.add_ice_candidate(stream_id, request.body, &error_message)) {
-          return json_error(error_message == "session not found" ? 404 : 400, error_message.c_str());
+          return finalize(json_error(error_message == "session not found" ? 404 : 400, error_message.c_str()));
         }
-        return HttpResponse{200, "{\"ok\":true}", "application/json"};
+        return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
       }
       if (request.method == "GET" && action == "session") {
         auto session = signaling_.get_session(stream_id);
         if (!session.has_value()) {
-          return json_error(404, "session not found");
+          return finalize(json_error(404, "session not found"));
         }
         std::ostringstream out;
         out << "{\"session_generation\":" << session->session_generation << ','
@@ -470,11 +500,11 @@ class WebRtcVideoServer::Impl {
             << json_escape(session->media_source.encoded_sender.last_packetization_status) << "\","
             << "\"encoded_sender_video_mid\":\""
             << json_escape(session->media_source.encoded_sender.video_mid) << "\"}";
-        return HttpResponse{200, out.str(), "application/json"};
+        return finalize(HttpResponse{200, out.str(), "application/json"});
       }
     }
 
-    return json_error(404, "not found");
+    return finalize(json_error(404, "not found"));
   }
 
   WebRtcVideoServerConfig config_;
@@ -531,9 +561,10 @@ std::optional<StreamOutputConfig> WebRtcVideoServer::get_stream_output_config(
 
 WebRtcHttpResponse WebRtcVideoServer::handle_http_request_for_test(const std::string& method,
                                                                    const std::string& path,
-                                                                   const std::string& body) {
-  const HttpResponse response = impl_->handle_http(HttpRequest{method, path, body});
-  return WebRtcHttpResponse{response.status, response.body};
+                                                                   const std::string& body,
+                                                                   std::unordered_map<std::string, std::string> headers) {
+  const HttpResponse response = impl_->handle_http(HttpRequest{method, path, body, std::move(headers)});
+  return WebRtcHttpResponse{response.status, response.body, response.headers};
 }
 
 }  // namespace video_server

@@ -2,10 +2,12 @@
 
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include <netdb.h>
@@ -19,6 +21,13 @@ namespace {
 std::string trim_cr(std::string value) {
   if (!value.empty() && value.back() == '\r') {
     value.pop_back();
+  }
+  return value;
+}
+
+std::string lowercase_ascii(std::string value) {
+  for (char& c : value) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   }
   return value;
 }
@@ -79,6 +88,7 @@ bool parse_request(const std::string& raw, HttpRequest& out_request) {
     if (key == "Content-Length") {
       content_length = static_cast<size_t>(std::stoul(value));
     }
+    out_request.headers.emplace(lowercase_ascii(std::move(key)), std::move(value));
   }
 
   const size_t body_start = header_end + 4;
@@ -94,6 +104,9 @@ std::string response_to_http(const HttpResponse& response) {
   std::ostringstream out;
   out << "HTTP/1.1 " << response.status << ' ' << reason_phrase(response.status) << "\r\n";
   out << "Content-Type: " << content_type << "\r\n";
+  for (const auto& [key, value] : response.headers) {
+    out << key << ": " << value << "\r\n";
+  }
   out << "Content-Length: " << response.body.size() << "\r\n";
   out << "Connection: close\r\n\r\n";
   out << response.body;

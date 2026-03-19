@@ -127,6 +127,12 @@ bool json_bool_field(const std::string& json, const std::string& key) {
   return false;
 }
 
+std::string response_header(const video_server::WebRtcHttpResponse& response, const std::string& key) {
+  const auto it = response.headers.find(key);
+  CHECK_TRUE(it != response.headers.end());
+  return it->second;
+}
+
 template <typename Predicate>
 bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -230,6 +236,65 @@ TEST(WebRtcHttpTest, SignalingCallbacksRemainResponsive) {
   }
 
   server.stop();
+}
+
+TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions) {
+  const std::string origin = "http://127.0.0.1:8090";
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{"127.0.0.1", 0, false});
+  video_server::StreamConfig cfg{"signal-cors", "signal-cors", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  CHECK_TRUE(server.register_stream(cfg));
+
+  auto client_offer = make_client_offer("cors");
+  std::unordered_map<std::string, std::string> headers{{"origin", origin}};
+
+  {
+    std::lock_guard<std::mutex> lock(client_offer->mutex);
+    const auto offer_response = server.handle_http_request_for_test("POST", "/api/video/signaling/signal-cors/offer",
+                                                                    client_offer->offer_sdp, headers);
+    CHECK_TRUE(offer_response.status == 200);
+    CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Origin") == origin);
+    CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Methods") == "GET, POST, PUT, OPTIONS");
+    CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Headers") == "Content-Type");
+  }
+
+  const auto session_response =
+      server.handle_http_request_for_test("GET", "/api/video/signaling/signal-cors/session", "", headers);
+  CHECK_TRUE(session_response.status == 200);
+  CHECK_TRUE(response_header(session_response, "Access-Control-Allow-Origin") == origin);
+
+  const auto options_offer =
+      server.handle_http_request_for_test("OPTIONS", "/api/video/signaling/signal-cors/offer", "", headers);
+  CHECK_TRUE(options_offer.status == 204);
+  CHECK_TRUE(options_offer.body.empty());
+  CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Origin") == origin);
+  CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Methods") == "GET, POST, PUT, OPTIONS");
+  CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Headers") == "Content-Type");
+
+  const auto options_candidate =
+      server.handle_http_request_for_test("OPTIONS", "/api/video/signaling/signal-cors/candidate", "", headers);
+  CHECK_TRUE(options_candidate.status == 204);
+  CHECK_TRUE(response_header(options_candidate, "Access-Control-Allow-Origin") == origin);
+
+  const auto options_session =
+      server.handle_http_request_for_test("OPTIONS", "/api/video/signaling/signal-cors/session", "", headers);
+  CHECK_TRUE(options_session.status == 204);
+  CHECK_TRUE(response_header(options_session, "Access-Control-Allow-Origin") == origin);
+
+  std::string candidate;
+  if (wait_until([&]() {
+        std::lock_guard<std::mutex> lock(client_offer->mutex);
+        if (client_offer->candidates.empty()) {
+          return false;
+        }
+        candidate = client_offer->candidates.front();
+        return true;
+      },
+      1000)) {
+    const auto candidate_response = server.handle_http_request_for_test(
+        "POST", "/api/video/signaling/signal-cors/candidate", candidate, headers);
+    CHECK_TRUE(candidate_response.status == 200);
+    CHECK_TRUE(response_header(candidate_response, "Access-Control-Allow-Origin") == origin);
+  }
 }
 
 TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive) {
