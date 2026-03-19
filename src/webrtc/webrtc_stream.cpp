@@ -426,9 +426,9 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.codec = codec_;
     snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
     snapshot.codec_config_seen = codec_config_seen_;
-    snapshot.ready_for_video_track = ready_for_video_track_;
-    snapshot.video_track_exists = video_track_exists_;
-    snapshot.video_track_open = video_track_open_;
+    snapshot.video_track_exists = video_track_sink_ && video_track_sink_->exists();
+    snapshot.video_track_open = video_track_sink_ && video_track_sink_->is_open();
+    snapshot.ready_for_video_track = snapshot.video_track_exists && codec_config_seen_ && keyframe_seen_;
     snapshot.h264_delivery_active = h264_delivery_active_;
     snapshot.keyframe_seen = keyframe_seen_;
     snapshot.cached_codec_config_available = cached_codec_config_available_;
@@ -447,6 +447,17 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.last_contains_non_idr = last_contains_non_idr_;
     snapshot.last_packetization_status = last_packetization_status_;
     snapshot.video_mid = video_track_sink_ ? video_track_sink_->mid() : "";
+    if (snapshot.sender_state == "video-track-missing" && snapshot.video_track_exists) {
+      if (!snapshot.codec_config_seen) {
+        snapshot.sender_state = "waiting-for-h264-codec-config";
+      } else if (!snapshot.keyframe_seen) {
+        snapshot.sender_state = "waiting-for-h264-keyframe";
+      } else if (!snapshot.video_track_open) {
+        snapshot.sender_state = "waiting-for-video-track-open";
+      } else {
+        snapshot.sender_state = "sending-h264-rtp";
+      }
+    }
     return snapshot;
   }
 
@@ -825,9 +836,7 @@ void WebRtcStreamSession::configure_callbacks() {
 
   peer_connection_->onLocalDescription([this](rtc::Description description) {
     std::string answer = std::string(description);
-    if (description.type() == rtc::Description::Type::Answer) {
-      answer = sanitize_answer_setup_role(std::move(answer));
-    }
+    answer = sanitize_answer_setup_role(std::move(answer));
     const auto answer_mids = extract_sdp_mids(answer);
     std::clog << "[signaling] answer generated stream=" << stream_id_ << " size=" << answer.size()
               << " media_sections=" << count_sdp_media_sections(answer)

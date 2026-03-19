@@ -32,10 +32,10 @@ std::shared_ptr<const video_server::LatestEncodedUnit> make_large_idr_unit(uint6
 
 class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
  public:
-  explicit FakeEncodedVideoTrackSink(bool open = true, std::string mid = "video")
-      : open_(open), mid_(std::move(mid)) {}
+  explicit FakeEncodedVideoTrackSink(bool open = true, std::string mid = "video", bool exists = true)
+      : exists_(exists), open_(open), mid_(std::move(mid)) {}
 
-  bool exists() const override { return true; }
+  bool exists() const override { return exists_; }
   bool is_open() const override { return open_; }
   std::string mid() const override { return mid_; }
   void send(const std::byte* data, size_t size) override {
@@ -43,9 +43,13 @@ class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
     sent_packets.emplace_back(data, data + size);
   }
 
+  void set_exists(bool exists) { exists_ = exists; }
+  void set_open(bool open) { open_ = open; }
+
   std::mutex mutex;
   std::vector<std::vector<std::byte>> sent_packets;
  private:
+  bool exists_{true};
   bool open_{true};
   std::string mid_;
 };
@@ -116,6 +120,39 @@ TEST(WebRtcStreamSessionTest, PacketizesFragmentedH264AfterCodecConfigAndKeyfram
   EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[12]) & 0x1f, 28u);
   EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[13]) & 0x40, 0x40);
   EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[1]) & 0x80, 0x80);
+}
+
+
+TEST(WebRtcStreamSessionTest, SnapshotReflectsTrackAvailabilityAfterLateBind) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", false);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 4321);
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+
+  const auto before_bind = sender->snapshot();
+  EXPECT_EQ(before_bind.sender_state, "video-track-missing");
+  EXPECT_FALSE(before_bind.video_track_exists);
+  EXPECT_FALSE(before_bind.video_track_open);
+  EXPECT_FALSE(before_bind.ready_for_video_track);
+
+  track_sink->set_exists(true);
+
+  const auto after_exists = sender->snapshot();
+  EXPECT_EQ(after_exists.sender_state, "waiting-for-video-track-open");
+  EXPECT_TRUE(after_exists.video_track_exists);
+  EXPECT_FALSE(after_exists.video_track_open);
+  EXPECT_TRUE(after_exists.ready_for_video_track);
+
+  track_sink->set_open(true);
+
+  const auto after_open = sender->snapshot();
+  EXPECT_EQ(after_open.sender_state, "sending-h264-rtp");
+  EXPECT_TRUE(after_open.video_track_exists);
+  EXPECT_TRUE(after_open.video_track_open);
+  EXPECT_TRUE(after_open.ready_for_video_track);
 }
 
 TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserved) {
