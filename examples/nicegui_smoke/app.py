@@ -218,7 +218,13 @@ window.videoSmokeHarness = async function(config) {
       status.textContent = 'session JSON parse failed';
       return;
     }
-    status.textContent = `peer=${session.peer_state} media=${session.media_bridge_state} sender=${session.encoded_sender_state}`;
+    status.textContent =
+      `peer=${session.peer_state} media=${session.media_bridge_state} sender=${session.encoded_sender_state} ` +
+      `codec_config=${session.encoded_sender_cached_codec_config_available} ` +
+      `idr=${session.encoded_sender_cached_idr_available} ` +
+      `startup_sent=${session.encoded_sender_startup_sequence_sent} ` +
+      `first_decodable=${session.encoded_sender_first_decodable_frame_sent} ` +
+      `pkts_after_open=${session.encoded_sender_packets_sent_after_track_open}`;
 
     if (!remoteDescriptionApplied && session.answer_sdp) {
       append('answer received from backend session');
@@ -233,6 +239,20 @@ window.videoSmokeHarness = async function(config) {
       lastRemoteCandidate = session.last_local_candidate;
       append(`backend ICE candidate observed: ${lastRemoteCandidate}`);
     }
+
+    append(
+      `sender snapshot state=${session.encoded_sender_state}` +
+      ` codec_config_seen=${session.encoded_sender_codec_config_seen}` +
+      ` cached_codec_config=${session.encoded_sender_cached_codec_config_available}` +
+      ` cached_idr=${session.encoded_sender_cached_idr_available}` +
+      ` ready=${session.encoded_sender_ready_for_video_track}` +
+      ` first_decodable=${session.encoded_sender_first_decodable_frame_sent}` +
+      ` startup_sent=${session.encoded_sender_startup_sequence_sent}` +
+      ` packets=${session.encoded_sender_packets_attempted}` +
+      ` packets_after_open=${session.encoded_sender_packets_sent_after_track_open}` +
+      ` payload=${session.encoded_sender_negotiated_h264_payload_type}` +
+      ` fmtp=${session.encoded_sender_negotiated_h264_fmtp}`
+    );
 
     if (remoteDescriptionApplied && (pc.connectionState === 'connected' || pc.connectionState === 'completed')) {
       append('peer connection is connected');

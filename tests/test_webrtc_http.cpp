@@ -834,8 +834,18 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
   CHECK_TRUE(json_uint_field(session_after_updates.body, "encoded_sender_delivered_units") >= 1);
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_has_pending_encoded_unit"));
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_codec_config_seen"));
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_cached_codec_config_available"));
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_cached_idr_available"));
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_ready_for_video_track") ||
              !encoded_sender_state.empty());
+  CHECK_TRUE(!json_bool_field(session_after_updates.body, "encoded_sender_first_decodable_frame_sent") ||
+             json_uint_field(session_after_updates.body, "encoded_sender_packets_sent_after_track_open") >= 1);
+  CHECK_TRUE(!json_bool_field(session_after_updates.body, "encoded_sender_startup_sequence_sent") ||
+             json_uint_field(session_after_updates.body, "encoded_sender_startup_packets_sent") >= 1);
+  CHECK_TRUE(json_uint_field(session_after_updates.body, "encoded_sender_negotiated_h264_payload_type") >= 1);
+  CHECK_TRUE(!json_bool_field(session_after_updates.body, "encoded_sender_video_track_exists") ||
+             !json_string_field(session_after_updates.body, "encoded_sender_negotiated_h264_fmtp").empty() ||
+             json_string_field(session_after_updates.body, "encoded_sender_video_mid").empty());
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_last_contains_idr"));
   const auto packetization_status = json_string_field(session_after_updates.body, "encoded_sender_last_packetization_status");
   CHECK_TRUE(!packetization_status.empty());

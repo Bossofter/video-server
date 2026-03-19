@@ -42,10 +42,15 @@ struct EncodedVideoSenderSnapshot {
   bool h264_delivery_active{false};
   bool keyframe_seen{false};
   bool cached_codec_config_available{false};
+  bool cached_idr_available{false};
+  bool first_decodable_frame_sent{false};
+  bool startup_sequence_sent{false};
   uint64_t delivered_units{0};
   uint64_t duplicate_units_skipped{0};
   uint64_t failed_units{0};
   uint64_t packets_attempted{0};
+  uint64_t packets_sent_after_track_open{0};
+  uint64_t startup_packets_sent{0};
   uint64_t last_delivered_sequence_id{0};
   uint64_t last_delivered_timestamp_ns{0};
   size_t last_delivered_size_bytes{0};
@@ -55,6 +60,8 @@ struct EncodedVideoSenderSnapshot {
   bool last_contains_pps{false};
   bool last_contains_idr{false};
   bool last_contains_non_idr{false};
+  int negotiated_h264_payload_type{0};
+  std::string negotiated_h264_fmtp;
   std::string last_packetization_status;
   std::string video_mid;
 };
@@ -103,6 +110,7 @@ class IEncodedVideoSender {
   virtual ~IEncodedVideoSender() = default;
   // Session-side delivery/packetization boundary for encoded units feeding the browser-facing track.
   virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
+  virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
 

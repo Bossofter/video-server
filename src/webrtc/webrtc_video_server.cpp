@@ -502,11 +502,21 @@ class WebRtcVideoServer::Impl {
             << bool_to_json(session->media_source.encoded_sender.keyframe_seen) << ','
             << "\"encoded_sender_cached_codec_config_available\":"
             << bool_to_json(session->media_source.encoded_sender.cached_codec_config_available) << ','
+            << "\"encoded_sender_cached_idr_available\":"
+            << bool_to_json(session->media_source.encoded_sender.cached_idr_available) << ','
+            << "\"encoded_sender_first_decodable_frame_sent\":"
+            << bool_to_json(session->media_source.encoded_sender.first_decodable_frame_sent) << ','
+            << "\"encoded_sender_startup_sequence_sent\":"
+            << bool_to_json(session->media_source.encoded_sender.startup_sequence_sent) << ','
             << "\"encoded_sender_delivered_units\":" << session->media_source.encoded_sender.delivered_units << ','
             << "\"encoded_sender_duplicate_units_skipped\":"
             << session->media_source.encoded_sender.duplicate_units_skipped << ','
             << "\"encoded_sender_failed_units\":" << session->media_source.encoded_sender.failed_units << ','
             << "\"encoded_sender_packets_attempted\":" << session->media_source.encoded_sender.packets_attempted << ','
+            << "\"encoded_sender_packets_sent_after_track_open\":"
+            << session->media_source.encoded_sender.packets_sent_after_track_open << ','
+            << "\"encoded_sender_startup_packets_sent\":"
+            << session->media_source.encoded_sender.startup_packets_sent << ','
             << "\"encoded_sender_last_delivered_sequence_id\":"
             << session->media_source.encoded_sender.last_delivered_sequence_id << ','
             << "\"encoded_sender_last_delivered_timestamp_ns\":"
@@ -525,6 +535,10 @@ class WebRtcVideoServer::Impl {
             << bool_to_json(session->media_source.encoded_sender.last_contains_idr) << ','
             << "\"encoded_sender_last_contains_non_idr\":"
             << bool_to_json(session->media_source.encoded_sender.last_contains_non_idr) << ','
+            << "\"encoded_sender_negotiated_h264_payload_type\":"
+            << session->media_source.encoded_sender.negotiated_h264_payload_type << ','
+            << "\"encoded_sender_negotiated_h264_fmtp\":\""
+            << json_escape(session->media_source.encoded_sender.negotiated_h264_fmtp) << "\","
             << "\"encoded_sender_last_packetization_status\":\""
             << json_escape(session->media_source.encoded_sender.last_packetization_status) << "\","
             << "\"encoded_sender_video_mid\":\""
