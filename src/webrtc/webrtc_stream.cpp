@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <exception>
+#include <iostream>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -658,13 +659,18 @@ void WebRtcStreamSession::configure_callbacks() {
   // These callbacks may run synchronously while PeerConnection API calls are still on the stack.
   // They only touch session-local state under mutex_ and therefore must stay independent.
   peer_connection_->onLocalDescription([this](rtc::Description description) {
+    const std::string answer = std::string(description);
+    std::clog << "[signaling] answer generated stream=" << stream_id_ << " size=" << answer.size() << '\n';
     std::lock_guard<std::mutex> lock(mutex_);
-    answer_sdp_ = std::string(description);
+    answer_sdp_ = answer;
   });
 
   peer_connection_->onLocalCandidate([this](rtc::Candidate candidate) {
+    const std::string local_candidate = std::string(candidate);
+    std::clog << "[signaling] local candidate generated stream=" << stream_id_
+              << " size=" << local_candidate.size() << '\n';
     std::lock_guard<std::mutex> lock(mutex_);
-    last_local_candidate_ = std::string(candidate);
+    last_local_candidate_ = local_candidate;
   });
 
   peer_connection_->onStateChange([this](rtc::PeerConnection::State state) {

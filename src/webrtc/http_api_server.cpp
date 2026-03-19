@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -264,6 +265,7 @@ void HttpApiServer::handle_client(int client_fd) const {
   HttpRequest request;
   HttpResponse response;
   if (!parse_request(raw, request)) {
+    std::clog << "[http] failed to parse incoming request\n";
     response = HttpResponse{400, "{\"error\":\"invalid request\"}", "application/json"};
   } else if (!handler_) {
     response = HttpResponse{500, "{\"error\":\"handler unavailable\"}", "application/json"};

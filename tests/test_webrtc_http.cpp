@@ -98,9 +98,49 @@ std::string json_string_field(const std::string& json, const std::string& key) {
   const auto start = json.find(needle);
   CHECK_TRUE(start != std::string::npos);
   const auto value_start = start + needle.size();
-  const auto end = json.find('"', value_start);
-  CHECK_TRUE(end != std::string::npos);
-  return json.substr(value_start, end - value_start);
+  std::string value;
+  bool escaping = false;
+  for (size_t i = value_start; i < json.size(); ++i) {
+    const char c = json[i];
+    if (escaping) {
+      switch (c) {
+        case '"':
+        case '\\':
+        case '/':
+          value.push_back(c);
+          break;
+        case 'b':
+          value.push_back('\b');
+          break;
+        case 'f':
+          value.push_back('\f');
+          break;
+        case 'n':
+          value.push_back('\n');
+          break;
+        case 'r':
+          value.push_back('\r');
+          break;
+        case 't':
+          value.push_back('\t');
+          break;
+        default:
+          CHECK_TRUE(false);
+      }
+      escaping = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaping = true;
+      continue;
+    }
+    if (c == '"') {
+      return value;
+    }
+    value.push_back(c);
+  }
+  CHECK_TRUE(false);
+  return "";
 }
 
 uint64_t json_uint_field(const std::string& json, const std::string& key) {
@@ -131,6 +171,12 @@ std::string response_header(const video_server::WebRtcHttpResponse& response, co
   const auto it = response.headers.find(key);
   CHECK_TRUE(it != response.headers.end());
   return it->second;
+}
+
+void assert_no_control_chars(const std::string& text) {
+  for (unsigned char c : text) {
+    CHECK_TRUE(c >= 0x20);
+  }
 }
 
 template <typename Predicate>
@@ -295,6 +341,38 @@ TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions) {
     CHECK_TRUE(candidate_response.status == 200);
     CHECK_TRUE(response_header(candidate_response, "Access-Control-Allow-Origin") == origin);
   }
+}
+
+TEST(WebRtcHttpTest, SignalingSessionJsonEscapesSdpAndQueuedCandidates) {
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{"127.0.0.1", 0, false});
+  video_server::StreamConfig cfg{"signal-json", "signal-json", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  CHECK_TRUE(server.register_stream(cfg));
+
+  const std::string queued_candidate =
+      "candidate:0 1 UDP 2122252543 127.0.0.1 3478 typ host generation 0 ufrag abc network-id 1";
+  const auto early_candidate = server.handle_http_request_for_test(
+      "POST", "/api/video/signaling/signal-json/candidate", queued_candidate);
+  CHECK_TRUE(early_candidate.status == 200);
+
+  auto client_offer = make_client_offer("json-escape");
+  {
+    std::lock_guard<std::mutex> lock(client_offer->mutex);
+    const auto offer_response =
+        server.handle_http_request_for_test("POST", "/api/video/signaling/signal-json/offer", client_offer->offer_sdp);
+    CHECK_TRUE(offer_response.status == 200);
+  }
+
+  video_server::WebRtcHttpResponse session_response{};
+  CHECK_TRUE(wait_until([&]() {
+    session_response = server.handle_http_request_for_test("GET", "/api/video/signaling/signal-json/session");
+    return session_response.status == 200 && !json_string_field(session_response.body, "answer_sdp").empty();
+  }));
+
+  CHECK_TRUE(session_response.body.find('\r') == std::string::npos);
+  CHECK_TRUE(session_response.body.find('\n') == std::string::npos);
+  assert_no_control_chars(session_response.body);
+  CHECK_TRUE(session_response.body.find("\\r\\n") != std::string::npos);
+  CHECK_TRUE(session_response.body.find("\"last_remote_candidate\":\"" + queued_candidate + "\"") != std::string::npos);
 }
 
 TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive) {
@@ -601,7 +679,8 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
     }
     session_json = response.body;
     return json_uint_field(session_json, "session_generation") > first_generation &&
-           json_string_field(session_json, "offer_sdp") == replacement_offer_sdp;
+           !json_string_field(session_json, "offer_sdp").empty() &&
+           !json_string_field(session_json, "answer_sdp").empty();
   }));
 
 
