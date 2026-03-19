@@ -213,7 +213,8 @@ window.videoSmokeHarness = (() => {{
     state.recentLogs = state.recentLogs.slice(0, 400);
     const logFilter = state.config?.logFilter || 'all';
     const visible = state.recentLogs.filter((item) => logFilter === 'all' || item.category === logFilter);
-    const text = visible.map((item) => `[${{item.time}}] [${{item.category}}] ${{item.message}}`).join('\n');
+    // NOTE: PAGE_JS is embedded in a Python string literal, so JS backslashes must stay double-escaped.
+    const text = visible.map((item) => `[${{item.time}}] [${{item.category}}] ${{item.message}}`).join('\\n');
     const logEl = byId('smoke-log');
     if (logEl) logEl.textContent = text;
     console.log(`[video-smoke:${{category}}]`, message);
