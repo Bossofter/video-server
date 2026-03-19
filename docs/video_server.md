@@ -126,7 +126,7 @@ The pipeline owns the encoder subprocess lifecycle:
 - `start()` validates config, creates pipes, and spawns ffmpeg
 - `push_frame()` validates the raw frame contract and writes raw bytes to ffmpeg stdin
 - a reader thread consumes ffmpeg stdout, detects Annex-B NAL boundaries, groups NALs into access units, and forwards them to the encoded sink
-- if the encoded sink rejects an access unit, the pipeline records a failure, closes its write side, and surfaces the failure on later `push_frame()` calls
+- if the encoded sink rejects an access unit, the pipeline records a failure, tears down the ffmpeg pipe bridge for that stream, and surfaces the failure on later `push_frame()` calls
 - `stop()` closes pipes, joins the reader thread, and terminates/reaps the subprocess without letting a broken pipe hang the server indefinitely
 
 ### Demo / validation path

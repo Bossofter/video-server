@@ -110,6 +110,12 @@ TEST(RawToH264PipelineTest, PropagatesSinkFailureToCaller) {
   auto extra_frame = make_rgb_frame(config.input_width, config.input_height, 99);
   EXPECT_FALSE(pipeline->push_frame(make_rgb_view(extra_frame, config.input_width, config.input_height, 30000, 99), &error));
   EXPECT_NE(error.find("sink rejected"), std::string::npos);
+
+  std::string repeated_error;
+  auto later_frame = make_rgb_frame(config.input_width, config.input_height, 100);
+  EXPECT_FALSE(
+      pipeline->push_frame(make_rgb_view(later_frame, config.input_width, config.input_height, 30001, 100), &repeated_error));
+  EXPECT_EQ(repeated_error, error);
   pipeline->stop();
 }
 
