@@ -79,11 +79,11 @@ The settings are saved in browser local storage so a page reload keeps the previ
 
 The **Widget preview** tab is a compact single-box layout intended to mirror the future embeddable widget form:
 
-- the video and its action buttons stay inside one container
-- the base display only keeps a simple health indicator and the stream ID
+- the video and status chip stay inside one container, while actions live in the right-click menu
+- the base display combines health + stream ID into a single cleaner status chip
 - additional in-box debug details are controlled from settings
 - right-clicking the widget opens grouped menu sections for:
-  - connection actions (`Connect`, `Reload / reconnect`, `Disconnect`, `Refresh`)
+  - connection actions (`Connect`, `Reload / reconnect`, `Disconnect`, `Refresh`) exposed only from the right-click menu
   - local widget settings (`Open settings panel`, `Toggle in-box debug`)
   - placeholder server-request grouping for future stream-setting calls
 

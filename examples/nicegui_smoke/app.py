@@ -236,7 +236,9 @@ window.videoSmokeHarness = (() => {{
   }}
 
   function computeOverallStatus() {{
-    if (state.pc && ['connected', 'completed'].includes(state.pc.connectionState) && state.playbackActive) {{
+    const video = byId('smoke-video');
+    const visiblyRendering = !!video && !video.paused && video.readyState >= 2 && video.videoWidth > 0;
+    if (state.pc && ['connected', 'completed'].includes(state.pc.connectionState) && (state.playbackActive || visiblyRendering)) {{
       return {{text: 'connected + rendering', className: 'good'}};
     }}
     if (state.pc && ['connected', 'completed'].includes(state.pc.connectionState) && state.remoteTrackReceived) {{
@@ -331,8 +333,7 @@ window.videoSmokeHarness = (() => {{
     const healthText = status.text;
     const healthDot = byId('widget-health-dot');
     if (healthDot) healthDot.className = `health-dot ${{healthClass || 'idle'}}`;
-    setText('widget-health-text', healthText);
-    setText('widget-stream-id', cfg.streamId || '');
+    setText('widget-health-summary', `${{healthText}} • ${{cfg.streamId || 'no stream'}}`);
 
     const widgetShowDebug = !!cfg.widgetShowDebug;
     const widgetLevelOrder = ['basic', 'detailed', 'full'];
@@ -791,14 +792,6 @@ window.videoSmokeHarness = (() => {{
     }});
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
-    byId('widget-action-connect')?.addEventListener('click', () => connect('widget connect'));
-    byId('widget-action-reconnect')?.addEventListener('click', () => connect('widget reconnect'));
-    byId('widget-action-disconnect')?.addEventListener('click', () => disconnect('widget disconnect'));
-    byId('widget-action-refresh')?.addEventListener('click', async () => {{
-      appendLog('ui', 'widget manual refresh requested');
-      await refreshSession();
-      await refreshStats();
-    }});
     byId('context-connect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context connect'); }});
     byId('context-reconnect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context reconnect'); }});
     byId('context-disconnect')?.addEventListener('click', () => {{ hideContextMenu(); disconnect('context disconnect'); }});
@@ -981,17 +974,12 @@ PAGE_HTML = """
         <div class="widget-video-wrap">
           <video id="widget-video" autoplay playsinline muted controls></video>
         </div>
-        <div class="widget-status-bar">
-          <div class="widget-status-chip">
-            <span class="summary-label">Health</span>
+        <div class="widget-status-bar compact">
+          <div class="widget-status-chip combined">
             <div class="widget-health">
               <span id="widget-health-dot" class="health-dot idle"></span>
-              <strong id="widget-health-text">idle</strong>
+              <strong id="widget-health-summary">idle • no stream</strong>
             </div>
-          </div>
-          <div class="widget-status-chip">
-            <span class="summary-label">Stream</span>
-            <strong id="widget-stream-id"></strong>
           </div>
         </div>
         <div id="widget-debug-sections" class="widget-debug-sections" style="display:none;">
@@ -1019,13 +1007,6 @@ PAGE_HTML = """
             <span>sender_state</span>
             <strong id="widget-session-sender">n/a</strong>
           </div>
-        </div>
-        <div class="widget-actions">
-          <button id="widget-action-connect" class="toolbar-button primary">Connect</button>
-          <button id="widget-action-reconnect" class="toolbar-button">Reload</button>
-          <button id="widget-action-disconnect" class="toolbar-button danger">Disconnect</button>
-          <button id="widget-action-refresh" class="toolbar-button">Refresh</button>
-          <button class="toolbar-button" onclick="window.videoSmokeHarness.showSettings(true)">Settings</button>
         </div>
       </div>
 
@@ -1152,7 +1133,9 @@ body { background: #111827; }
 .widget-video-wrap { background: #020617; border: 1px solid #334155; border-radius: 1rem; padding: 0.75rem; }
 #widget-video { width: 100%; min-height: 260px; background: #000; border-radius: 0.75rem; }
 .widget-status-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-top: 0.9rem; }
+.widget-status-bar.compact { grid-template-columns: minmax(0, 1fr); }
 .widget-status-chip, .widget-debug-card { background: #111827; border: 1px solid #1f2937; border-radius: 0.75rem; padding: 0.75rem; }
+.widget-status-chip.combined { padding: 0.9rem 1rem; }
 .widget-health { display: flex; align-items: center; gap: 0.5rem; }
 .health-dot { width: 0.85rem; height: 0.85rem; border-radius: 999px; display: inline-block; background: #475569; }
 .health-dot.good { background: #22c55e; }
@@ -1162,7 +1145,6 @@ body { background: #111827; }
 .widget-debug-sections { display: grid; gap: 0.75rem; margin-top: 0.9rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .widget-debug-card span { display: block; color: #94a3b8; font-size: 0.8rem; margin-bottom: 0.25rem; }
 .widget-debug-card strong { display: block; margin-bottom: 0.45rem; }
-.widget-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
 .context-menu { position: fixed; z-index: 60; width: min(320px, calc(100vw - 2rem)); background: #020617; border: 1px solid #334155; border-radius: 1rem; box-shadow: 0 18px 40px rgba(0,0,0,0.35); padding: 0.75rem; }
 .context-group + .context-group { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #1e293b; }
 .context-title, .settings-section-title { font-weight: 700; margin-bottom: 0.35rem; }
