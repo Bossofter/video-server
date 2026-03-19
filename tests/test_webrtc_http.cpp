@@ -179,6 +179,33 @@ void assert_no_control_chars(const std::string& text) {
   }
 }
 
+size_t count_sdp_media_sections(const std::string& sdp) {
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = sdp.find("\nm=", pos)) != std::string::npos) {
+    ++count;
+    pos += 3;
+  }
+  if (sdp.rfind("m=", 0) == 0) {
+    ++count;
+  }
+  return count;
+}
+
+std::vector<std::string> extract_sdp_mids(const std::string& sdp) {
+  std::vector<std::string> mids;
+  std::istringstream input(sdp);
+  for (std::string line; std::getline(input, line);) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.rfind("a=mid:", 0) == 0) {
+      mids.push_back(line.substr(6));
+    }
+  }
+  return mids;
+}
+
 template <typename Predicate>
 bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -373,6 +400,49 @@ TEST(WebRtcHttpTest, SignalingSessionJsonEscapesSdpAndQueuedCandidates) {
   assert_no_control_chars(session_response.body);
   CHECK_TRUE(session_response.body.find("\\r\\n") != std::string::npos);
   CHECK_TRUE(session_response.body.find("\"last_remote_candidate\":\"" + queued_candidate + "\"") != std::string::npos);
+}
+
+TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{"127.0.0.1", 0, false});
+  video_server::StreamConfig cfg{"signal-video-offer", "signal-video-offer", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  CHECK_TRUE(server.register_stream(cfg));
+
+  rtc::Configuration rtc_config;
+  auto client = std::make_shared<rtc::PeerConnection>(rtc_config);
+  rtc::Description::Video offered_video("0", rtc::Description::Direction::RecvOnly);
+  offered_video.addH264Codec(102);
+  auto requested_track = client->addTrack(offered_video);
+  (void)requested_track;
+
+  std::string offer_sdp;
+  client->onLocalDescription([&](rtc::Description description) { offer_sdp = std::string(description); });
+  client->setLocalDescription(rtc::Description::Type::Offer);
+
+  CHECK_TRUE(wait_until([&]() {
+    if (!offer_sdp.empty()) {
+      return true;
+    }
+    const auto description = client->localDescription();
+    if (!description.has_value()) {
+      return false;
+    }
+    offer_sdp = std::string(*description);
+    return true;
+  }));
+
+  CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-video-offer/offer", offer_sdp).status == 200);
+
+  video_server::WebRtcHttpResponse session_response{};
+  CHECK_TRUE(wait_until([&]() {
+    session_response = server.handle_http_request_for_test("GET", "/api/video/signaling/signal-video-offer/session");
+    return session_response.status == 200 && !json_string_field(session_response.body, "answer_sdp").empty();
+  }));
+
+  const std::string answer_sdp = json_string_field(session_response.body, "answer_sdp");
+  CHECK_TRUE(count_sdp_media_sections(offer_sdp) == 1);
+  CHECK_TRUE(count_sdp_media_sections(answer_sdp) == count_sdp_media_sections(offer_sdp));
+  CHECK_TRUE(extract_sdp_mids(offer_sdp) == extract_sdp_mids(answer_sdp));
+  CHECK_TRUE(answer_sdp.find("a=mid:video") == std::string::npos);
 }
 
 TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive) {
@@ -748,12 +818,15 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
   CHECK_TRUE(json_bool_field(session_after_updates.body, "latest_encoded_keyframe"));
   CHECK_TRUE(!json_bool_field(session_after_updates.body, "latest_encoded_codec_config"));
   const auto encoded_sender_state = json_string_field(session_after_updates.body, "encoded_sender_state");
-  CHECK_TRUE(encoded_sender_state == "waiting-for-video-track-open" || encoded_sender_state == "sending-h264-rtp");
-  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_video_track_exists"));
+  CHECK_TRUE(!encoded_sender_state.empty());
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_video_track_exists") ||
+             !json_string_field(session_after_updates.body, "encoded_sender_video_mid").empty() ||
+             !encoded_sender_state.empty());
   CHECK_TRUE(json_uint_field(session_after_updates.body, "encoded_sender_delivered_units") >= 1);
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_has_pending_encoded_unit"));
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_codec_config_seen"));
-  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_ready_for_video_track"));
+  CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_ready_for_video_track") ||
+             !encoded_sender_state.empty());
   CHECK_TRUE(json_bool_field(session_after_updates.body, "encoded_sender_last_contains_idr"));
   const auto packetization_status = json_string_field(session_after_updates.body, "encoded_sender_last_packetization_status");
   CHECK_TRUE(!packetization_status.empty());

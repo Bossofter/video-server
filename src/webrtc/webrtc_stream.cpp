@@ -89,6 +89,51 @@ std::vector<std::vector<uint8_t>> split_annex_b_nalus(const std::vector<uint8_t>
   return nalus;
 }
 
+size_t count_sdp_media_sections(const std::string& sdp) {
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = sdp.find("\nm=", pos)) != std::string::npos) {
+    ++count;
+    pos += 3;
+  }
+  if (sdp.rfind("m=", 0) == 0) {
+    ++count;
+  }
+  return count;
+}
+
+std::vector<std::string> extract_sdp_mids(const std::string& sdp) {
+  std::vector<std::string> mids;
+  size_t pos = 0;
+  while (pos < sdp.size()) {
+    const size_t line_end = sdp.find('\n', pos);
+    const size_t line_size = (line_end == std::string::npos ? sdp.size() : line_end) - pos;
+    std::string_view line(sdp.data() + pos, line_size);
+    if (!line.empty() && line.back() == '\r') {
+      line.remove_suffix(1);
+    }
+    if (line.rfind("a=mid:", 0) == 0) {
+      mids.emplace_back(line.substr(6));
+    }
+    if (line_end == std::string::npos) {
+      break;
+    }
+    pos = line_end + 1;
+  }
+  return mids;
+}
+
+std::string join_strings(const std::vector<std::string>& values) {
+  std::ostringstream out;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) {
+      out << ',';
+    }
+    out << values[i];
+  }
+  return out.str();
+}
+
 std::vector<uint8_t> make_rtp_packet(const uint8_t* payload, size_t payload_size, uint16_t sequence_number,
                                      uint32_t timestamp, uint32_t ssrc, bool marker) {
   std::vector<uint8_t> packet(12 + payload_size);
@@ -202,8 +247,8 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
 
 class H264EncodedVideoSender : public IEncodedVideoSender {
  public:
-  H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink, std::string track_mid)
-      : video_track_sink_(std::move(video_track_sink)), video_mid_(std::move(track_mid)), ssrc_(make_random_ssrc()) {}
+  explicit H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink)
+      : video_track_sink_(std::move(video_track_sink)), ssrc_(make_random_ssrc()) {}
 
   void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
     if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid) {
@@ -368,7 +413,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.last_contains_idr = last_contains_idr_;
     snapshot.last_contains_non_idr = last_contains_non_idr_;
     snapshot.last_packetization_status = last_packetization_status_;
-    snapshot.video_mid = video_mid_;
+    snapshot.video_mid = video_track_sink_ ? video_track_sink_->mid() : "";
     return snapshot;
   }
 
@@ -378,7 +423,6 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   std::shared_ptr<const LatestEncodedUnit> cached_codec_config_;
   std::string sender_state_{"waiting-for-encoded-input"};
   std::string codec_;
-  std::string video_mid_;
   uint32_t ssrc_{0};
   uint16_t sequence_number_{0};
   bool has_pending_encoded_unit_{false};
@@ -411,6 +455,7 @@ class RtcTrackPacketSink : public IEncodedVideoTrackSink {
 
   bool exists() const override { return static_cast<bool>(track_); }
   bool is_open() const override { return track_ && track_->isOpen(); }
+  std::string mid() const override { return track_ ? track_->mid() : ""; }
 
   void send(const std::byte* data, size_t size) override {
     if (track_) {
@@ -419,6 +464,44 @@ class RtcTrackPacketSink : public IEncodedVideoTrackSink {
   }
 
  private:
+  std::shared_ptr<rtc::Track> track_;
+};
+
+class AttachableRtcTrackSink : public IEncodedVideoTrackSink {
+ public:
+  bool exists() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<bool>(track_);
+  }
+
+  bool is_open() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return track_ && track_->isOpen();
+  }
+
+  std::string mid() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return track_ ? track_->mid() : "";
+  }
+
+  void send(const std::byte* data, size_t size) override {
+    std::shared_ptr<rtc::Track> track;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      track = track_;
+    }
+    if (track) {
+      track->send(data, size);
+    }
+  }
+
+  void bind(std::shared_ptr<rtc::Track> track) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    track_ = std::move(track);
+  }
+
+ private:
+  mutable std::mutex mutex_;
   std::shared_ptr<rtc::Track> track_;
 };
 
@@ -500,9 +583,8 @@ H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& acces
   return descriptor;
 }
 
-std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
-                                                                    std::string track_mid) {
-  return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink), std::move(track_mid));
+std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink) {
+  return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink));
 }
 
 WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
@@ -512,13 +594,8 @@ WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGette
   config.disableAutoNegotiation = false;
   peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
   media_source_ = std::make_unique<StreamMediaSourceBridge>();
-  const uint32_t video_ssrc = make_random_ssrc();
-  rtc::Description::Video media("video", rtc::Description::Direction::SendOnly);
-  media.addH264Codec(kH264PayloadType);
-  media.addSSRC(video_ssrc, "video-server-video", stream_id_, "h264-track");
-  auto video_track = peer_connection_->addTrack(media);
-  encoded_sender_ =
-      make_h264_encoded_video_sender(std::make_shared<RtcTrackPacketSink>(video_track), video_track ? video_track->mid() : "");
+  video_track_sink_ = std::make_shared<AttachableRtcTrackSink>();
+  encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_);
   media_source_->on_latest_frame(latest_frame_getter(stream_id_));
   auto latest_encoded = latest_encoded_unit_getter(stream_id_);
   media_source_->on_latest_encoded_unit(latest_encoded);
@@ -536,6 +613,11 @@ bool WebRtcStreamSession::apply_offer(const std::string& offer_sdp, std::string*
       std::lock_guard<std::mutex> lock(mutex_);
       peer_connection = peer_connection_;
     }
+
+    const auto offer_mids = extract_sdp_mids(offer_sdp);
+    std::clog << "[signaling] applying offer stream=" << stream_id_
+              << " media_sections=" << count_sdp_media_sections(offer_sdp)
+              << " mids=" << join_strings(offer_mids) << '\n';
 
     // PeerConnection calls may synchronously invoke onLocalDescription/onLocalCandidate/onStateChange,
     // so the session mutex must not be held across libdatachannel API calls.
@@ -658,9 +740,38 @@ std::string WebRtcStreamSession::peer_state_to_string(rtc::PeerConnection::State
 void WebRtcStreamSession::configure_callbacks() {
   // These callbacks may run synchronously while PeerConnection API calls are still on the stack.
   // They only touch session-local state under mutex_ and therefore must stay independent.
+  peer_connection_->onTrack([this](std::shared_ptr<rtc::Track> track) {
+    if (!track) {
+      std::clog << "[signaling] track callback stream=" << stream_id_ << " with null track\n";
+      return;
+    }
+
+    const auto description = track->description();
+    std::clog << "[signaling] track callback stream=" << stream_id_ << " mid=" << track->mid()
+              << " type=" << description.type() << " direction=" << static_cast<int>(description.direction())
+              << '\n';
+
+    if (description.type() != "video") {
+      return;
+    }
+
+    auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
+    if (!attachable_sink) {
+      std::clog << "[signaling] failed to access attachable video track sink stream=" << stream_id_ << '\n';
+      return;
+    }
+
+    attachable_sink->bind(track);
+    std::clog << "[signaling] bound negotiated video track stream=" << stream_id_
+              << " reused_mid=" << track->mid() << '\n';
+  });
+
   peer_connection_->onLocalDescription([this](rtc::Description description) {
     const std::string answer = std::string(description);
-    std::clog << "[signaling] answer generated stream=" << stream_id_ << " size=" << answer.size() << '\n';
+    const auto answer_mids = extract_sdp_mids(answer);
+    std::clog << "[signaling] answer generated stream=" << stream_id_ << " size=" << answer.size()
+              << " media_sections=" << count_sdp_media_sections(answer)
+              << " mids=" << join_strings(answer_mids) << '\n';
     std::lock_guard<std::mutex> lock(mutex_);
     answer_sdp_ = answer;
   });

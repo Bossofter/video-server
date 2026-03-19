@@ -111,6 +111,7 @@ class IEncodedVideoTrackSink {
   virtual ~IEncodedVideoTrackSink() = default;
   virtual bool exists() const = 0;
   virtual bool is_open() const = 0;
+  virtual std::string mid() const = 0;
   virtual void send(const std::byte* data, size_t size) = 0;
 };
 
@@ -143,6 +144,7 @@ class WebRtcStreamSession {
   mutable std::mutex mutex_;
   std::shared_ptr<rtc::PeerConnection> peer_connection_;
   std::unique_ptr<IWebRtcMediaSourceBridge> media_source_;
+  std::shared_ptr<IEncodedVideoTrackSink> video_track_sink_;
   std::unique_ptr<IEncodedVideoSender> encoded_sender_;
   std::string offer_sdp_;
   std::string answer_sdp_;
@@ -152,7 +154,6 @@ class WebRtcStreamSession {
 };
 
 H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit);
-std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
-                                                                    std::string track_mid);
+std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink);
 
 }  // namespace video_server

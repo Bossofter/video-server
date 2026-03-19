@@ -32,10 +32,12 @@ std::shared_ptr<const video_server::LatestEncodedUnit> make_large_idr_unit(uint6
 
 class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
  public:
-  explicit FakeEncodedVideoTrackSink(bool open = true) : open_(open) {}
+  explicit FakeEncodedVideoTrackSink(bool open = true, std::string mid = "video")
+      : open_(open), mid_(std::move(mid)) {}
 
   bool exists() const override { return true; }
   bool is_open() const override { return open_; }
+  std::string mid() const override { return mid_; }
   void send(const std::byte* data, size_t size) override {
     std::lock_guard<std::mutex> lock(mutex);
     sent_packets.emplace_back(data, data + size);
@@ -45,6 +47,7 @@ class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
   std::vector<std::vector<std::byte>> sent_packets;
  private:
   bool open_{true};
+  std::string mid_;
 };
 
 TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
@@ -60,11 +63,11 @@ TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
   const auto snapshot = session.snapshot();
   EXPECT_TRUE(snapshot.media_source.latest_encoded_access_unit_available);
   EXPECT_EQ(snapshot.media_source.latest_encoded_timestamp_ns, 1000u);
-  EXPECT_TRUE(snapshot.media_source.encoded_sender.video_track_exists);
-  EXPECT_FALSE(snapshot.media_source.encoded_sender.video_mid.empty());
+  EXPECT_FALSE(snapshot.media_source.encoded_sender.video_track_exists);
+  EXPECT_TRUE(snapshot.media_source.encoded_sender.video_mid.empty());
   EXPECT_EQ(snapshot.media_source.encoded_sender.delivered_units, 1u);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.codec_config_seen);
-  EXPECT_TRUE(snapshot.media_source.encoded_sender.ready_for_video_track);
+  EXPECT_FALSE(snapshot.media_source.encoded_sender.ready_for_video_track);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.last_contains_sps);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.last_contains_pps);
   EXPECT_TRUE(snapshot.media_source.encoded_sender.last_contains_idr);
@@ -75,7 +78,7 @@ TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
 
 TEST(WebRtcStreamSessionTest, PacketizesFragmentedH264AfterCodecConfigAndKeyframe) {
   auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>();
-  auto sender = video_server::make_h264_encoded_video_sender(track_sink, "video");
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink);
 
   sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
                                                     0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
@@ -133,7 +136,7 @@ TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserve
   EXPECT_TRUE(after_config.media_source.encoded_sender.cached_codec_config_available);
   EXPECT_TRUE(after_config.media_source.latest_encoded_codec_config);
   EXPECT_FALSE(after_config.media_source.latest_encoded_keyframe);
-  EXPECT_EQ(after_config.media_source.encoded_sender.last_packetization_status, "keyframe-required");
+  EXPECT_EQ(after_config.media_source.encoded_sender.last_packetization_status, "no-video-track");
 
   session.on_encoded_access_unit(codec_config);
   auto after_duplicate = session.snapshot();
@@ -144,7 +147,7 @@ TEST(WebRtcStreamSessionTest, CodecConfigKeyframeAndDuplicateBehaviorArePreserve
   session.on_encoded_access_unit(idr);
   auto after_idr = session.snapshot();
   EXPECT_EQ(after_idr.media_source.encoded_sender.delivered_units, 2u);
-  EXPECT_TRUE(after_idr.media_source.encoded_sender.ready_for_video_track);
+  EXPECT_FALSE(after_idr.media_source.encoded_sender.ready_for_video_track);
   EXPECT_TRUE(after_idr.media_source.encoded_sender.keyframe_seen);
   EXPECT_TRUE(after_idr.media_source.encoded_sender.last_delivered_keyframe);
   EXPECT_FALSE(after_idr.media_source.encoded_sender.last_delivered_codec_config);
