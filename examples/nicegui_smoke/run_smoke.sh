@@ -9,7 +9,7 @@ if [[ ! -x build/video_server_nicegui_smoke_server ]]; then
   ./build.sh
 fi
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r examples/nicegui_smoke/requirements.txt
+# python -m venv .venv
+# source .venv/bin/activate
+# pip install -r examples/nicegui_smoke/requirements.txt
 python examples/nicegui_smoke/app.py --start-server "$@"
