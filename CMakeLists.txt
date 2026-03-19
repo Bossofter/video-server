@@ -42,6 +42,10 @@ if(ENABLE_WEBRTC_BACKEND)
     src/webrtc/frame_http_encoder.cpp
   )
 
+  add_executable(video_server_nicegui_smoke_server
+    examples/nicegui_smoke/synthetic_webrtc_smoke_server.cpp
+  )
+
   target_include_directories(video_server_webrtc
     PUBLIC
       ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -59,6 +63,14 @@ if(ENABLE_WEBRTC_BACKEND)
       LibDataChannel::LibDataChannel
       LibJuice::LibJuice
       libSRTP::srtp2
+  )
+
+  target_include_directories(video_server_nicegui_smoke_server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
+  )
+
+  target_link_libraries(video_server_nicegui_smoke_server PRIVATE
+    video_server_webrtc
   )
 endif()
 
@@ -94,5 +106,4 @@ if(BUILD_TESTING)
 
   include(GoogleTest)
   gtest_discover_tests(video_server_tests)
-  add_test(NAME video_server_tests COMMAND video_server_tests)
 endif()

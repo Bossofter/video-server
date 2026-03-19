@@ -66,3 +66,19 @@ If you intentionally want a no-backend build, configure manually with `-DENABLE_
 - `GET /api/video/signaling/{stream_id}/session`
 
 More detail: `docs/video_server.md`.
+
+## NiceGUI smoke harness
+
+A manual NiceGUI smoke harness lives in `examples/nicegui_smoke/`. It keeps UI code isolated from the server core while exercising the current intended browser path: synthetic content -> H264 access units -> WebRTC signaling -> browser `<video>` playback.
+
+Quick start:
+
+```bash
+./build.sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r examples/nicegui_smoke/requirements.txt
+python examples/nicegui_smoke/app.py --start-server
+```
+
+Then open `http://127.0.0.1:8090/`.
