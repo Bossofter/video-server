@@ -442,9 +442,13 @@ TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
     return true;
   }));
 
-  const auto offered_video_line = offer_sdp.find("m=video 0 ");
+  const auto offered_video_line = offer_sdp.find("m=video ");
   CHECK_TRUE(offered_video_line != std::string::npos);
-  offer_sdp.replace(offered_video_line, std::string("m=video 0 ").size(), "m=video 9 ");
+  const auto offered_video_line_end = offer_sdp.find('\n', offered_video_line);
+  CHECK_TRUE(offered_video_line_end != std::string::npos);
+  const auto first_space_after_port = offer_sdp.find(' ', std::string("m=video ").size() + offered_video_line);
+  CHECK_TRUE(first_space_after_port != std::string::npos);
+  offer_sdp.replace(offered_video_line, first_space_after_port - offered_video_line, "m=video 9");
 
   CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-video-offer/offer", offer_sdp).status == 200);
 
