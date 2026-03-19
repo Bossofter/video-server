@@ -76,6 +76,71 @@ Each stream now stores an internal latest encoded-unit object that contains:
 
 This snapshot follows the same publication model as latest transformed frames: construct fully, then publish via a `std::shared_ptr<const ...>` so backend readers can safely retain older snapshots while newer ones are published.
 
+
+## Raw-to-H264 bridge pipeline
+
+A new bridge layer now sits between raw frame production and the pre-existing encoded H264 ingestion path. This keeps the producer-facing server API stable while adding the missing upstream conversion path.
+
+Current first-pass flow:
+
+1. a raw producer generates `VideoFrameView` input
+2. an `IRawVideoPipeline` instance is explicitly bound to a `stream_id`
+3. the pipeline optionally applies ffmpeg-backed resize / fps filters and any required pixel-format conversion
+4. the ffmpeg subprocess encodes H264 Annex-B bytes
+5. the pipeline re-assembles Annex-B output into encoded access units
+6. the pipeline forwards each encoded access unit into the existing `push_access_unit(...)` path (or a sink that ultimately lands there)
+7. the already-existing encoded/WebRTC path delivers H264 onward to browser sessions
+
+### Pipeline abstraction
+
+The new public pipeline surface is intentionally separate from `IVideoServer`:
+
+- `RawVideoPipelineConfig`: ffmpeg path, tightly-packed raw input contract, optional resize, optional output fps, encoder knobs
+- `IRawVideoPipeline`: `start()`, `push_frame()`, `stop()`, and explicit `stream_id()` binding
+- `make_raw_to_h264_pipeline(...)`: build a pipeline with an arbitrary encoded-unit sink
+- `make_raw_to_h264_pipeline_for_server(...)`: bind encoded output directly into an `IVideoServer` stream through `push_access_unit(...)`
+
+### First backend choice
+
+The first functional backend uses an `ffmpeg` subprocess. That choice is deliberate for the first pass:
+
+- practical to implement quickly
+- already aligned with the repo's smoke tooling
+- keeps the work focused on achieving an end-to-end path without redesigning delivery
+
+### Current filter/config support
+
+`RawVideoPipelineConfig` currently supports:
+
+- passthrough encode
+- resize via ffmpeg `scale=`
+- output frame-rate control via ffmpeg `fps=`
+- pixel-format conversion to encoder output `yuv420p`
+
+This is intentionally minimal and designed for extension rather than a large initial filter framework. The current backend explicitly requires `emit_access_unit_delimiters=true`; non-AUD splitting is not implemented yet and is rejected during validation for correctness.
+
+### Lifecycle behavior
+
+The pipeline owns the encoder subprocess lifecycle:
+
+- `start()` validates config, creates pipes, and spawns ffmpeg
+- `push_frame()` validates the raw frame contract and writes raw bytes to ffmpeg stdin
+- a reader thread consumes ffmpeg stdout, detects Annex-B NAL boundaries, groups NALs into access units, and forwards them to the encoded sink
+- if the encoded sink rejects an access unit, the pipeline records a failure, tears down the ffmpeg pipe bridge for that stream, and surfaces the failure on later `push_frame()` calls
+- `stop()` closes pipes, joins the reader thread, and terminates/reaps the subprocess without letting a broken pipe hang the server indefinitely
+
+### Demo / validation path
+
+The NiceGUI smoke server now exercises the shared pipeline with synthetic raw frames. It still pushes raw frames through `push_frame()` for transformed-frame observability while also feeding the new raw-to-H264 pipeline, which then forwards encoded output back into the existing encoded-media/WebRTC path.
+
+### What remains for future hardening
+
+- capture and surface ffmpeg stderr diagnostics more richly
+- better access-unit timestamp correlation if buffering/backpressure becomes more complex; the current first-pass mapping uses the latest raw-frame timestamp seen before the next emitted access unit
+- support for stride normalization and richer raw preprocess filters
+- a correct non-AUD access-unit splitter if we want to support `emit_access_unit_delimiters=false`
+- alternative encoder backends (e.g. direct libavcodec or hardware encoders) behind the same abstraction
+
 ## Runtime output config behavior
 
 Changing `StreamOutputConfig` via HTTP or direct API immediately affects the next `push_frame()` for that stream. Re-registration is not required.
