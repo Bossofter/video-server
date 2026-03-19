@@ -130,42 +130,57 @@ window.videoSmokeHarness = async function(config) {
   pc.oniceconnectionstatechange = () => append(`iceConnectionState=${pc.iceConnectionState}`);
   pc.onicegatheringstatechange = () => append(`iceGatheringState=${pc.iceGatheringState}`);
 
+  const bufferedLocalCandidates = [];
+  let offerPosted = false;
+  let remoteDescriptionApplied = false;
+
+  const postCandidate = async (candidate) => {
+    append(`posting browser ICE candidate: ${candidate}`);
+    const response = await fetch(`${config.serverBase}/api/video/signaling/${config.streamId}/candidate`, {
+      method: 'POST',
+      headers: {'Content-Type': 'text/plain'},
+      body: candidate,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`HTTP ${response.status} ${detail}`);
+    }
+  };
+
+  const flushBufferedCandidates = async () => {
+    if (!offerPosted || !remoteDescriptionApplied || bufferedLocalCandidates.length === 0) {
+      return;
+    }
+    append(`flushing ${bufferedLocalCandidates.length} buffered ICE candidate(s)`);
+    while (bufferedLocalCandidates.length > 0) {
+      const candidate = bufferedLocalCandidates.shift();
+      append(`candidate flushed: ${candidate}`);
+      await postCandidate(candidate);
+    }
+  };
+
   pc.onicecandidate = async (event) => {
     if (!event.candidate) {
       append('local ICE gathering complete');
       return;
     }
-    append(`posting browser ICE candidate: ${event.candidate.candidate}`);
+    const candidate = event.candidate.candidate;
+    if (!offerPosted || !remoteDescriptionApplied) {
+      bufferedLocalCandidates.push(candidate);
+      append(`candidate buffered (${bufferedLocalCandidates.length} queued): ${candidate}`);
+      return;
+    }
     try {
-      await fetch(`${config.serverBase}/api/video/signaling/${config.streamId}/candidate`, {
-        method: 'POST',
-        headers: {'Content-Type': 'text/plain'},
-        body: event.candidate.candidate,
-      });
+      await postCandidate(candidate);
+      append(`candidate posted immediately: ${candidate}`);
     } catch (error) {
       append(`candidate post failed: ${error}`);
     }
   };
 
-  const waitForIceGatheringComplete = async () => {
-    if (pc.iceGatheringState === 'complete') {
-      return;
-    }
-    await new Promise((resolve) => {
-      const handler = () => {
-        if (pc.iceGatheringState === 'complete') {
-          pc.removeEventListener('icegatheringstatechange', handler);
-          resolve();
-        }
-      };
-      pc.addEventListener('icegatheringstatechange', handler);
-    });
-  };
-
   append('creating offer');
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  await waitForIceGatheringComplete();
 
   append('posting SDP offer to server');
   const offerResponse = await fetch(`${config.serverBase}/api/video/signaling/${config.streamId}/offer`, {
@@ -180,9 +195,10 @@ window.videoSmokeHarness = async function(config) {
     status.textContent = `offer failed: HTTP ${offerResponse.status}`;
     return;
   }
+  offerPosted = true;
+  append('offer posted successfully');
 
   append('waiting for backend answer');
-  let answerApplied = false;
   let lastRemoteCandidate = '';
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const sessionResponse = await fetch(`${config.serverBase}/api/video/signaling/${config.streamId}/session`);
@@ -192,13 +208,31 @@ window.videoSmokeHarness = async function(config) {
       continue;
     }
 
-    const session = await sessionResponse.json();
-    status.textContent = `peer=${session.peer_state} media=${session.media_bridge_state} sender=${session.encoded_sender_state}`;
+    const sessionText = await sessionResponse.text();
+    let session;
+    try {
+      session = JSON.parse(sessionText);
+      append('answer/session JSON parse success');
+    } catch (error) {
+      append(`answer/session JSON parse failed: ${error}; body=${sessionText}`);
+      status.textContent = 'session JSON parse failed';
+      return;
+    }
+    status.textContent =
+      `peer=${session.peer_state} media=${session.media_bridge_state} sender=${session.encoded_sender_state} ` +
+      `codec_config=${session.encoded_sender_cached_codec_config_available} ` +
+      `idr=${session.encoded_sender_cached_idr_available} ` +
+      `startup_sent=${session.encoded_sender_startup_sequence_sent} ` +
+      `first_decodable=${session.encoded_sender_first_decodable_frame_sent} ` +
+      `pkts_after_open=${session.encoded_sender_packets_sent_after_track_open}`;
 
-    if (!answerApplied && session.answer_sdp) {
+    if (!remoteDescriptionApplied && session.answer_sdp) {
+      append('answer received from backend session');
       append('applying backend SDP answer');
       await pc.setRemoteDescription({type: 'answer', sdp: session.answer_sdp});
-      answerApplied = true;
+      append('remote description applied');
+      remoteDescriptionApplied = true;
+      await flushBufferedCandidates();
     }
 
     if (session.last_local_candidate && session.last_local_candidate !== lastRemoteCandidate) {
@@ -206,7 +240,21 @@ window.videoSmokeHarness = async function(config) {
       append(`backend ICE candidate observed: ${lastRemoteCandidate}`);
     }
 
-    if (answerApplied && (pc.connectionState === 'connected' || pc.connectionState === 'completed')) {
+    append(
+      `sender snapshot state=${session.encoded_sender_state}` +
+      ` codec_config_seen=${session.encoded_sender_codec_config_seen}` +
+      ` cached_codec_config=${session.encoded_sender_cached_codec_config_available}` +
+      ` cached_idr=${session.encoded_sender_cached_idr_available}` +
+      ` ready=${session.encoded_sender_ready_for_video_track}` +
+      ` first_decodable=${session.encoded_sender_first_decodable_frame_sent}` +
+      ` startup_sent=${session.encoded_sender_startup_sequence_sent}` +
+      ` packets=${session.encoded_sender_packets_attempted}` +
+      ` packets_after_open=${session.encoded_sender_packets_sent_after_track_open}` +
+      ` payload=${session.encoded_sender_negotiated_h264_payload_type}` +
+      ` fmtp=${session.encoded_sender_negotiated_h264_fmtp}`
+    );
+
+    if (remoteDescriptionApplied && (pc.connectionState === 'connected' || pc.connectionState === 'completed')) {
       append('peer connection is connected');
       return;
     }

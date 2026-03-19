@@ -1,5 +1,6 @@
 #include "signaling_server.h"
 
+#include <iostream>
 #include <utility>
 
 namespace video_server {
@@ -22,21 +23,34 @@ bool SignalingServer::set_offer(const std::string& stream_id, const std::string&
   }
 
   auto session = std::make_shared<WebRtcStreamSession>(stream_id, latest_frame_getter_, latest_encoded_unit_getter_);
+  std::clog << "[signaling] offer received stream=" << stream_id << " size=" << offer_sdp.size() << '\n';
   if (!session->apply_offer(offer_sdp, error_message)) {
     session->stop();
     return false;
   }
 
   std::shared_ptr<WebRtcStreamSession> previous;
+  std::vector<std::string> pending_remote_candidates;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto& slot = sessions_[stream_id];
     previous = slot.session;
     ++slot.session_generation;
     slot.session = session;
+    pending_remote_candidates.swap(slot.pending_remote_candidates);
   }
   if (previous) {
     previous->stop();
+  }
+  for (const auto& candidate : pending_remote_candidates) {
+    std::string candidate_error;
+    if (session->add_remote_candidate(candidate, &candidate_error)) {
+      std::clog << "[signaling] applied queued remote candidate stream=" << stream_id
+                << " size=" << candidate.size() << '\n';
+      continue;
+    }
+    std::clog << "[signaling] failed to apply queued remote candidate stream=" << stream_id
+              << " error=" << candidate_error << '\n';
   }
   return true;
 }
@@ -65,14 +79,28 @@ bool SignalingServer::add_ice_candidate(const std::string& stream_id, const std:
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = sessions_.find(stream_id);
     if (it == sessions_.end()) {
-      if (error_message != nullptr) {
-        *error_message = "session not found";
+      if (!stream_exists_(stream_id)) {
+        if (error_message != nullptr) {
+          *error_message = "stream not found";
+        }
+        return false;
       }
-      return false;
+      auto& slot = sessions_[stream_id];
+      slot.pending_remote_candidates.push_back(candidate);
+      std::clog << "[signaling] queued remote candidate before offer stream=" << stream_id
+                << " size=" << candidate.size() << '\n';
+      return true;
     }
     session = it->second.session;
   }
-  return session->add_remote_candidate(candidate, error_message);
+  std::clog << "[signaling] candidate received stream=" << stream_id << " size=" << candidate.size() << '\n';
+  if (!session->add_remote_candidate(candidate, error_message)) {
+    std::clog << "[signaling] candidate rejected stream=" << stream_id
+              << " error=" << (error_message != nullptr ? *error_message : std::string("unknown")) << '\n';
+    return false;
+  }
+  std::clog << "[signaling] candidate applied stream=" << stream_id << " size=" << candidate.size() << '\n';
+  return true;
 }
 
 

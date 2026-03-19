@@ -4,7 +4,12 @@
   "description": "Portable C++ video streaming subsystem",
   "dependencies": [
     "gtest",
-    "libdatachannel",
+    {
+      "name": "libdatachannel",
+      "features": [
+        "srtp"
+      ]
+    },
     "libjuice",
     "openssl",
     "libsrtp",

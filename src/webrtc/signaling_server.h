@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "webrtc_stream.h"
 
@@ -48,6 +49,7 @@ class SignalingServer {
   struct StreamSessionSlot {
     uint64_t session_generation{0};
     std::shared_ptr<WebRtcStreamSession> session;
+    std::vector<std::string> pending_remote_candidates;
   };
 
   StreamExistsFn stream_exists_;

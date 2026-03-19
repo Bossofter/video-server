@@ -15,7 +15,7 @@ Portable C++17 video streaming subsystem focused on a stable producer-facing API
 
 Managed via vcpkg manifest (`vcpkg.json`):
 
-- libdatachannel
+- libdatachannel with the `srtp` feature enabled for media track support
 - gtest
 - libjuice
 - openssl
@@ -46,6 +46,10 @@ export VCPKG_ROOT=/path/to/vcpkg
 - `-DBUILD_TESTING=ON`
 
 It then builds via `cmake --build build -j`.
+
+The WebRTC backend requires a **media-enabled** libdatachannel build. In vcpkg terms that means
+`libdatachannel[srtp]`; the plain default `libdatachannel[ws]` build disables media support and will
+fail later when the server first tries to send RTP on a media track.
 
 `test.sh` runs the base GoogleTest suite via `build/video_server_tests --gtest_color=yes`, which prints each default test case as it runs and automatically calls `./build.sh` if the build directory is missing.
 

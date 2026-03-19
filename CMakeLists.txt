@@ -34,6 +34,20 @@ if(ENABLE_WEBRTC_BACKEND)
   find_package(LibJuice CONFIG REQUIRED)
   find_package(libSRTP CONFIG REQUIRED)
 
+  get_target_property(LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES LibDataChannel::LibDataChannel INTERFACE_LINK_LIBRARIES)
+  if(NOT LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES)
+    message(FATAL_ERROR
+      "LibDataChannel::LibDataChannel did not expose interface link libraries. "
+      "Install libdatachannel with media support enabled (vcpkg feature: libdatachannel[srtp]).")
+  endif()
+
+  string(REPLACE ";" "\n" LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES_TEXT "${LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES}")
+  if(NOT LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES_TEXT MATCHES "libSRTP::srtp2")
+    message(FATAL_ERROR
+      "Detected a libdatachannel build without media/SRTP support. "
+      "This project requires libdatachannel[srtp] so rtc::Track::send can carry media.")
+  endif()
+
   add_library(video_server_webrtc
     src/webrtc/webrtc_video_server.cpp
     src/webrtc/webrtc_stream.cpp
