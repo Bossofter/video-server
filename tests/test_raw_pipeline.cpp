@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -58,6 +59,58 @@ bool wait_until(const std::function<bool()>& predicate, int timeout_ms = 4000) {
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
   return predicate();
+}
+
+
+TEST(RawToH264PipelineTest, RejectsNoAudConfigurationUntilFallbackExists) {
+  video_server::RawVideoPipelineConfig config;
+  config.input_width = 64;
+  config.input_height = 48;
+  config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
+  config.input_fps = 30.0;
+  config.emit_access_unit_delimiters = false;
+
+  auto pipeline = video_server::make_raw_to_h264_pipeline(
+      "no-aud-stream", config,
+      [](const video_server::EncodedAccessUnitView&) {
+        return true;
+      });
+
+  std::string error;
+  EXPECT_FALSE(pipeline->start(&error));
+  EXPECT_NE(error.find("emit_access_unit_delimiters=false"), std::string::npos);
+}
+
+TEST(RawToH264PipelineTest, PropagatesSinkFailureToCaller) {
+  if (!ffmpeg_available()) { GTEST_SKIP() << "ffmpeg not available in test environment"; }
+
+  video_server::RawVideoPipelineConfig config;
+  config.input_width = 64;
+  config.input_height = 48;
+  config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
+  config.input_fps = 30.0;
+
+  std::atomic<size_t> sink_calls{0};
+  auto pipeline = video_server::make_raw_to_h264_pipeline(
+      "sink-failure-stream", config,
+      [&sink_calls](const video_server::EncodedAccessUnitView&) {
+        ++sink_calls;
+        return false;
+      });
+
+  std::string error;
+  ASSERT_TRUE(pipeline->start(&error)) << error;
+  for (uint64_t i = 0; i < 12; ++i) {
+    auto frame = make_rgb_frame(config.input_width, config.input_height, i + 51);
+    ASSERT_TRUE(pipeline->push_frame(make_rgb_view(frame, config.input_width, config.input_height, 20000 + i, i + 1), &error)) << error;
+  }
+
+  ASSERT_TRUE(wait_until([&sink_calls]() { return sink_calls.load() > 0; }));
+
+  auto extra_frame = make_rgb_frame(config.input_width, config.input_height, 99);
+  EXPECT_FALSE(pipeline->push_frame(make_rgb_view(extra_frame, config.input_width, config.input_height, 30000, 99), &error));
+  EXPECT_NE(error.find("sink rejected"), std::string::npos);
+  pipeline->stop();
 }
 
 TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromRawFrames) {

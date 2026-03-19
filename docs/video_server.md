@@ -95,7 +95,7 @@ Current first-pass flow:
 
 The new public pipeline surface is intentionally separate from `IVideoServer`:
 
-- `RawVideoPipelineConfig`: ffmpeg path, input contract, optional resize, optional output fps, encoder knobs
+- `RawVideoPipelineConfig`: ffmpeg path, tightly-packed raw input contract, optional resize, optional output fps, encoder knobs
 - `IRawVideoPipeline`: `start()`, `push_frame()`, `stop()`, and explicit `stream_id()` binding
 - `make_raw_to_h264_pipeline(...)`: build a pipeline with an arbitrary encoded-unit sink
 - `make_raw_to_h264_pipeline_for_server(...)`: bind encoded output directly into an `IVideoServer` stream through `push_access_unit(...)`
@@ -117,7 +117,7 @@ The first functional backend uses an `ffmpeg` subprocess. That choice is deliber
 - output frame-rate control via ffmpeg `fps=`
 - pixel-format conversion to encoder output `yuv420p`
 
-This is intentionally minimal and designed for extension rather than a large initial filter framework.
+This is intentionally minimal and designed for extension rather than a large initial filter framework. The current backend explicitly requires `emit_access_unit_delimiters=true`; non-AUD splitting is not implemented yet and is rejected during validation for correctness.
 
 ### Lifecycle behavior
 
@@ -126,6 +126,7 @@ The pipeline owns the encoder subprocess lifecycle:
 - `start()` validates config, creates pipes, and spawns ffmpeg
 - `push_frame()` validates the raw frame contract and writes raw bytes to ffmpeg stdin
 - a reader thread consumes ffmpeg stdout, detects Annex-B NAL boundaries, groups NALs into access units, and forwards them to the encoded sink
+- if the encoded sink rejects an access unit, the pipeline records a failure, closes its write side, and surfaces the failure on later `push_frame()` calls
 - `stop()` closes pipes, joins the reader thread, and terminates/reaps the subprocess without letting a broken pipe hang the server indefinitely
 
 ### Demo / validation path
@@ -135,8 +136,9 @@ The NiceGUI smoke server now exercises the shared pipeline with synthetic raw fr
 ### What remains for future hardening
 
 - capture and surface ffmpeg stderr diagnostics more richly
-- better access-unit timestamp correlation if buffering/backpressure becomes more complex
+- better access-unit timestamp correlation if buffering/backpressure becomes more complex; the current first-pass mapping uses the latest raw-frame timestamp seen before the next emitted access unit
 - support for stride normalization and richer raw preprocess filters
+- a correct non-AUD access-unit splitter if we want to support `emit_access_unit_delimiters=false`
 - alternative encoder backends (e.g. direct libavcodec or hardware encoders) behind the same abstraction
 
 ## Runtime output config behavior

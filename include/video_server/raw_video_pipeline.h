@@ -18,6 +18,7 @@ enum class RawPipelineScaleMode {
 };
 
 struct RawVideoPipelineConfig {
+  // Current first-pass ffmpeg backend limitation: raw input must be tightly packed.
   std::string ffmpeg_path{"ffmpeg"};
   uint32_t input_width{0};
   uint32_t input_height{0};
@@ -31,6 +32,8 @@ struct RawVideoPipelineConfig {
   std::string encoder_tune{"zerolatency"};
   std::string encoder_profile{"baseline"};
   bool repeat_headers{true};
+  // Current first-pass backend requires AUD NAL units for access-unit splitting; setting this to
+  // false is rejected until a non-AUD fallback splitter is implemented.
   bool emit_access_unit_delimiters{true};
 };
 

@@ -100,18 +100,26 @@ The repo now includes a first-pass `IRawVideoPipeline` abstraction in `include/v
 
 Current first-pass pipeline capabilities:
 
-- input raw frame acceptance for tightly packed `RGB24`, `BGR24`, `RGBA32`, `BGRA32`, `GRAY8`, `NV12`, and `I420`
+- input raw frame acceptance for tightly packed `RGB24`, `BGR24`, `RGBA32`, `BGRA32`, `GRAY8`, `NV12`, and `I420` (non-tightly-packed raw strides are currently rejected)
 - optional passthrough or resize scaling
 - optional output FPS throttling through ffmpeg filters
 - automatic pixel-format conversion to encoder-friendly `yuv420p`
 - H264 Annex-B output parsing into access units and forwarding through the existing encoded path
+- explicit validation that AUD NAL delimiters remain enabled for the first-pass backend; `emit_access_unit_delimiters=false` is currently rejected rather than guessed at
 - explicit stream binding via `make_raw_to_h264_pipeline_for_server(stream_id, ..., server)`
 
 The NiceGUI smoke server now uses this shared pipeline instead of a one-off ffmpeg parsing loop, so synthetic raw frames exercise the full path from raw production to browser-facing H264 delivery.
 
+Current first-pass backend limits to keep in mind:
+
+- tightly packed raw frames are required on input
+- encoded access-unit timestamps currently reuse the most recently written raw-frame timestamp observed before ffmpeg emits the next split access unit
+- sink rejection is treated as a hard pipeline failure and is surfaced on later `push_frame()` calls
+
 What still remains for future hardening:
 
 - richer encoder health/error reporting from stderr
+- a correct non-AUD access-unit splitter if the backend later needs to support `emit_access_unit_delimiters=false`
 - more robust timestamp/frame-to-access-unit correlation under heavy buffering
 - support for non-tightly-packed raw frame strides and more advanced filters
 - alternative encoder backends beyond the initial ffmpeg subprocess implementation

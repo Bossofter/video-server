@@ -11,10 +11,10 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
-#include <string>
 
 #include <spawn.h>
 #include <sys/types.h>
@@ -164,7 +164,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     int stdin_pipe[2] = {-1, -1};
     int stdout_pipe[2] = {-1, -1};
     if (::pipe(stdin_pipe) != 0 || ::pipe(stdout_pipe) != 0) {
-      set_error(error_message, std::string("failed to create pipes: ") + std::strerror(errno));
+      set_error_locked(std::string("failed to create pipes: ") + std::strerror(errno), error_message);
       close_pipe(stdin_pipe);
       close_pipe(stdout_pipe);
       return false;
@@ -186,7 +186,8 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     argv.push_back(nullptr);
 
     pid_t pid = -1;
-    const int spawn_result = ::posix_spawnp(&pid, config_.ffmpeg_path.c_str(), &actions, nullptr, argv.data(), environ);
+    const int spawn_result =
+        ::posix_spawnp(&pid, config_.ffmpeg_path.c_str(), &actions, nullptr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
     ::close(stdin_pipe[0]);
     ::close(stdout_pipe[1]);
@@ -194,7 +195,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     if (spawn_result != 0) {
       ::close(stdin_pipe[1]);
       ::close(stdout_pipe[0]);
-      set_error(error_message, std::string("failed to start ffmpeg: ") + std::strerror(spawn_result));
+      set_error_locked(std::string("failed to start ffmpeg: ") + std::strerror(spawn_result), error_message);
       return false;
     }
 
@@ -202,7 +203,8 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     stdin_fd_ = stdin_pipe[1];
     stdout_fd_ = stdout_pipe[0];
     running_ = true;
-    encoder_failed_ = false;
+    failed_ = false;
+    last_error_.clear();
     reader_thread_ = std::thread([this]() { this->read_loop(); });
     return true;
   }
@@ -210,24 +212,25 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
   bool push_frame(const VideoFrameView& frame, std::string* error_message = nullptr) override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!running_ || stdin_fd_ < 0) {
-      set_error(error_message, "pipeline is not running");
+      set_error_value(error_message, failed_ && !last_error_.empty() ? last_error_ : "pipeline is not running");
       return false;
     }
-    if (encoder_failed_) {
-      set_error(error_message, last_error_);
+    if (failed_) {
+      set_error_value(error_message, last_error_);
       return false;
     }
     if (!validate_frame(frame, error_message)) {
       return false;
     }
+
     last_seen_timestamp_ns_ = frame.timestamp_ns;
     const size_t frame_size = expected_frame_size(config_);
     const uint8_t* ptr = static_cast<const uint8_t*>(frame.data);
     if (!write_all_locked(ptr, frame_size, error_message)) {
-      encoder_failed_ = true;
-      if (last_error_.empty() && error_message != nullptr) {
-        last_error_ = *error_message;
-      }
+      failed_ = true;
+      running_ = false;
+      close_fd_if_open(stdin_fd_);
+      stdin_fd_ = -1;
       return false;
     }
     return true;
@@ -239,7 +242,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     pid_t child_pid = -1;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!running_ && reader_thread_.joinable() == false) {
+      if (!running_ && !reader_thread_.joinable()) {
         return;
       }
       stdin_fd = stdin_fd_;
@@ -251,12 +254,8 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
       running_ = false;
     }
 
-    if (stdin_fd >= 0) {
-      ::close(stdin_fd);
-    }
-    if (stdout_fd >= 0) {
-      ::close(stdout_fd);
-    }
+    close_fd_if_open(stdin_fd);
+    close_fd_if_open(stdout_fd);
 
     if (reader_thread_.joinable()) {
       reader_thread_.join();
@@ -280,33 +279,39 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
         }
       } else if (waited < 0 && errno == ECHILD) {
         // already reaped
-      } else if (waited == 0) {
-        ::waitpid(child_pid, &status, 0);
       }
     }
   }
 
  private:
-  bool validate_config(std::string* error_message) const {
+  bool validate_config(std::string* error_message) {
     if (stream_id_.empty()) {
-      set_error(error_message, "stream_id is required");
+      set_error_locked("stream_id is required", error_message);
+      return false;
+    }
+    if (!sink_) {
+      set_error_locked("encoded access-unit sink is required", error_message);
       return false;
     }
     if (config_.input_width == 0 || config_.input_height == 0 || config_.input_fps <= 0.0) {
-      set_error(error_message, "input dimensions and fps must be valid");
+      set_error_locked("input dimensions and fps must be valid", error_message);
       return false;
     }
     if (pixel_format_to_ffmpeg(config_.input_pixel_format) == nullptr) {
-      set_error(error_message, "unsupported ffmpeg input pixel format");
+      set_error_locked("unsupported ffmpeg input pixel format", error_message);
       return false;
     }
-    if (is_planar_pixel_format(config_.input_pixel_format) && bytes_per_pixel(config_.input_pixel_format) == 0) {
-      // allowed; frame size is handled separately
+    if (!config_.emit_access_unit_delimiters) {
+      set_error_locked(
+          "emit_access_unit_delimiters=false is not currently supported; the first-pass ffmpeg backend "
+          "requires AUD NAL units for correct access-unit splitting",
+          error_message);
+      return false;
     }
     if (config_.scale_mode == RawPipelineScaleMode::Resize) {
-      if (!config_.output_width.has_value() || !config_.output_height.has_value() || *config_.output_width == 0 ||
-          *config_.output_height == 0) {
-        set_error(error_message, "resize mode requires output width and height");
+      if (!config_.output_width.has_value() || !config_.output_height.has_value() ||
+          *config_.output_width == 0 || *config_.output_height == 0) {
+        set_error_locked("resize mode requires output width and height", error_message);
         return false;
       }
     }
@@ -316,17 +321,17 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
   bool validate_frame(const VideoFrameView& frame, std::string* error_message) const {
     if (frame.data == nullptr || frame.width != config_.input_width || frame.height != config_.input_height ||
         frame.pixel_format != config_.input_pixel_format) {
-      set_error(error_message, "frame does not match pipeline input contract");
+      set_error_value(error_message, "frame does not match pipeline input contract");
       return false;
     }
     if (!is_planar_pixel_format(frame.pixel_format)) {
       const uint32_t min_stride = config_.input_width * bytes_per_pixel(frame.pixel_format);
       if (frame.stride_bytes < min_stride) {
-        set_error(error_message, "frame stride is too small");
+        set_error_value(error_message, "frame stride is too small");
         return false;
       }
       if (frame.stride_bytes != min_stride) {
-        set_error(error_message, "pipeline currently requires tightly packed raw frames");
+        set_error_value(error_message, "pipeline currently requires tightly packed raw frames");
         return false;
       }
     }
@@ -345,8 +350,30 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
         continue;
       }
       const int local_errno = (rc < 0) ? errno : EPIPE;
-      last_error_ = std::string("ffmpeg stdin write failed: ") + std::strerror(local_errno);
-      set_error(error_message, last_error_);
+      set_error_locked(std::string("ffmpeg stdin write failed: ") + std::strerror(local_errno), error_message);
+      return false;
+    }
+    return true;
+  }
+
+  bool emit_access_unit_locked(const std::vector<uint8_t>& access_unit_bytes, uint64_t timestamp_ns) {
+    EncodedAccessUnitView view{};
+    view.data = access_unit_bytes.data();
+    view.size_bytes = access_unit_bytes.size();
+    view.codec = VideoCodec::H264;
+    view.timestamp_ns = timestamp_ns;
+    view.keyframe = contains_nal_type(access_unit_bytes, 5);
+    view.codec_config = contains_nal_type(access_unit_bytes, 7) && contains_nal_type(access_unit_bytes, 8) &&
+                        !view.keyframe;
+    if (!sink_(view)) {
+      set_error_locked(
+          "encoded access-unit sink rejected H264 access unit for stream '" + stream_id_ +
+              "'; pipeline will stop",
+          nullptr);
+      failed_ = true;
+      running_ = false;
+      close_fd_if_open(stdin_fd_);
+      stdin_fd_ = -1;
       return false;
     }
     return true;
@@ -357,23 +384,34 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     std::vector<uint8_t> current_access_unit;
     std::array<uint8_t, 8192> chunk{};
 
-    auto flush_current = [&](uint64_t timestamp_ns) {
+    auto flush_current = [&](uint64_t timestamp_ns) -> bool {
       if (current_access_unit.empty()) {
-        return;
+        return true;
       }
-      EncodedAccessUnitView view{};
-      view.data = current_access_unit.data();
-      view.size_bytes = current_access_unit.size();
-      view.codec = VideoCodec::H264;
-      view.timestamp_ns = timestamp_ns;
-      view.keyframe = contains_nal_type(current_access_unit, 5);
-      view.codec_config = contains_nal_type(current_access_unit, 7) && contains_nal_type(current_access_unit, 8) && !view.keyframe;
-      sink_(view);
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (failed_) {
+        current_access_unit.clear();
+        return false;
+      }
+      const bool sink_ok = emit_access_unit_locked(current_access_unit, timestamp_ns);
       current_access_unit.clear();
+      return sink_ok;
     };
 
     while (true) {
-      const ssize_t bytes_read = ::read(stdout_fd_, chunk.data(), chunk.size());
+      int local_stdout_fd = -1;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (failed_) {
+          break;
+        }
+        local_stdout_fd = stdout_fd_;
+      }
+      if (local_stdout_fd < 0) {
+        break;
+      }
+
+      const ssize_t bytes_read = ::read(local_stdout_fd, chunk.data(), chunk.size());
       if (bytes_read > 0) {
         buffer.insert(buffer.end(), chunk.begin(), chunk.begin() + bytes_read);
 
@@ -399,7 +437,9 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
                                    buffer.begin() + static_cast<std::ptrdiff_t>(end));
           const uint8_t type = first_nal_type(nal);
           if (type == 9 && !current_access_unit.empty()) {
-            flush_current(last_seen_timestamp_ns_);
+            if (!flush_current(last_seen_timestamp_ns_)) {
+              return;
+            }
           }
           current_access_unit.insert(current_access_unit.end(), nal.begin(), nal.end());
         }
@@ -412,6 +452,12 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
       }
       if (errno == EINTR) {
         continue;
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!failed_) {
+        set_error_locked(std::string("ffmpeg stdout read failed: ") + std::strerror(errno), nullptr);
+        failed_ = true;
+        running_ = false;
       }
       break;
     }
@@ -479,19 +525,26 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     return args;
   }
 
-  static void close_pipe(int pipe_fds[2]) {
-    if (pipe_fds[0] >= 0) {
-      ::close(pipe_fds[0]);
-    }
-    if (pipe_fds[1] >= 0) {
-      ::close(pipe_fds[1]);
-    }
+  void set_error_locked(const std::string& value, std::string* error_message) {
+    last_error_ = value;
+    set_error_value(error_message, value);
   }
 
-  static void set_error(std::string* error_message, const std::string& value) {
+  static void set_error_value(std::string* error_message, const std::string& value) {
     if (error_message != nullptr) {
       *error_message = value;
     }
+  }
+
+  static void close_fd_if_open(int fd) {
+    if (fd >= 0) {
+      ::close(fd);
+    }
+  }
+
+  static void close_pipe(int pipe_fds[2]) {
+    close_fd_if_open(pipe_fds[0]);
+    close_fd_if_open(pipe_fds[1]);
   }
 
   const std::string stream_id_;
@@ -500,11 +553,11 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
 
   mutable std::mutex mutex_;
   bool running_{false};
+  bool failed_{false};
   int stdin_fd_{-1};
   int stdout_fd_{-1};
   pid_t child_pid_{-1};
   std::thread reader_thread_;
-  bool encoder_failed_{false};
   std::string last_error_;
   std::atomic<uint64_t> last_seen_timestamp_ns_{0};
 };
