@@ -15,6 +15,7 @@ if(ENABLE_VIDEO_SERVER)
     src/core/video_types.cpp
     src/transforms/display_transform.cpp
     src/testing/synthetic_frame_generator.cpp
+    src/pipeline/raw_to_h264_pipeline.cpp
   )
 
   target_include_directories(video_server_core
@@ -98,6 +99,7 @@ if(BUILD_TESTING)
     tests/test_synthetic.cpp
     tests/test_video_types.cpp
     tests/test_pipeline.cpp
+    tests/test_raw_pipeline.cpp
     tests/test_webrtc_http.cpp
     tests/test_webrtc_stream.cpp
   )
