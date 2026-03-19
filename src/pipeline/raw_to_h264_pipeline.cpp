@@ -357,6 +357,8 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
   }
 
   bool emit_access_unit_locked(const std::vector<uint8_t>& access_unit_bytes, uint64_t timestamp_ns) {
+    // First-pass timestamp mapping: ffmpeg stdout is observed asynchronously, so the emitted access
+    // unit currently reuses the most recently pushed raw-frame timestamp seen before this flush.
     EncodedAccessUnitView view{};
     view.data = access_unit_bytes.data();
     view.size_bytes = access_unit_bytes.size();
@@ -559,6 +561,9 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
   pid_t child_pid_{-1};
   std::thread reader_thread_;
   std::string last_error_;
+  // Approximate timestamp bridge for the first ffmpeg subprocess backend; see comment above
+  // emit_access_unit_locked(...). A stricter frame-to-access-unit timestamp mapping may require a
+  // richer correlation strategy in a future backend pass.
   std::atomic<uint64_t> last_seen_timestamp_ns_{0};
 };
 
