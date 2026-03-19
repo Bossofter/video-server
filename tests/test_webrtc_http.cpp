@@ -409,9 +409,9 @@ TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
 
   rtc::Configuration rtc_config;
   auto client = std::make_shared<rtc::PeerConnection>(rtc_config);
-  rtc::Description::Video offered_video("0", rtc::Description::Direction::RecvOnly);
-  offered_video.addH264Codec(102);
-  auto requested_track = client->addTrack(offered_video);
+  rtc::Description::Video offered_video_description("0", rtc::Description::Direction::RecvOnly);
+  offered_video_description.addH264Codec(102);
+  auto requested_track = client->addTrack(offered_video_description);
   (void)requested_track;
 
   std::string offer_sdp;
@@ -430,6 +430,10 @@ TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
     return true;
   }));
 
+  const auto offered_video_line = offer_sdp.find("m=video 0 ");
+  CHECK_TRUE(offered_video_line != std::string::npos);
+  offer_sdp.replace(offered_video_line, std::string("m=video 0 ").size(), "m=video 9 ");
+
   CHECK_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/signal-video-offer/offer", offer_sdp).status == 200);
 
   video_server::WebRtcHttpResponse session_response{};
@@ -442,7 +446,12 @@ TEST(WebRtcHttpTest, AnswerReusesOfferedVideoMediaSectionWithoutExtraMLine) {
   CHECK_TRUE(count_sdp_media_sections(offer_sdp) == 1);
   CHECK_TRUE(count_sdp_media_sections(answer_sdp) == count_sdp_media_sections(offer_sdp));
   CHECK_TRUE(extract_sdp_mids(offer_sdp) == extract_sdp_mids(answer_sdp));
+  CHECK_TRUE(answer_sdp.find("m=video 0 ") == std::string::npos);
   CHECK_TRUE(answer_sdp.find("a=mid:video") == std::string::npos);
+  CHECK_TRUE(answer_sdp.find("a=setup:actpass") == std::string::npos);
+  CHECK_TRUE(answer_sdp.find("a=setup:active") != std::string::npos ||
+             answer_sdp.find("a=setup:passive") != std::string::npos);
+  CHECK_TRUE(json_string_field(session_response.body, "encoded_sender_video_mid") == "0");
 }
 
 TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive) {

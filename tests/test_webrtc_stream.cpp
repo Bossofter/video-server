@@ -78,7 +78,7 @@ TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
 
 TEST(WebRtcStreamSessionTest, PacketizesFragmentedH264AfterCodecConfigAndKeyframe) {
   auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>();
-  auto sender = video_server::make_h264_encoded_video_sender(track_sink);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 1234);
 
   sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
                                                     0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},

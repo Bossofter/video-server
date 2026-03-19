@@ -123,6 +123,28 @@ std::vector<std::string> extract_sdp_mids(const std::string& sdp) {
   return mids;
 }
 
+size_t count_rejected_sdp_media_sections(const std::string& sdp) {
+  size_t count = 0;
+  size_t pos = 0;
+  while ((pos = sdp.find("\nm=", pos)) != std::string::npos) {
+    const size_t line_start = pos + 1;
+    const size_t line_end = sdp.find('\n', line_start);
+    const std::string line = sdp.substr(line_start, line_end == std::string::npos ? std::string::npos : line_end - line_start);
+    if (line.find("m=") == 0 && line.find(" 0 ") != std::string::npos) {
+      ++count;
+    }
+    pos = line_start + 2;
+  }
+  if (sdp.rfind("m=", 0) == 0) {
+    const size_t line_end = sdp.find('\n');
+    const std::string line = sdp.substr(0, line_end == std::string::npos ? std::string::npos : line_end);
+    if (line.find(" 0 ") != std::string::npos) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 std::string join_strings(const std::vector<std::string>& values) {
   std::ostringstream out;
   for (size_t i = 0; i < values.size(); ++i) {
@@ -132,6 +154,17 @@ std::string join_strings(const std::vector<std::string>& values) {
     out << values[i];
   }
   return out.str();
+}
+
+std::string sanitize_answer_setup_role(std::string sdp) {
+  const std::string from = "a=setup:actpass";
+  const std::string to = "a=setup:active";
+  size_t pos = 0;
+  while ((pos = sdp.find(from, pos)) != std::string::npos) {
+    sdp.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  return sdp;
 }
 
 std::vector<uint8_t> make_rtp_packet(const uint8_t* payload, size_t payload_size, uint16_t sequence_number,
@@ -247,8 +280,8 @@ class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
 
 class H264EncodedVideoSender : public IEncodedVideoSender {
  public:
-  explicit H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink)
-      : video_track_sink_(std::move(video_track_sink)), ssrc_(make_random_ssrc()) {}
+  H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink, uint32_t ssrc)
+      : video_track_sink_(std::move(video_track_sink)), ssrc_(ssrc) {}
 
   void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
     if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid) {
@@ -583,8 +616,9 @@ H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& acces
   return descriptor;
 }
 
-std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink) {
-  return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink));
+std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
+                                                                    uint32_t ssrc) {
+  return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink), ssrc);
 }
 
 WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
@@ -594,8 +628,9 @@ WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGette
   config.disableAutoNegotiation = false;
   peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
   media_source_ = std::make_unique<StreamMediaSourceBridge>();
+  video_ssrc_ = make_random_ssrc();
   video_track_sink_ = std::make_shared<AttachableRtcTrackSink>();
-  encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_);
+  encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_, video_ssrc_);
   media_source_->on_latest_frame(latest_frame_getter(stream_id_));
   auto latest_encoded = latest_encoded_unit_getter(stream_id_);
   media_source_->on_latest_encoded_unit(latest_encoded);
@@ -755,6 +790,28 @@ void WebRtcStreamSession::configure_callbacks() {
       return;
     }
 
+    int payload_type = kH264PayloadType;
+    std::string h264_profile = rtc::DEFAULT_H264_VIDEO_PROFILE;
+    for (const int offered_payload_type : description.payloadTypes()) {
+      const auto* rtp_map = description.rtpMap(offered_payload_type);
+      if (!rtp_map || rtp_map->format != "H264") {
+        continue;
+      }
+      payload_type = offered_payload_type;
+      if (!rtp_map->fmtps.empty()) {
+        h264_profile = rtp_map->fmtps.front();
+      }
+      break;
+    }
+
+    rtc::Description::Video local_video(track->mid(), rtc::Description::Direction::SendOnly);
+    local_video.addH264Codec(payload_type, h264_profile);
+    local_video.addSSRC(video_ssrc_, "video-server-video", stream_id_, "h264-track");
+    track->setDescription(local_video);
+    std::clog << "[signaling] activated negotiated video section stream=" << stream_id_
+              << " mid=" << track->mid() << " payload_type=" << payload_type
+              << " ssrc=" << video_ssrc_ << '\n';
+
     auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
     if (!attachable_sink) {
       std::clog << "[signaling] failed to access attachable video track sink stream=" << stream_id_ << '\n';
@@ -767,10 +824,14 @@ void WebRtcStreamSession::configure_callbacks() {
   });
 
   peer_connection_->onLocalDescription([this](rtc::Description description) {
-    const std::string answer = std::string(description);
+    std::string answer = std::string(description);
+    if (description.type() == rtc::Description::Type::Answer) {
+      answer = sanitize_answer_setup_role(std::move(answer));
+    }
     const auto answer_mids = extract_sdp_mids(answer);
     std::clog << "[signaling] answer generated stream=" << stream_id_ << " size=" << answer.size()
               << " media_sections=" << count_sdp_media_sections(answer)
+              << " rejected_media_sections=" << count_rejected_sdp_media_sections(answer)
               << " mids=" << join_strings(answer_mids) << '\n';
     std::lock_guard<std::mutex> lock(mutex_);
     answer_sdp_ = answer;

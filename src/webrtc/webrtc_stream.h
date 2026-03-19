@@ -151,9 +151,11 @@ class WebRtcStreamSession {
   std::string last_remote_candidate_;
   std::string last_local_candidate_;
   std::string peer_state_{"new"};
+  uint32_t video_ssrc_{0};
 };
 
 H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit);
-std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink);
+std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
+                                                                    uint32_t ssrc);
 
 }  // namespace video_server
