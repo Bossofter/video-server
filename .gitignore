@@ -1,1 +1,4 @@
 build/
+.venv/
+vcpkg_installed/
+examples/nicegui_smoke/__pycache__/
