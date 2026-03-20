@@ -9,6 +9,7 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 
 #include <rtc/configuration.hpp>
@@ -328,7 +329,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
       video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
       has_track = video_track_exists_;
       track_open = video_track_open_;
-      transport_ready = has_track;
+      transport_ready = has_track && track_open;
       track_sink = video_track_sink_;
 
       if (last_delivered_sequence_id_ == latest_encoded_unit->sequence_id) {
@@ -383,10 +384,10 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
         sender_state_ = "waiting-for-h264-keyframe";
         last_packetization_status_ = "keyframe-required";
         startup_gate_reason = "keyframe-required";
-      } else if (!transport_ready) {
+      } else if (!track_open) {
         sender_state_ = "waiting-for-video-track-open";
         last_packetization_status_ = "track-not-open-yet";
-        startup_gate_reason = "track-not-ready";
+        startup_gate_reason = "track-not-open";
       } else if (!first_decodable_frame_sent && !startup_sequence_required && !contains_idr) {
         sender_state_ = "waiting-for-decoded-startup-idr";
         last_packetization_status_ = "startup-idr-required";
@@ -415,6 +416,14 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     if (!should_send || !track_sink) {
       std::clog << "[h264-sender] skip-send seq=" << latest_encoded_unit->sequence_id
                 << " reason=" << last_packetization_status_
+                << " has_track_sink=" << static_cast<bool>(track_sink) << '\n';
+      return;
+    }
+
+    if (!track_sink->exists() || !track_sink->is_open()) {
+      mark_track_not_sendable("track-closed-before-send", "track-closed-before-send");
+      std::clog << "[h264-sender] skip-send seq=" << latest_encoded_unit->sequence_id
+                << " reason=track-closed-before-send"
                 << " has_track_sink=" << static_cast<bool>(track_sink) << '\n';
       return;
     }
@@ -462,45 +471,65 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
 
     uint64_t packet_count = 0;
     uint64_t startup_packet_count = 0;
-    for (size_t nal_index = 0; nal_index < nalus_to_send.size(); ++nal_index) {
-      const auto& nal = nalus_to_send[nal_index];
-      const bool is_last_nal = nal_index + 1 == nalus_to_send.size();
-      const bool part_of_startup = nal_index < startup_nalu_count;
-      if (nal.empty()) {
-        continue;
-      }
+    try {
+      for (size_t nal_index = 0; nal_index < nalus_to_send.size(); ++nal_index) {
+        const auto& nal = nalus_to_send[nal_index];
+        const bool is_last_nal = nal_index + 1 == nalus_to_send.size();
+        const bool part_of_startup = nal_index < startup_nalu_count;
+        if (nal.empty()) {
+          continue;
+        }
 
-      if (nal.size() <= kMaxRtpPayloadSize) {
-        auto packet = make_rtp_packet(nal.data(), nal.size(), sequence_number_++, rtp_timestamp, ssrc_,
-                                      static_cast<uint8_t>(payload_type), is_last_nal);
-        track_sink->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
-        ++packet_count;
-        startup_packet_count += part_of_startup ? 1u : 0u;
-        continue;
-      }
+        if (!track_sink->exists() || !track_sink->is_open()) {
+          throw std::runtime_error("Track is closed");
+        }
 
-      const uint8_t nal_header = nal[0];
-      const uint8_t fu_indicator = static_cast<uint8_t>((nal_header & 0xe0) | 28u);
-      const uint8_t nal_type = static_cast<uint8_t>(nal_header & 0x1f);
-      const size_t fragment_payload_capacity = kMaxRtpPayloadSize - 2;
-      size_t offset = 1;
-      while (offset < nal.size()) {
-        const size_t remaining = nal.size() - offset;
-        const size_t fragment_size = std::min(fragment_payload_capacity, remaining);
-        const bool start = offset == 1;
-        const bool end = fragment_size == remaining;
-        std::vector<uint8_t> fu_payload(2 + fragment_size);
-        fu_payload[0] = fu_indicator;
-        fu_payload[1] = static_cast<uint8_t>((start ? 0x80 : 0x00) | (end ? 0x40 : 0x00) | nal_type);
-        std::copy(nal.begin() + static_cast<std::ptrdiff_t>(offset),
-                  nal.begin() + static_cast<std::ptrdiff_t>(offset + fragment_size), fu_payload.begin() + 2);
-        auto packet = make_rtp_packet(fu_payload.data(), fu_payload.size(), sequence_number_++, rtp_timestamp, ssrc_,
-                                      static_cast<uint8_t>(payload_type), is_last_nal && end);
-        track_sink->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
-        ++packet_count;
-        startup_packet_count += part_of_startup ? 1u : 0u;
-        offset += fragment_size;
+        if (nal.size() <= kMaxRtpPayloadSize) {
+          auto packet = make_rtp_packet(nal.data(), nal.size(), sequence_number_++, rtp_timestamp, ssrc_,
+                                        static_cast<uint8_t>(payload_type), is_last_nal);
+          track_sink->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
+          ++packet_count;
+          startup_packet_count += part_of_startup ? 1u : 0u;
+          continue;
+        }
+
+        const uint8_t nal_header = nal[0];
+        const uint8_t fu_indicator = static_cast<uint8_t>((nal_header & 0xe0) | 28u);
+        const uint8_t nal_type = static_cast<uint8_t>(nal_header & 0x1f);
+        const size_t fragment_payload_capacity = kMaxRtpPayloadSize - 2;
+        size_t offset = 1;
+        while (offset < nal.size()) {
+          if (!track_sink->exists() || !track_sink->is_open()) {
+            throw std::runtime_error("Track is closed");
+          }
+
+          const size_t remaining = nal.size() - offset;
+          const size_t fragment_size = std::min(fragment_payload_capacity, remaining);
+          const bool start = offset == 1;
+          const bool end = fragment_size == remaining;
+          std::vector<uint8_t> fu_payload(2 + fragment_size);
+          fu_payload[0] = fu_indicator;
+          fu_payload[1] = static_cast<uint8_t>((start ? 0x80 : 0x00) | (end ? 0x40 : 0x00) | nal_type);
+          std::copy(nal.begin() + static_cast<std::ptrdiff_t>(offset),
+                    nal.begin() + static_cast<std::ptrdiff_t>(offset + fragment_size), fu_payload.begin() + 2);
+          auto packet = make_rtp_packet(fu_payload.data(), fu_payload.size(), sequence_number_++, rtp_timestamp, ssrc_,
+                                        static_cast<uint8_t>(payload_type), is_last_nal && end);
+          track_sink->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
+          ++packet_count;
+          startup_packet_count += part_of_startup ? 1u : 0u;
+          offset += fragment_size;
+        }
       }
+    } catch (const std::exception& ex) {
+      const std::string message = ex.what();
+      const bool track_closed = message.find("Track is closed") != std::string::npos;
+      mark_track_not_sendable(track_closed ? "track-closed-during-send" : "track-send-failed",
+                              track_closed ? "track-closed-exception" : "track-send-exception");
+      std::clog << "[h264-sender] send-failed seq=" << latest_encoded_unit->sequence_id
+                << " packets_before_failure=" << packet_count
+                << " status=" << (track_closed ? "track-closed-during-send" : "track-send-failed")
+                << " error=" << message << '\n';
+      return;
     }
 
     {
@@ -575,6 +604,16 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   }
 
  private:
+  void mark_track_not_sendable(std::string sender_state, std::string packetization_status) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
+    video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
+    ready_for_video_track_ = video_track_exists_ && codec_config_seen_ && cached_idr_available_;
+    h264_delivery_active_ = false;
+    sender_state_ = std::move(sender_state);
+    last_packetization_status_ = std::move(packetization_status);
+  }
+
   mutable std::mutex mutex_;
   std::shared_ptr<IEncodedVideoTrackSink> video_track_sink_;
   std::shared_ptr<const LatestEncodedUnit> cached_codec_config_;
