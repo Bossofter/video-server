@@ -32,7 +32,7 @@ http://127.0.0.1:8090/
 
 ## Default multi-stream demo set
 
-`--multi-stream-demo` launches three intentionally different streams:
+By default, the smoke harness now launches a three-stream demo unless you explicitly pass single-stream sizing/id flags. `--multi-stream-demo` selects the same default set explicitly:
 
 - `alpha`: `640x360 @ 15 fps`
 - `bravo`: `1280x720 @ 30 fps`

@@ -8,6 +8,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -68,11 +69,20 @@ def default_demo_streams() -> list[dict[str, Any]]:
 
 
 def requested_streams() -> list[dict[str, Any]]:
+    explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
     if ARGS.multi_stream_demo:
         return default_demo_streams()
     if ARGS.stream:
         return [parse_stream_spec(value) for value in ARGS.stream]
-    return [{'streamId': ARGS.stream_id, 'width': ARGS.width, 'height': ARGS.height, 'fps': ARGS.fps, 'label': ARGS.stream_id}]
+    if explicit_single_stream:
+        return [{'streamId': ARGS.stream_id, 'width': ARGS.width, 'height': ARGS.height, 'fps': ARGS.fps, 'label': ARGS.stream_id}]
+    return default_demo_streams()
+
+
+
+
+def has_cli_flag(*names: str) -> bool:
+    return any(name in sys.argv[1:] for name in names)
 
 
 STREAM_SPECS = requested_streams()
@@ -101,7 +111,8 @@ def start_smoke_server() -> subprocess.Popen[str]:
         '--port',
         str(ARGS.server_port),
     ]
-    if ARGS.multi_stream_demo:
+    explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
+    if ARGS.multi_stream_demo or (not ARGS.stream and not explicit_single_stream):
         cmd.append('--multi-stream-demo')
     elif ARGS.stream:
         for spec in ARGS.stream:
@@ -263,7 +274,7 @@ window.videoSmokeHarness = (() => {{
     state.config.widgetShowPlayback = state.config.widgetShowPlayback !== false;
     state.config.widgetShowVideo = !!state.config.widgetShowVideo;
     state.config.widgetShowSession = !!state.config.widgetShowSession;
-    state.config.activeTab = widgetMode ? 'widget' : (state.config.activeTab || 'smoke');
+    state.config.activeTab = widgetMode ? 'widget' : (state.config.activeTab || ((state.config.streamCatalog || []).length > 1 ? 'widget' : 'smoke'));
     return state.config;
   }}
 
@@ -1294,7 +1305,8 @@ def index() -> None:
 This page is a manual browser harness for the current H264 WebRTC consumer path.
 
 - **Video server:** `{ARGS.video_server_url}`
-- **Default stream id:** `{ARGS.stream_id}`
+- **Default primary stream id:** `{DEFAULT_STREAM_ID}`
+- **Configured streams:** `{', '.join(spec['streamId'] for spec in STREAM_SPECS)}`
 - **Mode:** `{INITIAL_CONFIG['modeLabel']}`
 - **Settings access:** use the **Settings** button or right-click the video area.
             """
