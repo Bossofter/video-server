@@ -1,7 +1,10 @@
 #include "signaling_server.h"
 
-#include <iostream>
 #include <utility>
+
+#include <spdlog/spdlog.h>
+
+#include "logging_utils.h"
 
 namespace video_server {
 
@@ -9,7 +12,9 @@ SignalingServer::SignalingServer(StreamExistsFn stream_exists, LatestFrameGetter
                                  LatestEncodedUnitGetterFn latest_encoded_unit_getter)
     : stream_exists_(std::move(stream_exists)),
       latest_frame_getter_(std::move(latest_frame_getter)),
-      latest_encoded_unit_getter_(std::move(latest_encoded_unit_getter)) {}
+      latest_encoded_unit_getter_(std::move(latest_encoded_unit_getter)) {
+  ensure_default_logging_config();
+}
 
 SignalingServer::~SignalingServer() { stop(); }
 
@@ -23,7 +28,7 @@ bool SignalingServer::set_offer(const std::string& stream_id, const std::string&
   }
 
   auto session = std::make_shared<WebRtcStreamSession>(stream_id, latest_frame_getter_, latest_encoded_unit_getter_);
-  std::clog << "[signaling] offer received stream=" << stream_id << " size=" << offer_sdp.size() << '\n';
+  spdlog::info("[signaling] offer received stream={} size={}", stream_id, offer_sdp.size());
   if (!session->apply_offer(offer_sdp, error_message)) {
     session->stop();
     return false;
@@ -45,12 +50,11 @@ bool SignalingServer::set_offer(const std::string& stream_id, const std::string&
   for (const auto& candidate : pending_remote_candidates) {
     std::string candidate_error;
     if (session->add_remote_candidate(candidate, &candidate_error)) {
-      std::clog << "[signaling] applied queued remote candidate stream=" << stream_id
-                << " size=" << candidate.size() << '\n';
+      spdlog::debug("[signaling] applied queued remote candidate stream={} size={}", stream_id, candidate.size());
       continue;
     }
-    std::clog << "[signaling] failed to apply queued remote candidate stream=" << stream_id
-              << " error=" << candidate_error << '\n';
+    spdlog::warn("[signaling] failed to apply queued remote candidate stream={} error={}", stream_id,
+                 candidate_error);
   }
   return true;
 }
@@ -87,19 +91,19 @@ bool SignalingServer::add_ice_candidate(const std::string& stream_id, const std:
       }
       auto& slot = sessions_[stream_id];
       slot.pending_remote_candidates.push_back(candidate);
-      std::clog << "[signaling] queued remote candidate before offer stream=" << stream_id
-                << " size=" << candidate.size() << '\n';
+      spdlog::debug("[signaling] queued remote candidate before offer stream={} size={}", stream_id,
+                    candidate.size());
       return true;
     }
     session = it->second.session;
   }
-  std::clog << "[signaling] candidate received stream=" << stream_id << " size=" << candidate.size() << '\n';
+  spdlog::debug("[signaling] candidate received stream={} size={}", stream_id, candidate.size());
   if (!session->add_remote_candidate(candidate, error_message)) {
-    std::clog << "[signaling] candidate rejected stream=" << stream_id
-              << " error=" << (error_message != nullptr ? *error_message : std::string("unknown")) << '\n';
+    spdlog::warn("[signaling] candidate rejected stream={} error={}", stream_id,
+                 (error_message != nullptr ? *error_message : std::string("unknown")));
     return false;
   }
-  std::clog << "[signaling] candidate applied stream=" << stream_id << " size=" << candidate.size() << '\n';
+  spdlog::debug("[signaling] candidate applied stream={} size={}", stream_id, candidate.size());
   return true;
 }
 

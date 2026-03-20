@@ -250,8 +250,8 @@ TEST(WebRtcStreamSessionTest, ClosedTrackRaceDuringSendIsCaughtAndLaterRecoveryS
   EXPECT_TRUE(after_failure.video_track_exists);
   EXPECT_FALSE(after_failure.video_track_open);
   EXPECT_FALSE(after_failure.h264_delivery_active);
-  EXPECT_EQ(after_failure.sender_state, "track-closed-during-send");
-  EXPECT_EQ(after_failure.last_packetization_status, "track-closed-exception");
+  EXPECT_EQ(after_failure.sender_state, "waiting-for-video-track-open");
+  EXPECT_EQ(after_failure.last_packetization_status, "track-not-open-yet");
   EXPECT_EQ(after_failure.packets_attempted, 0u);
   EXPECT_FALSE(after_failure.first_decodable_frame_sent);
 
@@ -315,6 +315,17 @@ TEST(WebRtcStreamSessionTest, RetainsCachedStartupStateAcrossSubsequentNonIdrUni
   EXPECT_TRUE(before_follow_up.cached_idr_available);
 
   sender->on_encoded_access_unit(make_non_idr_unit(3000));
+
+  auto while_closed = sender->snapshot();
+  EXPECT_TRUE(while_closed.cached_codec_config_available);
+  EXPECT_TRUE(while_closed.cached_idr_available);
+  EXPECT_FALSE(while_closed.startup_sequence_sent);
+  EXPECT_FALSE(while_closed.first_decodable_frame_sent);
+  EXPECT_EQ(while_closed.sender_state, "waiting-for-video-track-open");
+  EXPECT_EQ(while_closed.last_packetization_status, "track-not-open-yet");
+  EXPECT_EQ(while_closed.packets_attempted, 0u);
+
+  track_sink->set_open(true);
   sender->on_encoded_access_unit(make_non_idr_unit(4000));
 
   const auto after_follow_up = sender->snapshot();

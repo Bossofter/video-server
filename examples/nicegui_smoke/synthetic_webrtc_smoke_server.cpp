@@ -11,8 +11,11 @@
 #include <thread>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include "video_server/raw_video_pipeline.h"
 #include "video_server/webrtc_video_server.h"
+#include "../../src/webrtc/logging_utils.h"
 #include "../../src/testing/synthetic_frame_generator.h"
 
 namespace {
@@ -60,7 +63,8 @@ bool parse_double(const char* value, double& out) {
 }
 
 void print_usage(const char* argv0) {
-  std::cout << "Usage: " << argv0 << " [--host HOST] [--port PORT] [--stream-id ID] [--width W] [--height H] [--fps FPS] --ffmpeg PATH\n";
+  spdlog::info("Usage: {} [--host HOST] [--port PORT] [--stream-id ID] [--width W] [--height H] [--fps FPS] --ffmpeg PATH",
+               argv0);
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -69,7 +73,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
     const std::string arg = argv[i];
     auto require_value = [&](const char* name) -> const char* {
       if (i + 1 >= argc) {
-        std::cerr << "Missing value for " << name << "\n";
+        spdlog::error("Missing value for {}", name);
         return nullptr;
       }
       return argv[++i];
@@ -103,13 +107,13 @@ std::optional<Options> parse_args(int argc, char** argv) {
       print_usage(argv[0]);
       std::exit(0);
     } else {
-      std::cerr << "Unknown argument: " << arg << "\n";
+      spdlog::error("Unknown argument: {}", arg);
       return std::nullopt;
     }
   }
 
   if (options.ffmpeg_path.empty()) {
-    std::cerr << "--ffmpeg is required\n";
+    spdlog::error("--ffmpeg is required");
     return std::nullopt;
   }
   return options;
@@ -118,6 +122,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  video_server::ensure_default_logging_config();
   const auto options = parse_args(argc, argv);
   if (!options.has_value()) {
     print_usage(argv[0]);
@@ -134,16 +139,16 @@ int main(int argc, char** argv) {
                                                  video_server::VideoPixelFormat::RGB24};
 
   if (!server.register_stream(stream_config)) {
-    std::cerr << "Failed to register stream: " << options->stream_id << "\n";
+    spdlog::error("Failed to register stream: {}", options->stream_id);
     return 1;
   }
   if (!server.start()) {
-    std::cerr << "Failed to start WebRTC video server\n";
+    spdlog::error("Failed to start WebRTC video server");
     return 1;
   }
 
-  std::cout << "[smoke-server] started HTTP/WebRTC server on http://" << options->host << ':' << options->port
-            << " stream_id=" << options->stream_id << "\n";
+  spdlog::info("[smoke-server] started HTTP/WebRTC server on http://{}:{} stream_id={}", options->host,
+               options->port, options->stream_id);
 
   std::atomic<bool> stop_requested{false};
   video_server::SyntheticFrameGenerator generator(stream_config);
@@ -157,7 +162,7 @@ int main(int argc, char** argv) {
   auto pipeline = video_server::make_raw_to_h264_pipeline_for_server(options->stream_id, pipeline_config, server);
   std::string pipeline_error;
   if (!pipeline->start(&pipeline_error)) {
-    std::cerr << "Failed to start raw-to-H264 pipeline: " << pipeline_error << "\n";
+    spdlog::error("Failed to start raw-to-H264 pipeline: {}", pipeline_error);
     stop_requested = true;
   }
 
@@ -166,10 +171,10 @@ int main(int argc, char** argv) {
     while (!stop_requested.load()) {
       const auto frame = generator.next_frame();
       if (!server.push_frame(options->stream_id, frame)) {
-        std::cerr << "Failed to push synthetic frame\n";
+        spdlog::warn("Failed to push synthetic frame");
       }
       if (!pipeline->push_frame(frame, &pipeline_error)) {
-        std::cerr << "Failed to push raw frame into H264 pipeline: " << pipeline_error << "\n";
+        spdlog::error("Failed to push raw frame into H264 pipeline: {}", pipeline_error);
         stop_requested = true;
         break;
       }
@@ -178,7 +183,7 @@ int main(int argc, char** argv) {
   });
 
 
-  std::cout << "[smoke-server] press ENTER to stop\n";
+  spdlog::info("[smoke-server] press ENTER to stop");
   std::string line;
   std::getline(std::cin, line);
   stop_requested = true;
@@ -189,6 +194,6 @@ int main(int argc, char** argv) {
   }
 
   server.stop();
-  std::cout << "[smoke-server] stopped\n";
+  spdlog::info("[smoke-server] stopped");
   return 0;
 }

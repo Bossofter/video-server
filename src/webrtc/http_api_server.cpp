@@ -5,16 +5,19 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+
 #include <netdb.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include "logging_utils.h"
 
 namespace video_server {
 namespace {
@@ -120,6 +123,7 @@ HttpApiServer::HttpApiServer(std::string host, uint16_t port) : host_(std::move(
 HttpApiServer::~HttpApiServer() { stop(); }
 
 bool HttpApiServer::start(Handler handler) {
+  ensure_default_logging_config();
   if (running_) {
     return false;
   }
@@ -265,7 +269,7 @@ void HttpApiServer::handle_client(int client_fd) const {
   HttpRequest request;
   HttpResponse response;
   if (!parse_request(raw, request)) {
-    std::clog << "[http] failed to parse incoming request\n";
+    spdlog::warn("[http] failed to parse incoming request");
     response = HttpResponse{400, "{\"error\":\"invalid request\"}", "application/json"};
   } else if (!handler_) {
     response = HttpResponse{500, "{\"error\":\"handler unavailable\"}", "application/json"};

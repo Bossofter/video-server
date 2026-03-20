@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstddef>
 #include <exception>
-#include <iostream>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -14,7 +13,9 @@
 
 #include <rtc/configuration.hpp>
 #include <rtc/description.hpp>
+#include <spdlog/spdlog.h>
 
+#include "logging_utils.h"
 #include "video_server/video_types.h"
 
 namespace video_server {
@@ -398,41 +399,33 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
         startup_gate_reason = startup_sequence_required ? "startup-sequence-required" : "packetization-ready";
       }
 
-      std::clog << "[h264-sender] access_unit seq=" << latest_encoded_unit->sequence_id
-                << " ts_ns=" << latest_encoded_unit->timestamp_ns
-                << " state=" << sender_state_
-                << " gate=" << startup_gate_reason
-                << " track_exists=" << has_track
-                << " track_open=" << track_open
-                << " transport_ready=" << transport_ready
-                << " codec_config_seen=" << codec_config_seen_
-                << " cached_codec_config=" << cached_codec_config_available_
-                << " cached_idr=" << cached_idr_available_
-                << " first_decodable_sent=" << first_decodable_frame_sent_
-                << " startup_sent=" << startup_sequence_sent_
-                << " should_send=" << should_send << '\n';
+      spdlog::trace(
+          "[h264-sender] access_unit seq={} ts_ns={} state={} gate={} track_exists={} track_open={} "
+          "transport_ready={} codec_config_seen={} cached_codec_config={} cached_idr={} "
+          "first_decodable_sent={} startup_sent={} should_send={}",
+          latest_encoded_unit->sequence_id, latest_encoded_unit->timestamp_ns, sender_state_, startup_gate_reason,
+          has_track, track_open, transport_ready, codec_config_seen_, cached_codec_config_available_,
+          cached_idr_available_, first_decodable_frame_sent_, startup_sequence_sent_, should_send);
     }
 
     if (!should_send || !track_sink) {
-      std::clog << "[h264-sender] skip-send seq=" << latest_encoded_unit->sequence_id
-                << " reason=" << last_packetization_status_
-                << " has_track_sink=" << static_cast<bool>(track_sink) << '\n';
+      spdlog::trace("[h264-sender] skip-send seq={} reason={} has_track_sink={}", latest_encoded_unit->sequence_id,
+                    last_packetization_status_, static_cast<bool>(track_sink));
       return;
     }
 
     if (!track_sink->exists() || !track_sink->is_open()) {
       mark_track_not_sendable("track-closed-before-send", "track-closed-before-send");
-      std::clog << "[h264-sender] skip-send seq=" << latest_encoded_unit->sequence_id
-                << " reason=track-closed-before-send"
-                << " has_track_sink=" << static_cast<bool>(track_sink) << '\n';
+      spdlog::info("[h264-sender] track not sendable before packetization seq={} reason=track-closed-before-send "
+                   "has_track_sink={}",
+                   latest_encoded_unit->sequence_id, static_cast<bool>(track_sink));
       return;
     }
 
-    std::clog << "[h264-sender] packetization-attempt seq=" << latest_encoded_unit->sequence_id
-              << " payload_type=" << payload_type
-              << " startup_required=" << startup_sequence_required
-              << " cached_codec_config=" << static_cast<bool>(cached_codec_config)
-              << " cached_idr=" << static_cast<bool>(cached_startup_idr) << '\n';
+    spdlog::trace("[h264-sender] packetization-attempt seq={} payload_type={} startup_required={} "
+                  "cached_codec_config={} cached_idr={}",
+                  latest_encoded_unit->sequence_id, payload_type, startup_sequence_required,
+                  static_cast<bool>(cached_codec_config), static_cast<bool>(cached_startup_idr));
 
     const uint32_t rtp_timestamp = timestamp_ns_to_h264_rtp_timestamp(latest_encoded_unit->timestamp_ns);
     std::vector<std::vector<uint8_t>> nalus_to_send;
@@ -525,10 +518,9 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
       const bool track_closed = message.find("Track is closed") != std::string::npos;
       mark_track_not_sendable(track_closed ? "track-closed-during-send" : "track-send-failed",
                               track_closed ? "track-closed-exception" : "track-send-exception");
-      std::clog << "[h264-sender] send-failed seq=" << latest_encoded_unit->sequence_id
-                << " packets_before_failure=" << packet_count
-                << " status=" << (track_closed ? "track-closed-during-send" : "track-send-failed")
-                << " error=" << message << '\n';
+      spdlog::warn("[h264-sender] send-failed seq={} packets_before_failure={} status={} error={}",
+                   latest_encoded_unit->sequence_id, packet_count,
+                   (track_closed ? "track-closed-during-send" : "track-send-failed"), message);
       return;
     }
 
@@ -544,13 +536,19 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
       h264_delivery_active_ = true;
       video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
       last_packetization_status_ = packet_count > 0 ? "rtp-packets-sent" : "no-rtp-packets-generated";
-      std::clog << "[h264-sender] packets-emitted seq=" << latest_encoded_unit->sequence_id
-                << " packets=" << packet_count
-                << " startup_packets=" << startup_packet_count
-                << " startup_sent=" << startup_sequence_sent_
-                << " first_decodable_sent=" << first_decodable_frame_sent_
-                << " track_exists=" << (video_track_sink_ && video_track_sink_->exists())
-                << " track_open=" << video_track_open_ << '\n';
+      if (sent_startup_sequence) {
+        spdlog::info(
+            "[h264-sender] startup sequence emitted seq={} packets={} startup_packets={} track_exists={} "
+            "track_open={}",
+            latest_encoded_unit->sequence_id, packet_count, startup_packet_count,
+            (video_track_sink_ && video_track_sink_->exists()), video_track_open_);
+      } else {
+        spdlog::trace("[h264-sender] packets-emitted seq={} packets={} startup_packets={} startup_sent={} "
+                      "first_decodable_sent={} track_exists={} track_open={}",
+                      latest_encoded_unit->sequence_id, packet_count, startup_packet_count, startup_sequence_sent_,
+                      first_decodable_frame_sent_, (video_track_sink_ && video_track_sink_->exists()),
+                      video_track_open_);
+      }
     }
   }
 
@@ -795,6 +793,7 @@ std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_
 WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
                                          LatestEncodedUnitGetter latest_encoded_unit_getter)
     : stream_id_(std::move(stream_id)) {
+  ensure_default_logging_config();
   rtc::Configuration config;
   config.disableAutoNegotiation = false;
   peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
@@ -813,6 +812,7 @@ WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGette
 WebRtcStreamSession::~WebRtcStreamSession() { stop(); }
 
 bool WebRtcStreamSession::apply_offer(const std::string& offer_sdp, std::string* error_message) {
+  ensure_default_logging_config();
   try {
     std::shared_ptr<rtc::PeerConnection> peer_connection;
     {
@@ -821,9 +821,8 @@ bool WebRtcStreamSession::apply_offer(const std::string& offer_sdp, std::string*
     }
 
     const auto offer_mids = extract_sdp_mids(offer_sdp);
-    std::clog << "[signaling] applying offer stream=" << stream_id_
-              << " media_sections=" << count_sdp_media_sections(offer_sdp)
-              << " mids=" << join_strings(offer_mids) << '\n';
+    spdlog::info("[signaling] applying offer stream={} media_sections={} mids={}", stream_id_,
+                 count_sdp_media_sections(offer_sdp), join_strings(offer_mids));
 
     // PeerConnection calls may synchronously invoke onLocalDescription/onLocalCandidate/onStateChange,
     // so the session mutex must not be held across libdatachannel API calls.
@@ -948,14 +947,13 @@ void WebRtcStreamSession::configure_callbacks() {
   // They only touch session-local state under mutex_ and therefore must stay independent.
   peer_connection_->onTrack([this](std::shared_ptr<rtc::Track> track) {
     if (!track) {
-      std::clog << "[signaling] track callback stream=" << stream_id_ << " with null track\n";
+      spdlog::warn("[signaling] track callback stream={} with null track", stream_id_);
       return;
     }
 
     const auto description = track->description();
-    std::clog << "[signaling] track callback stream=" << stream_id_ << " mid=" << track->mid()
-              << " type=" << description.type() << " direction=" << static_cast<int>(description.direction())
-              << '\n';
+    spdlog::debug("[signaling] track callback stream={} mid={} type={} direction={}", stream_id_, track->mid(),
+                  description.type(), static_cast<int>(description.direction()));
 
     if (description.type() != "video") {
       return;
@@ -980,38 +978,34 @@ void WebRtcStreamSession::configure_callbacks() {
     local_video.addSSRC(video_ssrc_, "video-server-video", stream_id_, "h264-track");
     track->setDescription(local_video);
     encoded_sender_->set_negotiated_h264_parameters(payload_type, h264_profile);
-    std::clog << "[signaling] activated negotiated video section stream=" << stream_id_
-              << " mid=" << track->mid() << " payload_type=" << payload_type
-              << " fmtp=" << h264_profile
-              << " ssrc=" << video_ssrc_ << '\n';
+    spdlog::info("[signaling] activated negotiated video section stream={} mid={} payload_type={} fmtp={} ssrc={}",
+                 stream_id_, track->mid(), payload_type, h264_profile, video_ssrc_);
 
     auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
     if (!attachable_sink) {
-      std::clog << "[signaling] failed to access attachable video track sink stream=" << stream_id_ << '\n';
+      spdlog::warn("[signaling] failed to access attachable video track sink stream={}", stream_id_);
       return;
     }
 
     attachable_sink->bind(track);
-    std::clog << "[signaling] bound negotiated video track stream=" << stream_id_
-              << " reused_mid=" << track->mid() << '\n';
+    spdlog::info("[signaling] bound negotiated video track stream={} reused_mid={}", stream_id_, track->mid());
   });
 
   peer_connection_->onLocalDescription([this](rtc::Description description) {
     std::string answer = std::string(description);
     answer = sanitize_answer_setup_role(std::move(answer));
     const auto answer_mids = extract_sdp_mids(answer);
-    std::clog << "[signaling] answer generated stream=" << stream_id_ << " size=" << answer.size()
-              << " media_sections=" << count_sdp_media_sections(answer)
-              << " rejected_media_sections=" << count_rejected_sdp_media_sections(answer)
-              << " mids=" << join_strings(answer_mids) << '\n';
+    spdlog::debug(
+        "[signaling] answer generated stream={} size={} media_sections={} rejected_media_sections={} mids={}",
+        stream_id_, answer.size(), count_sdp_media_sections(answer), count_rejected_sdp_media_sections(answer),
+        join_strings(answer_mids));
     std::lock_guard<std::mutex> lock(mutex_);
     answer_sdp_ = answer;
   });
 
   peer_connection_->onLocalCandidate([this](rtc::Candidate candidate) {
     const std::string local_candidate = std::string(candidate);
-    std::clog << "[signaling] local candidate generated stream=" << stream_id_
-              << " size=" << local_candidate.size() << '\n';
+    spdlog::debug("[signaling] local candidate generated stream={} size={}", stream_id_, local_candidate.size());
     std::lock_guard<std::mutex> lock(mutex_);
     last_local_candidate_ = local_candidate;
   });

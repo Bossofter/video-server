@@ -52,9 +52,11 @@ The WebRTC backend requires a **media-enabled** libdatachannel build. In vcpkg t
 `libdatachannel[srtp]`; the plain default `libdatachannel[ws]` build disables media support and will
 fail later when the server first tries to send RTP on a media track.
 
-`test.sh` runs the base GoogleTest suite via `build/video_server_tests --gtest_color=yes`, which prints each default test case as it runs and automatically calls `./build.sh` if the build directory is missing.
+`test.sh` runs the base GoogleTest suite via `build/video_server_tests --gtest_color=yes`, which prints each default test case as it runs, automatically calls `./build.sh` if the build directory is missing, and explicitly reports whether ffmpeg-backed raw-to-H264 integration coverage is available in the current environment.
 
 `test_pipeline.sh` runs the intentionally disabled future pipeline test via `--gtest_also_run_disabled_tests --gtest_filter=WebRtcPipelineTest.DISABLED_EndToEndCurrentPath` so it stays visible and runnable without affecting the default `./test.sh` result.
+
+The raw-to-H264 integration tests require an `ffmpeg` executable. By default the suite probes `ffmpeg` on `PATH`; set `VIDEO_SERVER_TEST_FFMPEG=/path/to/ffmpeg` if you need to point the tests at a non-default binary. When ffmpeg is unavailable, the affected tests report an explicit `GTEST_SKIP` reason instead of failing silently.
 
 If you intentionally want a no-backend build, configure manually with `-DENABLE_WEBRTC_BACKEND=OFF`.
 
