@@ -12,4 +12,19 @@ fi
 # python -m venv .venv
 # source .venv/bin/activate
 # pip install -r examples/nicegui_smoke/requirements.txt
-python examples/nicegui_smoke/app.py --start-server "$@"
+args=("$@")
+has_stream_args=0
+for arg in "${args[@]}"; do
+  case "$arg" in
+    --stream|--stream-id|--multi-stream-demo)
+      has_stream_args=1
+      break
+      ;;
+  esac
+done
+
+if [[ $has_stream_args -eq 0 ]]; then
+  args=(--multi-stream-demo "${args[@]}")
+fi
+
+python examples/nicegui_smoke/app.py --start-server "${args[@]}"

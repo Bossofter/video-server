@@ -426,7 +426,7 @@ window.videoSmokeHarness = (() => {{
     const root = byId('multi-stream-dashboard');
     if (!root) return;
     const catalog = (state.config?.streamCatalog || []).slice();
-    const showMultiGrid = !widgetMode && catalog.length > 1;
+    const showMultiGrid = catalog.length > 1;
     setDisplay('widget-dashboard-wrapper', showMultiGrid ? 'block' : 'none');
     setDisplay('widget-shell', showMultiGrid ? 'none' : 'block');
     setDisplay('widget-context-menu', showMultiGrid ? 'none' : 'none');
@@ -604,11 +604,42 @@ window.videoSmokeHarness = (() => {{
     }}, delayMs);
   }}
 
+  function isLoopbackHost(hostname) {{
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  }}
+
+  function normalizeCandidateForServer(serverBase, candidate) {{
+    if (!candidate || !candidate.includes('.local')) return candidate;
+    try {{
+      const parsedServer = new URL(serverBase);
+      const parts = candidate.trim().split(/\s+/);
+      if (parts.length < 8 || parts[6] !== 'typ' || parts[7] !== 'host') {{
+        return candidate;
+      }}
+      const candidateHost = parts[4] || '';
+      const serverHost = parsedServer.hostname || '';
+      if (!candidateHost.endsWith('.local')) {{
+        return candidate;
+      }}
+      if (!isLoopbackHost(serverHost) && !/^(\d{{1,3}}\.){{3}}\d{{1,3}}$/.test(serverHost)) {{
+        return candidate;
+      }}
+      parts[4] = serverHost;
+      return parts.join(' ');
+    }} catch (_error) {{
+      return candidate;
+    }}
+  }}
+
   async function postCandidate(serverBase, streamId, candidate) {{
+    const postedCandidate = normalizeCandidateForServer(serverBase, candidate);
+    if (postedCandidate !== candidate) {{
+      appendLog('ice', `rewrote local ICE host candidate for backend reachability: ${{candidate}} -> ${{postedCandidate}}`);
+    }}
     const response = await fetch(`${{serverBase}}/api/video/signaling/${{streamId}}/candidate`, {{
       method: 'POST',
       headers: {{'Content-Type': 'text/plain'}},
-      body: candidate,
+      body: postedCandidate,
     }});
     if (!response.ok) {{
       throw new Error(`HTTP ${{response.status}} ${{await response.text()}}`);
