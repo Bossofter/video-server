@@ -194,6 +194,7 @@ window.videoSmokeHarness = (() => {{
     remoteTrackReceived: false,
     playbackActive: false,
     lastBackendCandidate: '',
+    appliedBackendCandidates: new Set(),
     lastStatsAt: '',
     disconnectReason: 'idle',
     selectedCodec: '',
@@ -425,8 +426,12 @@ window.videoSmokeHarness = (() => {{
     const root = byId('multi-stream-dashboard');
     if (!root) return;
     const catalog = (state.config?.streamCatalog || []).slice();
-    if (catalog.length <= 1) {{
-      root.innerHTML = '<div class="info-note">Single-stream mode: add --stream entries or --multi-stream-demo to compare streams side-by-side.</div>';
+    const showMultiGrid = !widgetMode && catalog.length > 1;
+    setDisplay('widget-dashboard-wrapper', showMultiGrid ? 'block' : 'none');
+    setDisplay('widget-shell', showMultiGrid ? 'none' : 'block');
+    setDisplay('widget-context-menu', showMultiGrid ? 'none' : 'none');
+    if (!showMultiGrid) {{
+      root.innerHTML = '';
       return;
     }}
     root.innerHTML = catalog.map((spec) => `
@@ -467,7 +472,6 @@ window.videoSmokeHarness = (() => {{
       setDisplay('smoke-tab-button-row', 'none');
       setDisplay('smoke-tab-panel', 'none');
       setDisplay('info-note-block', 'none');
-      setDisplay('widget-dashboard-wrapper', 'none');
     }}
   }}
 
@@ -549,6 +553,7 @@ window.videoSmokeHarness = (() => {{
     state.remoteTrackReceived = false;
     state.playbackActive = false;
     state.lastBackendCandidate = '';
+    state.appliedBackendCandidates = new Set();
     state.sessionSummary = null;
     state.statsSummary = null;
     state.selectedCodec = '';
@@ -626,6 +631,7 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_packets_sent_after_track_open: session.encoded_sender_packets_sent_after_track_open,
       encoded_sender_negotiated_h264_payload_type: session.encoded_sender_negotiated_h264_payload_type,
       encoded_sender_negotiated_h264_fmtp: session.encoded_sender_negotiated_h264_fmtp,
+      encoded_sender_video_mid: session.encoded_sender_video_mid,
       last_local_candidate: session.last_local_candidate,
       answer_present: !!session.answer_sdp,
     }};
@@ -680,6 +686,15 @@ window.videoSmokeHarness = (() => {{
       if (session.last_local_candidate && session.last_local_candidate !== state.lastBackendCandidate) {{
         state.lastBackendCandidate = session.last_local_candidate;
         appendLog('ice', `backend ICE candidate observed: ${{session.last_local_candidate}}`);
+      }}
+      if (state.remoteDescriptionApplied && session.last_local_candidate && !state.appliedBackendCandidates.has(session.last_local_candidate)) {{
+        await state.pc.addIceCandidate({{
+          candidate: session.last_local_candidate,
+          sdpMid: session.encoded_sender_video_mid || '0',
+          sdpMLineIndex: 0,
+        }});
+        state.appliedBackendCandidates.add(session.last_local_candidate);
+        appendLog('ice', `backend ICE candidate applied: ${{session.last_local_candidate}}`);
       }}
       if (!state.remoteDescriptionApplied && session.answer_sdp) {{
         appendLog('signaling', 'answer received from backend session');
