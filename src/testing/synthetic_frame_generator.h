@@ -17,8 +17,11 @@ class SyntheticFrameGenerator {
 
  private:
   StreamConfig config_;
+  uint8_t channel_seed(size_t channel) const;
+
   std::vector<uint8_t> buffer_;
   uint64_t frame_counter_{0};
+  uint32_t stream_seed_{0};
 };
 
 }  // namespace video_server

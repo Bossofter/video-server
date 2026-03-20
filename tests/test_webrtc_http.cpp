@@ -877,6 +877,103 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
 
   server.stop();
 }
+TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) {
+  video_server::WebRtcVideoServer server({"127.0.0.1", 0, false});
+  const video_server::StreamConfig alpha{"alpha", "Alpha", 640, 360, 15.0, video_server::VideoPixelFormat::GRAY8};
+  const video_server::StreamConfig bravo{"bravo", "Bravo", 320, 240, 30.0, video_server::VideoPixelFormat::GRAY8};
+  ASSERT_TRUE(server.register_stream(alpha));
+  ASSERT_TRUE(server.register_stream(bravo));
+
+  std::vector<uint8_t> alpha_frame_pixels(alpha.width * alpha.height, 11);
+  std::vector<uint8_t> bravo_frame_pixels(bravo.width * bravo.height, 99);
+  video_server::VideoFrameView alpha_frame{alpha_frame_pixels.data(), alpha.width, alpha.height, alpha.width,
+                                           video_server::VideoPixelFormat::GRAY8, 1010, 1};
+  video_server::VideoFrameView bravo_frame{bravo_frame_pixels.data(), bravo.width, bravo.height, bravo.width,
+                                           video_server::VideoPixelFormat::GRAY8, 2020, 2};
+  ASSERT_TRUE(server.push_frame(alpha.stream_id, alpha_frame));
+  ASSERT_TRUE(server.push_frame(bravo.stream_id, bravo_frame));
+
+  const std::array<uint8_t, 23> alpha_au{0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f,
+                                         0x00, 0x00, 0x00, 0x01, 0x68, 0xeb, 0xec, 0xb2,
+                                         0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84};
+  const std::array<uint8_t, 7> bravo_au{0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x22};
+  video_server::EncodedAccessUnitView alpha_access{alpha_au.data(), alpha_au.size(), video_server::VideoCodec::H264,
+                                                    3030, true, true};
+  video_server::EncodedAccessUnitView bravo_access{bravo_au.data(), bravo_au.size(), video_server::VideoCodec::H264,
+                                                    4040, false, false};
+  ASSERT_TRUE(server.push_access_unit(alpha.stream_id, alpha_access));
+  ASSERT_TRUE(server.push_access_unit(bravo.stream_id, bravo_access));
+
+  auto alpha_offer = make_client_offer("alpha-bootstrap");
+  auto bravo_offer = make_client_offer("bravo-bootstrap");
+  ASSERT_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/alpha/offer", alpha_offer->offer_sdp).status == 200);
+  ASSERT_TRUE(server.handle_http_request_for_test("POST", "/api/video/signaling/bravo/offer", bravo_offer->offer_sdp).status == 200);
+
+  video_server::WebRtcHttpResponse alpha_session{};
+  video_server::WebRtcHttpResponse bravo_session{};
+  ASSERT_TRUE(wait_until([&]() {
+    alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+    bravo_session = server.handle_http_request_for_test("GET", "/api/video/signaling/bravo/session");
+    return alpha_session.status == 200 && bravo_session.status == 200 &&
+           !json_string_field(alpha_session.body, "answer_sdp").empty() &&
+           !json_string_field(bravo_session.body, "answer_sdp").empty();
+  }));
+
+  EXPECT_EQ(json_string_field(alpha_session.body, "stream_id"), "alpha");
+  EXPECT_EQ(json_string_field(bravo_session.body, "stream_id"), "bravo");
+  EXPECT_EQ(json_uint_field(alpha_session.body, "latest_snapshot_width"), 640u);
+  EXPECT_EQ(json_uint_field(alpha_session.body, "latest_snapshot_height"), 360u);
+  EXPECT_EQ(json_uint_field(bravo_session.body, "latest_snapshot_width"), 320u);
+  EXPECT_EQ(json_uint_field(bravo_session.body, "latest_snapshot_height"), 240u);
+  EXPECT_EQ(json_uint_field(alpha_session.body, "latest_encoded_timestamp_ns"), 3030u);
+  EXPECT_EQ(json_uint_field(bravo_session.body, "latest_encoded_timestamp_ns"), 4040u);
+  EXPECT_NE(json_string_field(alpha_session.body, "answer_sdp"), json_string_field(bravo_session.body, "answer_sdp"));
+
+  std::string alpha_candidate;
+  std::string bravo_candidate;
+  wait_until([&]() {
+    std::lock_guard<std::mutex> alpha_lock(alpha_offer->mutex);
+    if (!alpha_offer->candidates.empty()) {
+      alpha_candidate = alpha_offer->candidates.front();
+      return true;
+    }
+    return false;
+  }, 1000);
+  wait_until([&]() {
+    std::lock_guard<std::mutex> bravo_lock(bravo_offer->mutex);
+    if (!bravo_offer->candidates.empty()) {
+      bravo_candidate = bravo_offer->candidates.front();
+      return true;
+    }
+    return false;
+  }, 1000);
+
+  if (!alpha_candidate.empty() && !bravo_candidate.empty()) {
+    ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/alpha/candidate", alpha_candidate).status, 200);
+    ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/bravo/candidate", bravo_candidate).status, 200);
+    alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+    bravo_session = server.handle_http_request_for_test("GET", "/api/video/signaling/bravo/session");
+    EXPECT_EQ(json_string_field(alpha_session.body, "last_remote_candidate"), alpha_candidate);
+    EXPECT_EQ(json_string_field(bravo_session.body, "last_remote_candidate"), bravo_candidate);
+    EXPECT_NE(json_string_field(alpha_session.body, "last_remote_candidate"), json_string_field(bravo_session.body, "last_remote_candidate"));
+  }
+
+  auto replacement_alpha = make_client_offer("alpha-replacement");
+  ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/alpha/offer", replacement_alpha->offer_sdp).status, 200);
+  ASSERT_TRUE(wait_until([&]() {
+    alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+    bravo_session = server.handle_http_request_for_test("GET", "/api/video/signaling/bravo/session");
+    return alpha_session.status == 200 && bravo_session.status == 200 &&
+           json_uint_field(alpha_session.body, "session_generation") > 1 &&
+           json_uint_field(bravo_session.body, "session_generation") == 1;
+  }));
+  EXPECT_EQ(json_uint_field(alpha_session.body, "latest_encoded_timestamp_ns"), 3030u);
+  EXPECT_EQ(json_uint_field(bravo_session.body, "latest_encoded_timestamp_ns"), 4040u);
+}
+
+
+
 #else
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) { GTEST_SKIP() << "WebRTC backend disabled"; }
+TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) { GTEST_SKIP() << "WebRTC backend disabled"; }
 #endif

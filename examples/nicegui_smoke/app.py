@@ -9,7 +9,7 @@ import shlex
 import signal
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import imageio_ffmpeg
 from nicegui import app, ui
@@ -22,6 +22,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='NiceGUI smoke harness for the video-server WebRTC H264 path.')
     parser.add_argument('--video-server-url', default='http://127.0.0.1:8080', help='Base URL for the running video server.')
     parser.add_argument('--stream-id', default='synthetic-h264', help='Synthetic stream id to consume.')
+    parser.add_argument('--stream', action='append', default=[], help='Repeatable multi-stream demo spec: id:width:height:fps[:label].')
+    parser.add_argument('--multi-stream-demo', action='store_true', help='Launch the default alpha/bravo/charlie multi-stream demo set.')
     parser.add_argument('--ui-host', default='127.0.0.1', help='NiceGUI host.')
     parser.add_argument('--ui-port', type=int, default=8090, help='NiceGUI port.')
     parser.add_argument('--start-server', action='store_true', help='Launch the smoke C++ server executable automatically.')
@@ -42,6 +44,48 @@ ARGS = parse_args()
 SMOKE_PROCESS: Optional[subprocess.Popen[str]] = None
 
 
+def parse_stream_spec(value: str) -> dict[str, Any]:
+    parts = value.split(':')
+    if len(parts) not in (4, 5):
+        raise ValueError(f'Invalid stream spec {value!r}; expected id:width:height:fps[:label]')
+    stream_id, width, height, fps = parts[:4]
+    label = parts[4] if len(parts) == 5 else stream_id
+    return {
+        'streamId': stream_id,
+        'width': int(width),
+        'height': int(height),
+        'fps': float(fps),
+        'label': label,
+    }
+
+
+def default_demo_streams() -> list[dict[str, Any]]:
+    return [
+        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 15.0, 'label': 'Alpha 640x360'},
+        {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo 1280x720'},
+        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 10.0, 'label': 'Charlie 320x240'},
+    ]
+
+
+def requested_streams() -> list[dict[str, Any]]:
+    if ARGS.multi_stream_demo:
+        return default_demo_streams()
+    if ARGS.stream:
+        return [parse_stream_spec(value) for value in ARGS.stream]
+    return [{'streamId': ARGS.stream_id, 'width': ARGS.width, 'height': ARGS.height, 'fps': ARGS.fps, 'label': ARGS.stream_id}]
+
+
+STREAM_SPECS = requested_streams()
+DEFAULT_STREAM_ID = STREAM_SPECS[0]['streamId']
+
+
+def widget_url(spec: dict[str, Any]) -> str:
+    return (
+        f"/?widget=1&stream_id={spec['streamId']}&fps={spec['fps']}&width={spec['width']}&height={spec['height']}"
+        f"&label={spec['label'].replace(' ', '%20')}"
+    )
+
+
 def start_smoke_server() -> subprocess.Popen[str]:
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     smoke_binary = Path(ARGS.smoke_binary)
@@ -56,17 +100,27 @@ def start_smoke_server() -> subprocess.Popen[str]:
         ARGS.server_host,
         '--port',
         str(ARGS.server_port),
-        '--stream-id',
-        ARGS.stream_id,
-        '--width',
-        str(ARGS.width),
-        '--height',
-        str(ARGS.height),
-        '--fps',
-        str(ARGS.fps),
+    ]
+    if ARGS.multi_stream_demo:
+        cmd.append('--multi-stream-demo')
+    elif ARGS.stream:
+        for spec in ARGS.stream:
+            cmd.extend(['--stream', spec])
+    else:
+        cmd.extend([
+            '--stream-id',
+            ARGS.stream_id,
+            '--width',
+            str(ARGS.width),
+            '--height',
+            str(ARGS.height),
+            '--fps',
+            str(ARGS.fps),
+        ])
+    cmd.extend([
         '--ffmpeg',
         ffmpeg_exe,
-    ]
+    ])
     print('[nicegui-smoke] launching:', ' '.join(shlex.quote(part) for part in cmd), flush=True)
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
 
@@ -104,12 +158,16 @@ async def _shutdown() -> None:
 
 INITIAL_CONFIG = {
     'serverBase': ARGS.video_server_url,
-    'streamId': ARGS.stream_id,
+    'streamId': DEFAULT_STREAM_ID,
+    'streamCatalog': STREAM_SPECS,
+    'widgetFps': STREAM_SPECS[0]['fps'],
+    'widgetWidth': STREAM_SPECS[0]['width'],
+    'widgetHeight': STREAM_SPECS[0]['height'],
     'debugMode': ARGS.debug,
     'autoReconnect': ARGS.auto_reconnect,
     'autoConnect': True if ARGS.auto_connect or ARGS.start_server else False,
     'sessionPollMs': max(200, ARGS.session_poll_ms),
-    'modeLabel': 'launch smoke server + consume WebRTC stream' if ARGS.start_server else 'consume existing video server',
+    'modeLabel': 'launch smoke server + consume WebRTC stream(s)' if ARGS.start_server else 'consume existing video server',
     'smokeServerManaged': ARGS.start_server,
 }
 
@@ -117,7 +175,9 @@ PAGE_JS = f"""
 <script>
 window.videoSmokeDefaults = {json.dumps(INITIAL_CONFIG)};
 window.videoSmokeHarness = (() => {{
-  const STORAGE_KEY = 'video-smoke-harness-config-v2';
+  const search = new URLSearchParams(window.location.search);
+  const widgetMode = search.get('widget') === '1';
+  const STORAGE_KEY = 'video-smoke-harness-config-v2' + (search.get('stream_id') ? ':' + search.get('stream_id') : '');
   const state = {{
     config: null,
     pc: null,
@@ -202,7 +262,7 @@ window.videoSmokeHarness = (() => {{
     state.config.widgetShowPlayback = state.config.widgetShowPlayback !== false;
     state.config.widgetShowVideo = !!state.config.widgetShowVideo;
     state.config.widgetShowSession = !!state.config.widgetShowSession;
-    state.config.activeTab = state.config.activeTab || 'smoke';
+    state.config.activeTab = widgetMode ? 'widget' : (state.config.activeTab || 'smoke');
     return state.config;
   }}
 
@@ -357,6 +417,26 @@ window.videoSmokeHarness = (() => {{
     setText('widget-video-time', video ? video.currentTime.toFixed(2) : 'n/a');
     setText('widget-session-peer', session.peer_state || 'n/a');
     setText('widget-session-sender', session.encoded_sender_state || 'n/a');
+    setText('widget-expected-fps', (cfg.widgetFps || 'n/a').toString());
+    setText('widget-target-geometry', `${{cfg.widgetWidth || '?'}}x${{cfg.widgetHeight || '?'}}`);
+  }}
+
+  function renderMultiStreamDashboard() {{
+    const root = byId('multi-stream-dashboard');
+    if (!root) return;
+    const catalog = (state.config?.streamCatalog || []).slice();
+    if (catalog.length <= 1) {{
+      root.innerHTML = '<div class="info-note">Single-stream mode: add --stream entries or --multi-stream-demo to compare streams side-by-side.</div>';
+      return;
+    }}
+    root.innerHTML = catalog.map((spec) => `
+      <div class="multi-card">
+        <div class="multi-card-header">
+          <div><strong>${{escapeHtml(spec.streamId)}}</strong> · ${{escapeHtml(spec.label || spec.streamId)}}</div>
+          <div>${{spec.width}}x${{spec.height}} @ ${{spec.fps}} fps</div>
+        </div>
+        <iframe class="multi-widget-frame" src="${{escapeHtml(`/?widget=1&stream_id=${{encodeURIComponent(spec.streamId)}}&fps=${{encodeURIComponent(spec.fps)}}&width=${{encodeURIComponent(spec.width)}}&height=${{encodeURIComponent(spec.height)}}&label=${{encodeURIComponent(spec.label || spec.streamId)}}`)}}"></iframe>
+      </div>`).join('');
   }}
 
   function bindDebugHooks() {{
@@ -382,6 +462,13 @@ window.videoSmokeHarness = (() => {{
     setDisplay('widget-tab-panel', tabName === 'widget' ? 'block' : 'none');
     byId('tab-smoke')?.classList.toggle('active', tabName === 'smoke');
     byId('tab-widget')?.classList.toggle('active', tabName === 'widget');
+    if (widgetMode) {{
+      setDisplay('toolbar', 'none');
+      setDisplay('smoke-tab-button-row', 'none');
+      setDisplay('smoke-tab-panel', 'none');
+      setDisplay('info-note-block', 'none');
+      setDisplay('widget-dashboard-wrapper', 'none');
+    }}
   }}
 
   function showContextMenu(x, y) {{
@@ -400,6 +487,7 @@ window.videoSmokeHarness = (() => {{
     const cfg = state.config || loadConfig();
     setValue('config-server-url', cfg.serverBase || '');
     setValue('config-stream-id', cfg.streamId || '');
+    setValue('config-widget-fps', String(cfg.widgetFps || ''));
     setChecked('config-debug-mode', cfg.debugMode);
     setChecked('config-auto-reconnect', cfg.autoReconnect);
     setChecked('config-auto-connect', cfg.autoConnect);
@@ -413,6 +501,7 @@ window.videoSmokeHarness = (() => {{
     setChecked('config-widget-show-playback', cfg.widgetShowPlayback);
     setChecked('config-widget-show-video', cfg.widgetShowVideo);
     setChecked('config-widget-show-session', cfg.widgetShowSession);
+    renderMultiStreamDashboard();
     setText('active-mode-label', cfg.modeLabel || 'consume existing video server');
     setText('managed-server-note', cfg.smokeServerManaged ? 'NiceGUI launched the local smoke server for this session.' : 'Harness is attaching to an existing server process.');
     setText('page-reload-note', cfg.autoConnect ? 'Page reload will reconnect automatically using the saved settings.' : 'Page reload keeps the settings but waits for a manual connect.');
@@ -424,6 +513,7 @@ window.videoSmokeHarness = (() => {{
     const cfg = state.config || loadConfig();
     cfg.serverBase = (byId('config-server-url')?.value || '').trim();
     cfg.streamId = (byId('config-stream-id')?.value || '').trim();
+    cfg.widgetFps = Math.max(0, Number(byId('config-widget-fps')?.value) || 0);
     cfg.debugMode = !!byId('config-debug-mode')?.checked;
     cfg.autoReconnect = !!byId('config-auto-reconnect')?.checked;
     cfg.autoConnect = !!byId('config-auto-connect')?.checked;
@@ -855,12 +945,12 @@ PAGE_HTML = """
     </div>
   </div>
 
-  <div class="tab-row">
+  <div id="smoke-tab-button-row" class="tab-row">
     <button id="tab-smoke" class="tab-button active">Smoke debug</button>
     <button id="tab-widget" class="tab-button">Widget preview</button>
   </div>
 
-  <div class="info-note">
+  <div id="info-note-block" class="info-note">
     <div><strong>Mode:</strong> <span id="active-mode-label"></span></div>
     <div id="managed-server-note"></div>
     <div id="page-reload-note"></div>
@@ -963,6 +1053,13 @@ PAGE_HTML = """
   </div>
 
   <div id="widget-tab-panel" style="display:none;">
+    <div id="widget-dashboard-wrapper" class="widget-dashboard-wrapper">
+      <div class="summary-card">
+        <div class="summary-label">Manual multi-stream compare</div>
+        <div class="info-note">Each card below loads an isolated widget instance bound to one stream.</div>
+        <div id="multi-stream-dashboard" class="multi-stream-dashboard"></div>
+      </div>
+    </div>
     <div class="widget-layout">
       <div id="widget-shell" class="widget-box">
         <div class="widget-header">
@@ -981,6 +1078,8 @@ PAGE_HTML = """
               <strong id="widget-health-summary">idle • no stream</strong>
             </div>
           </div>
+          <div class="widget-status-chip combined">Expected <strong id="widget-expected-fps">n/a</strong> fps</div>
+          <div class="widget-status-chip combined">Geometry <strong id="widget-target-geometry">n/a</strong></div>
         </div>
         <div id="widget-debug-sections" class="widget-debug-sections" style="display:none;">
           <div id="widget-connection-section" class="widget-debug-card">
@@ -1084,6 +1183,7 @@ PAGE_HTML = """
       <label class="checkbox-row"><input id="config-widget-show-playback" type="checkbox"> Include playback/track fields</label>
       <label class="checkbox-row"><input id="config-widget-show-video" type="checkbox"> Include video element fields</label>
       <label class="checkbox-row"><input id="config-widget-show-session" type="checkbox"> Include session summary fields</label>
+      <label>Expected fps<input id="config-widget-fps" type="number" min="0" step="0.1"></label>
       <div class="settings-actions">
         <button id="save-settings" class="toolbar-button primary">Save settings</button>
       </div>
@@ -1128,7 +1228,12 @@ body { background: #111827; }
 .subpanel-title { margin-top: 1rem; font-weight: 700; }
 .json-box pre { margin: 0.75rem 0 0; max-height: 220px; overflow: auto; background: #020617; color: #cbd5e1; padding: 0.9rem; border-radius: 0.75rem; }
 .widget-layout { position: relative; }
-.widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; max-width: 760px; }
+.multi-stream-dashboard { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; margin-top:12px; }
+  .multi-card { border:1px solid #d0d7de; border-radius:12px; background:#fff; padding:12px; }
+  .multi-card-header { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; font-size:13px; color:#4b5563; }
+  .multi-widget-frame { width:100%; min-height:420px; border:0; border-radius:10px; background:#f8fafc; }
+  .widget-dashboard-wrapper { margin-bottom:16px; }
+  .widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; max-width: 760px; }
 .widget-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 0.75rem; }
 .widget-video-wrap { background: #020617; border: 1px solid #334155; border-radius: 1rem; padding: 0.75rem; }
 #widget-video { width: 100%; min-height: 260px; background: #000; border-radius: 0.75rem; }
