@@ -1,14 +1,20 @@
 #include <atomic>
+#include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
+#include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include "video_server/raw_video_pipeline.h"
 #include "video_server/stream_config.h"
@@ -18,9 +24,48 @@
 
 namespace {
 
-bool ffmpeg_available() {
-  const int rc = std::system("ffmpeg -version >/dev/null 2>&1");
-  return rc == 0;
+std::string ffmpeg_command() {
+  if (const char* override_path = std::getenv("VIDEO_SERVER_TEST_FFMPEG"); override_path != nullptr &&
+      override_path[0] != '\0') {
+    return override_path;
+  }
+  return "ffmpeg";
+}
+
+std::string ffmpeg_skip_reason() {
+  const std::string command = ffmpeg_command();
+  const auto executable_exists = [](const std::string& candidate) {
+    std::error_code ec;
+    const auto status = std::filesystem::status(candidate, ec);
+    if (ec || !std::filesystem::exists(status) || std::filesystem::is_directory(status)) {
+      return false;
+    }
+    return ::access(candidate.c_str(), X_OK) == 0;
+  };
+
+  if (command.find('/') != std::string::npos) {
+    if (executable_exists(command)) {
+      return "";
+    }
+    return "raw->H264 integration tests require ffmpeg; executable '" + command + "' is not runnable.";
+  }
+
+  if (const char* path_env = std::getenv("PATH"); path_env != nullptr) {
+    std::stringstream path_stream(path_env);
+    std::string segment;
+    while (std::getline(path_stream, segment, ':')) {
+      if (segment.empty()) {
+        segment = ".";
+      }
+      const auto candidate = (std::filesystem::path(segment) / command).string();
+      if (executable_exists(candidate)) {
+        return "";
+      }
+    }
+  }
+
+  return "raw->H264 integration tests require ffmpeg; executable '" + command +
+         "' was not found on PATH. Set VIDEO_SERVER_TEST_FFMPEG=/path/to/ffmpeg to enable them.";
 }
 
 std::vector<uint8_t> make_rgb_frame(uint32_t width, uint32_t height, uint64_t seed) {
@@ -82,7 +127,7 @@ TEST(RawToH264PipelineTest, RejectsNoAudConfigurationUntilFallbackExists) {
 }
 
 TEST(RawToH264PipelineTest, PropagatesSinkFailureToCaller) {
-  if (!ffmpeg_available()) { GTEST_SKIP() << "ffmpeg not available in test environment"; }
+  if (const std::string reason = ffmpeg_skip_reason(); !reason.empty()) { GTEST_SKIP() << reason; }
 
   video_server::RawVideoPipelineConfig config;
   config.input_width = 64;
@@ -120,7 +165,7 @@ TEST(RawToH264PipelineTest, PropagatesSinkFailureToCaller) {
 }
 
 TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromRawFrames) {
-  if (!ffmpeg_available()) { GTEST_SKIP() << "ffmpeg not available in test environment"; }
+  if (const std::string reason = ffmpeg_skip_reason(); !reason.empty()) { GTEST_SKIP() << reason; }
 
   std::vector<std::vector<uint8_t>> access_units;
   video_server::RawVideoPipelineConfig config;
@@ -151,7 +196,7 @@ TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromRawFrames) {
 }
 
 TEST(RawToH264PipelineTest, BindsEncodedOutputIntoExistingServerPath) {
-  if (!ffmpeg_available()) { GTEST_SKIP() << "ffmpeg not available in test environment"; }
+  if (const std::string reason = ffmpeg_skip_reason(); !reason.empty()) { GTEST_SKIP() << reason; }
 
   video_server::VideoServerCore server;
   video_server::StreamConfig stream_config{"raw-to-server", "raw", 64, 48, 30.0, video_server::VideoPixelFormat::RGB24};
@@ -190,7 +235,7 @@ TEST(RawToH264PipelineTest, BindsEncodedOutputIntoExistingServerPath) {
 }
 
 TEST(RawToH264PipelineTest, AppliesResizeFilterConfiguration) {
-  if (!ffmpeg_available()) { GTEST_SKIP() << "ffmpeg not available in test environment"; }
+  if (const std::string reason = ffmpeg_skip_reason(); !reason.empty()) { GTEST_SKIP() << reason; }
 
   std::vector<std::vector<uint8_t>> access_units;
   video_server::RawVideoPipelineConfig config;
@@ -235,7 +280,7 @@ TEST(RawToH264PipelineTest, AppliesResizeFilterConfiguration) {
 }
 
 TEST(RawToH264PipelineTest, StopsCleanlyAfterFramesArePushed) {
-  if (!ffmpeg_available()) { GTEST_SKIP() << "ffmpeg not available in test environment"; }
+  if (const std::string reason = ffmpeg_skip_reason(); !reason.empty()) { GTEST_SKIP() << reason; }
 
   video_server::RawVideoPipelineConfig config;
   config.input_width = 64;
