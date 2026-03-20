@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 #include "../src/core/video_server_core.h"
@@ -44,17 +45,29 @@ class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
   std::string mid() const override { return mid_; }
   void send(const std::byte* data, size_t size) override {
     std::lock_guard<std::mutex> lock(mutex);
+    ++send_attempts;
+    if (close_on_send_attempt_ > 0 && send_attempts >= close_on_send_attempt_) {
+      open_ = false;
+    }
+    if (throw_on_closed_ && !open_) {
+      throw std::runtime_error("Track is closed");
+    }
     sent_packets.emplace_back(data, data + size);
   }
 
   void set_exists(bool exists) { exists_ = exists; }
   void set_open(bool open) { open_ = open; }
+  void set_throw_on_closed(bool throw_on_closed) { throw_on_closed_ = throw_on_closed; }
+  void set_close_on_send_attempt(size_t send_attempt) { close_on_send_attempt_ = send_attempt; }
 
   std::mutex mutex;
   std::vector<std::vector<std::byte>> sent_packets;
+  size_t send_attempts{0};
  private:
   bool exists_{true};
   bool open_{true};
+  bool throw_on_closed_{false};
+  size_t close_on_send_attempt_{0};
   std::string mid_;
 };
 
@@ -195,7 +208,7 @@ TEST(WebRtcStreamSessionTest, SendsStartupSequenceFromCachedCodecConfigAndIdrAft
   EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.back()[12]) & 0x1f, 1u);
 }
 
-TEST(WebRtcStreamSessionTest, StartsPacketizationWhenTrackExistsEvenIfTrackNeverReportsOpen) {
+TEST(WebRtcStreamSessionTest, DoesNotSendWhileTrackExistsButIsClosed) {
   auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", true);
   auto sender = video_server::make_h264_encoded_video_sender(track_sink, 2468);
 
@@ -210,12 +223,59 @@ TEST(WebRtcStreamSessionTest, StartsPacketizationWhenTrackExistsEvenIfTrackNever
   EXPECT_FALSE(snapshot.video_track_open);
   EXPECT_TRUE(snapshot.cached_codec_config_available);
   EXPECT_TRUE(snapshot.cached_idr_available);
-  EXPECT_TRUE(snapshot.first_decodable_frame_sent);
-  EXPECT_TRUE(snapshot.startup_sequence_sent);
-  EXPECT_EQ(snapshot.sender_state, "sending-h264-rtp");
-  EXPECT_GT(snapshot.packets_attempted, 0u);
+  EXPECT_FALSE(snapshot.first_decodable_frame_sent);
+  EXPECT_FALSE(snapshot.startup_sequence_sent);
+  EXPECT_EQ(snapshot.sender_state, "waiting-for-video-track-open");
+  EXPECT_EQ(snapshot.last_packetization_status, "track-not-open-yet");
+  EXPECT_EQ(snapshot.packets_attempted, 0u);
 
   std::lock_guard<std::mutex> lock(track_sink->mutex);
+  EXPECT_TRUE(track_sink->sent_packets.empty());
+}
+
+TEST(WebRtcStreamSessionTest, ClosedTrackRaceDuringSendIsCaughtAndLaterRecoveryStillWorks) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(true, "video", true);
+  track_sink->set_throw_on_closed(true);
+  track_sink->set_close_on_send_attempt(2);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 2469);
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+
+  EXPECT_NO_THROW(sender->on_encoded_access_unit(make_non_idr_unit(3000)));
+
+  const auto after_failure = sender->snapshot();
+  EXPECT_TRUE(after_failure.video_track_exists);
+  EXPECT_FALSE(after_failure.video_track_open);
+  EXPECT_FALSE(after_failure.h264_delivery_active);
+  EXPECT_EQ(after_failure.sender_state, "track-closed-during-send");
+  EXPECT_EQ(after_failure.last_packetization_status, "track-closed-exception");
+  EXPECT_EQ(after_failure.packets_attempted, 0u);
+  EXPECT_FALSE(after_failure.first_decodable_frame_sent);
+
+  {
+    std::lock_guard<std::mutex> lock(track_sink->mutex);
+    EXPECT_EQ(track_sink->send_attempts, 2u);
+    EXPECT_EQ(track_sink->sent_packets.size(), 1u);
+  }
+
+  track_sink->set_open(true);
+  track_sink->set_close_on_send_attempt(0);
+  EXPECT_NO_THROW(sender->on_encoded_access_unit(make_non_idr_unit(4000)));
+
+  const auto recovered = sender->snapshot();
+  EXPECT_TRUE(recovered.video_track_open);
+  EXPECT_TRUE(recovered.h264_delivery_active);
+  EXPECT_TRUE(recovered.first_decodable_frame_sent);
+  EXPECT_TRUE(recovered.startup_sequence_sent);
+  EXPECT_EQ(recovered.sender_state, "sending-h264-rtp");
+  EXPECT_EQ(recovered.last_packetization_status, "rtp-packets-sent");
+  EXPECT_GT(recovered.packets_attempted, 0u);
+
+  std::lock_guard<std::mutex> lock(track_sink->mutex);
+  EXPECT_GT(track_sink->send_attempts, 0u);
   EXPECT_FALSE(track_sink->sent_packets.empty());
 }
 
