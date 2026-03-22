@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -143,10 +144,25 @@ def start_smoke_server() -> subprocess.Popen[str]:
         cmd.extend(['--stats-interval-seconds', str(ARGS.stress_stats_interval_seconds)])
         if ARGS.stress_print_summary:
             cmd.append('--print-observability-summary')
+
+    probe_host = ARGS.server_host
+    if probe_host in ('0.0.0.0', '::', ''):
+        probe_host = '127.0.0.1'
+    try:
+        with socket.create_connection((probe_host, ARGS.server_port), timeout=0.25):
+            raise RuntimeError(
+                f'Cannot launch smoke server because {probe_host}:{ARGS.server_port} is already in use. '
+                'Stop the existing process or choose a different --server-port.'
+            )
+    except ConnectionRefusedError:
+        pass
+    except OSError:
+        pass
+
     print('[nicegui-smoke] launching:', ' '.join(shlex.quote(part) for part in cmd), flush=True)
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
 
-    readiness_url = f'http://{ARGS.server_host}:{ARGS.server_port}/api/video/streams'
+    readiness_url = f'http://{probe_host}:{ARGS.server_port}/api/video/streams'
     deadline = time.monotonic() + 5.0
     last_error: Optional[Exception] = None
     while time.monotonic() < deadline:
