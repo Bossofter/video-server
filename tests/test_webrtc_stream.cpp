@@ -71,6 +71,45 @@ class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
   std::string mid_;
 };
 
+
+TEST(WebRtcStreamSessionTest, SenderSnapshotsStayIsolatedAcrossIndependentSenders) {
+  auto alpha_track = std::make_shared<FakeEncodedVideoTrackSink>();
+  auto bravo_track = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", true);
+  auto alpha_sender = video_server::make_h264_encoded_video_sender(alpha_track, 1111);
+  auto bravo_sender = video_server::make_h264_encoded_video_sender(bravo_track, 2222);
+
+  alpha_sender->set_negotiated_h264_parameters(110, "packetization-mode=1;profile-level-id=42e01f");
+  bravo_sender->set_negotiated_h264_parameters(111, "packetization-mode=1;profile-level-id=4d401f");
+
+  alpha_sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                          0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                         1000, false, true));
+  alpha_sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+
+  bravo_sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x4d, 0x00, 0x1f,
+                                                          0x00, 0x00, 0x00, 0x01, 0x68, 0xee, 0x3c, 0x80},
+                                                         3000, false, true));
+  bravo_sender->on_encoded_access_unit(make_non_idr_unit(4000));
+
+  const auto alpha_snapshot = alpha_sender->snapshot();
+  const auto bravo_snapshot = bravo_sender->snapshot();
+  EXPECT_EQ(alpha_snapshot.sender_state, "sending-h264-rtp");
+  EXPECT_TRUE(alpha_snapshot.video_track_open);
+  EXPECT_TRUE(alpha_snapshot.first_decodable_frame_sent);
+  EXPECT_EQ(alpha_snapshot.negotiated_h264_payload_type, 110);
+  EXPECT_EQ(alpha_snapshot.last_delivered_timestamp_ns, 2000u);
+  EXPECT_TRUE(alpha_snapshot.cached_idr_available);
+
+  EXPECT_EQ(bravo_snapshot.sender_state, "waiting-for-h264-keyframe");
+  EXPECT_FALSE(bravo_snapshot.video_track_open);
+  EXPECT_FALSE(bravo_snapshot.first_decodable_frame_sent);
+  EXPECT_EQ(bravo_snapshot.negotiated_h264_payload_type, 111);
+  EXPECT_EQ(bravo_snapshot.last_delivered_timestamp_ns, 4000u);
+  EXPECT_FALSE(bravo_snapshot.cached_idr_available);
+  EXPECT_NE(alpha_snapshot.sender_state, bravo_snapshot.sender_state);
+  EXPECT_NE(alpha_snapshot.last_delivered_timestamp_ns, bravo_snapshot.last_delivered_timestamp_ns);
+}
+
 TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit) {
   auto latest = make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f,
                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xeb, 0xec, 0xb2,

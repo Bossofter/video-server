@@ -8,8 +8,9 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import imageio_ffmpeg
 from nicegui import app, ui
@@ -22,6 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='NiceGUI smoke harness for the video-server WebRTC H264 path.')
     parser.add_argument('--video-server-url', default='http://127.0.0.1:8080', help='Base URL for the running video server.')
     parser.add_argument('--stream-id', default='synthetic-h264', help='Synthetic stream id to consume.')
+    parser.add_argument('--stream', action='append', default=[], help='Repeatable multi-stream demo spec: id:width:height:fps[:label].')
+    parser.add_argument('--multi-stream-demo', action='store_true', help='Launch the default alpha/bravo/charlie multi-stream demo set.')
     parser.add_argument('--ui-host', default='127.0.0.1', help='NiceGUI host.')
     parser.add_argument('--ui-port', type=int, default=8090, help='NiceGUI port.')
     parser.add_argument('--start-server', action='store_true', help='Launch the smoke C++ server executable automatically.')
@@ -42,6 +45,57 @@ ARGS = parse_args()
 SMOKE_PROCESS: Optional[subprocess.Popen[str]] = None
 
 
+def parse_stream_spec(value: str) -> dict[str, Any]:
+    parts = value.split(':')
+    if len(parts) not in (4, 5):
+        raise ValueError(f'Invalid stream spec {value!r}; expected id:width:height:fps[:label]')
+    stream_id, width, height, fps = parts[:4]
+    label = parts[4] if len(parts) == 5 else stream_id
+    return {
+        'streamId': stream_id,
+        'width': int(width),
+        'height': int(height),
+        'fps': float(fps),
+        'label': label,
+    }
+
+
+def default_demo_streams() -> list[dict[str, Any]]:
+    return [
+        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha Sweep 640x360'},
+        {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo Orbit 1280x720'},
+        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 30.0, 'label': 'Charlie Checker 320x240'},
+    ]
+
+
+def requested_streams() -> list[dict[str, Any]]:
+    explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
+    if ARGS.multi_stream_demo:
+        return default_demo_streams()
+    if ARGS.stream:
+        return [parse_stream_spec(value) for value in ARGS.stream]
+    if explicit_single_stream:
+        return [{'streamId': ARGS.stream_id, 'width': ARGS.width, 'height': ARGS.height, 'fps': ARGS.fps, 'label': ARGS.stream_id}]
+    return default_demo_streams()
+
+
+
+
+def has_cli_flag(*names: str) -> bool:
+    return any(name in sys.argv[1:] for name in names)
+
+
+STREAM_SPECS = requested_streams()
+DEFAULT_STREAM_ID = STREAM_SPECS[0]['streamId']
+
+
+def widget_url(spec: dict[str, Any]) -> str:
+    return (
+        f"/?widget=1&stream_id={spec['streamId']}&fps={spec['fps']}&width={spec['width']}&height={spec['height']}"
+        f"&label={spec['label'].replace(' ', '%20')}"
+    )
+
+
 def start_smoke_server() -> subprocess.Popen[str]:
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     smoke_binary = Path(ARGS.smoke_binary)
@@ -56,17 +110,28 @@ def start_smoke_server() -> subprocess.Popen[str]:
         ARGS.server_host,
         '--port',
         str(ARGS.server_port),
-        '--stream-id',
-        ARGS.stream_id,
-        '--width',
-        str(ARGS.width),
-        '--height',
-        str(ARGS.height),
-        '--fps',
-        str(ARGS.fps),
+    ]
+    explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
+    if ARGS.multi_stream_demo or (not ARGS.stream and not explicit_single_stream):
+        cmd.append('--multi-stream-demo')
+    elif ARGS.stream:
+        for spec in ARGS.stream:
+            cmd.extend(['--stream', spec])
+    else:
+        cmd.extend([
+            '--stream-id',
+            ARGS.stream_id,
+            '--width',
+            str(ARGS.width),
+            '--height',
+            str(ARGS.height),
+            '--fps',
+            str(ARGS.fps),
+        ])
+    cmd.extend([
         '--ffmpeg',
         ffmpeg_exe,
-    ]
+    ])
     print('[nicegui-smoke] launching:', ' '.join(shlex.quote(part) for part in cmd), flush=True)
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
 
@@ -104,12 +169,16 @@ async def _shutdown() -> None:
 
 INITIAL_CONFIG = {
     'serverBase': ARGS.video_server_url,
-    'streamId': ARGS.stream_id,
+    'streamId': DEFAULT_STREAM_ID,
+    'streamCatalog': STREAM_SPECS,
+    'widgetFps': STREAM_SPECS[0]['fps'],
+    'widgetWidth': STREAM_SPECS[0]['width'],
+    'widgetHeight': STREAM_SPECS[0]['height'],
     'debugMode': ARGS.debug,
     'autoReconnect': ARGS.auto_reconnect,
     'autoConnect': True if ARGS.auto_connect or ARGS.start_server else False,
     'sessionPollMs': max(200, ARGS.session_poll_ms),
-    'modeLabel': 'launch smoke server + consume WebRTC stream' if ARGS.start_server else 'consume existing video server',
+    'modeLabel': 'launch smoke server + consume WebRTC stream(s)' if ARGS.start_server else 'consume existing video server',
     'smokeServerManaged': ARGS.start_server,
 }
 
@@ -117,7 +186,9 @@ PAGE_JS = f"""
 <script>
 window.videoSmokeDefaults = {json.dumps(INITIAL_CONFIG)};
 window.videoSmokeHarness = (() => {{
-  const STORAGE_KEY = 'video-smoke-harness-config-v2';
+  const search = new URLSearchParams(window.location.search);
+  const widgetMode = search.get('widget') === '1';
+  const STORAGE_KEY = 'video-smoke-harness-config-v3' + (search.get('stream_id') ? ':' + search.get('stream_id') : '');
   const state = {{
     config: null,
     pc: null,
@@ -130,10 +201,12 @@ window.videoSmokeHarness = (() => {{
     statsSummary: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
+    connectedStreamId: '',
     remoteDescriptionApplied: false,
     remoteTrackReceived: false,
     playbackActive: false,
     lastBackendCandidate: '',
+    appliedBackendCandidates: new Set(),
     lastStatsAt: '',
     disconnectReason: 'idle',
     selectedCodec: '',
@@ -191,7 +264,17 @@ window.videoSmokeHarness = (() => {{
     }} catch (error) {{
       console.warn('[video-smoke] failed to parse saved config', error);
     }}
-    state.config = Object.assign({{}}, window.videoSmokeDefaults || {{}}, saved);
+    const defaults = Object.assign({{}}, window.videoSmokeDefaults || {{}});
+    state.config = Object.assign({{}}, defaults, saved);
+    state.config.streamCatalog = Array.isArray(defaults.streamCatalog) ? defaults.streamCatalog : (state.config.streamCatalog || []);
+    state.config.modeLabel = defaults.modeLabel || state.config.modeLabel;
+    state.config.smokeServerManaged = !!defaults.smokeServerManaged;
+    if (search.get('stream_id')) state.config.streamId = search.get('stream_id');
+    if (search.get('fps')) state.config.widgetFps = Number(search.get('fps')) || state.config.widgetFps;
+    if (search.get('width')) state.config.widgetWidth = Number(search.get('width')) || state.config.widgetWidth;
+    if (search.get('height')) state.config.widgetHeight = Number(search.get('height')) || state.config.widgetHeight;
+    if (search.get('label')) state.config.widgetLabel = search.get('label');
+    state.config = syncSelectedStreamConfig(state.config);
     state.config.sessionPollMs = Math.max(200, Number(state.config.sessionPollMs) || 500);
     state.config.logFilter = state.config.logFilter || 'all';
     state.config.placeholderDisplay = state.config.placeholderDisplay || 'default';
@@ -202,8 +285,22 @@ window.videoSmokeHarness = (() => {{
     state.config.widgetShowPlayback = state.config.widgetShowPlayback !== false;
     state.config.widgetShowVideo = !!state.config.widgetShowVideo;
     state.config.widgetShowSession = !!state.config.widgetShowSession;
-    state.config.activeTab = state.config.activeTab || 'smoke';
+    state.config.activeTab = widgetMode ? 'widget' : (state.config.activeTab || ((state.config.streamCatalog || []).length > 1 ? 'widget' : 'smoke'));
     return state.config;
+  }}
+
+  function syncSelectedStreamConfig(cfg) {{
+    const catalog = Array.isArray(cfg.streamCatalog) ? cfg.streamCatalog : [];
+    const selected = catalog.find((spec) => spec.streamId === cfg.streamId) || catalog[0] || null;
+    if (!selected) return cfg;
+    if (!cfg.streamId || !catalog.some((spec) => spec.streamId === cfg.streamId)) {{
+      cfg.streamId = selected.streamId;
+    }}
+    if (!search.get('fps')) cfg.widgetFps = selected.fps;
+    if (!search.get('width')) cfg.widgetWidth = selected.width;
+    if (!search.get('height')) cfg.widgetHeight = selected.height;
+    if (!search.get('label')) cfg.widgetLabel = selected.label || selected.streamId;
+    return cfg;
   }}
 
   function saveConfig() {{
@@ -282,7 +379,7 @@ window.videoSmokeHarness = (() => {{
     updateBadge('summary-offer', state.offerStatus, state.offerStatus.includes('failed') ? 'bad' : '');
     updateBadge('summary-candidates', state.candidateStatus, state.candidateStatus.includes('failed') ? 'bad' : '');
     setText('summary-server', cfg.serverBase || '');
-    setText('summary-stream', cfg.streamId || '');
+    setText('summary-stream', state.connectedStreamId || cfg.streamId || '');
     setText('summary-generation', String(state.generation));
     setText('summary-last-stats', state.lastStatsAt || 'never');
     setText('playback-headline', status.text);
@@ -300,7 +397,7 @@ window.videoSmokeHarness = (() => {{
     setText('debug-ice-gathering-state', pc ? pc.iceGatheringState : 'closed');
     setText('debug-signaling-state', pc ? pc.signalingState : 'closed');
     setText('debug-generation', String(state.generation));
-    setText('debug-server-stream', `${{cfg.serverBase}} / ${{cfg.streamId}}`);
+    setText('debug-server-stream', `${{cfg.serverBase}} / ${{state.connectedStreamId || cfg.streamId || ''}}`);
     setText('debug-offer-status', state.offerStatus);
     setText('debug-candidate-status', state.candidateStatus);
     setText('debug-remote-description', state.remoteDescriptionApplied ? 'yes' : 'no');
@@ -357,6 +454,30 @@ window.videoSmokeHarness = (() => {{
     setText('widget-video-time', video ? video.currentTime.toFixed(2) : 'n/a');
     setText('widget-session-peer', session.peer_state || 'n/a');
     setText('widget-session-sender', session.encoded_sender_state || 'n/a');
+    setText('widget-expected-fps', (cfg.widgetFps || 'n/a').toString());
+    setText('widget-target-geometry', `${{cfg.widgetWidth || '?'}}x${{cfg.widgetHeight || '?'}}`);
+  }}
+
+  function renderMultiStreamDashboard() {{
+    const root = byId('multi-stream-dashboard');
+    if (!root) return;
+    const catalog = (state.config?.streamCatalog || []).slice();
+    const showMultiGrid = !widgetMode && catalog.length > 1;
+    setDisplay('widget-dashboard-wrapper', showMultiGrid ? 'block' : 'none');
+    setDisplay('widget-shell', showMultiGrid ? 'none' : 'block');
+    setDisplay('widget-context-menu', showMultiGrid ? 'none' : 'none');
+    if (!showMultiGrid) {{
+      root.innerHTML = '';
+      return;
+    }}
+    root.innerHTML = catalog.map((spec) => `
+      <div class="multi-card">
+        <div class="multi-card-header">
+          <div><strong>${{escapeHtml(spec.streamId)}}</strong> · ${{escapeHtml(spec.label || spec.streamId)}}</div>
+          <div>${{spec.width}}x${{spec.height}} @ ${{spec.fps}} fps</div>
+        </div>
+        <iframe class="multi-widget-frame" src="${{escapeHtml(`/?widget=1&stream_id=${{encodeURIComponent(spec.streamId)}}&fps=${{encodeURIComponent(spec.fps)}}&width=${{encodeURIComponent(spec.width)}}&height=${{encodeURIComponent(spec.height)}}&label=${{encodeURIComponent(spec.label || spec.streamId)}}`)}}"></iframe>
+      </div>`).join('');
   }}
 
   function bindDebugHooks() {{
@@ -382,6 +503,12 @@ window.videoSmokeHarness = (() => {{
     setDisplay('widget-tab-panel', tabName === 'widget' ? 'block' : 'none');
     byId('tab-smoke')?.classList.toggle('active', tabName === 'smoke');
     byId('tab-widget')?.classList.toggle('active', tabName === 'widget');
+    if (widgetMode) {{
+      setDisplay('toolbar', 'none');
+      setDisplay('smoke-tab-button-row', 'none');
+      setDisplay('smoke-tab-panel', 'none');
+      setDisplay('info-note-block', 'none');
+    }}
   }}
 
   function showContextMenu(x, y) {{
@@ -398,8 +525,10 @@ window.videoSmokeHarness = (() => {{
 
   function syncFormFromConfig() {{
     const cfg = state.config || loadConfig();
+    syncSmokeStreamSelector();
     setValue('config-server-url', cfg.serverBase || '');
     setValue('config-stream-id', cfg.streamId || '');
+    setValue('config-widget-fps', String(cfg.widgetFps || ''));
     setChecked('config-debug-mode', cfg.debugMode);
     setChecked('config-auto-reconnect', cfg.autoReconnect);
     setChecked('config-auto-connect', cfg.autoConnect);
@@ -413,6 +542,7 @@ window.videoSmokeHarness = (() => {{
     setChecked('config-widget-show-playback', cfg.widgetShowPlayback);
     setChecked('config-widget-show-video', cfg.widgetShowVideo);
     setChecked('config-widget-show-session', cfg.widgetShowSession);
+    renderMultiStreamDashboard();
     setText('active-mode-label', cfg.modeLabel || 'consume existing video server');
     setText('managed-server-note', cfg.smokeServerManaged ? 'NiceGUI launched the local smoke server for this session.' : 'Harness is attaching to an existing server process.');
     setText('page-reload-note', cfg.autoConnect ? 'Page reload will reconnect automatically using the saved settings.' : 'Page reload keeps the settings but waits for a manual connect.');
@@ -420,10 +550,40 @@ window.videoSmokeHarness = (() => {{
     switchTab(cfg.activeTab || 'smoke');
   }}
 
+  function syncSmokeStreamSelector() {{
+    const select = byId('smoke-stream-select');
+    const hint = byId('smoke-stream-hint');
+    if (!select) return;
+    const cfg = state.config || loadConfig();
+    const catalog = Array.isArray(cfg.streamCatalog) ? cfg.streamCatalog : [];
+    const currentValue = cfg.streamId || '';
+    const options = catalog.map((spec) => {{
+      const selected = spec.streamId === currentValue ? ' selected' : '';
+      const label = spec.label || spec.streamId;
+      return `<option value="${{escapeHtml(spec.streamId)}}"${{selected}}>${{escapeHtml(`${{spec.streamId}} — ${{label}}`)}}</option>`;
+    }});
+    if (currentValue && !catalog.some((spec) => spec.streamId === currentValue)) {{
+      options.unshift(`<option value="${{escapeHtml(currentValue)}}" selected>${{escapeHtml(`${{currentValue}} — custom`)}}</option>`);
+    }}
+    if (!options.length) {{
+      options.push('<option value="">No streams configured</option>');
+    }}
+    select.innerHTML = options.join('');
+    select.value = currentValue;
+    if (hint) {{
+      const selected = catalog.find((spec) => spec.streamId === currentValue);
+      hint.textContent = selected
+        ? `${{selected.label || selected.streamId}} • ${{selected.width}}x${{selected.height}} @ ${{selected.fps}} fps`
+        : (currentValue ? `Custom stream ${{currentValue}}` : 'Pick a stream before connecting');
+    }}
+  }}
+
   function readConfigForm() {{
     const cfg = state.config || loadConfig();
     cfg.serverBase = (byId('config-server-url')?.value || '').trim();
     cfg.streamId = (byId('config-stream-id')?.value || '').trim();
+    cfg.widgetFps = Math.max(0, Number(byId('config-widget-fps')?.value) || 0);
+    syncSelectedStreamConfig(cfg);
     cfg.debugMode = !!byId('config-debug-mode')?.checked;
     cfg.autoReconnect = !!byId('config-auto-reconnect')?.checked;
     cfg.autoConnect = !!byId('config-auto-connect')?.checked;
@@ -455,10 +615,12 @@ window.videoSmokeHarness = (() => {{
     state.sessionPollAbort = true;
     state.offerStatus = 'idle';
     state.candidateStatus = 'idle';
+    state.connectedStreamId = '';
     state.remoteDescriptionApplied = false;
     state.remoteTrackReceived = false;
     state.playbackActive = false;
     state.lastBackendCandidate = '';
+    state.appliedBackendCandidates = new Set();
     state.sessionSummary = null;
     state.statsSummary = null;
     state.selectedCodec = '';
@@ -536,6 +698,7 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_packets_sent_after_track_open: session.encoded_sender_packets_sent_after_track_open,
       encoded_sender_negotiated_h264_payload_type: session.encoded_sender_negotiated_h264_payload_type,
       encoded_sender_negotiated_h264_fmtp: session.encoded_sender_negotiated_h264_fmtp,
+      encoded_sender_video_mid: session.encoded_sender_video_mid,
       last_local_candidate: session.last_local_candidate,
       answer_present: !!session.answer_sdp,
     }};
@@ -574,12 +737,14 @@ window.videoSmokeHarness = (() => {{
     }}
   }}
 
-  async function refreshSession() {{
+  async function refreshSession(streamIdOverride=null) {{
     const token = state.connectToken;
     const cfg = state.config;
     if (!cfg) return;
+    const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
+    if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{cfg.streamId}}/session`);
+      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/session`);
       if (!sessionResponse.ok) {{
         appendLog('session', `session poll failed: HTTP ${{sessionResponse.status}}`);
         return;
@@ -590,6 +755,15 @@ window.videoSmokeHarness = (() => {{
       if (session.last_local_candidate && session.last_local_candidate !== state.lastBackendCandidate) {{
         state.lastBackendCandidate = session.last_local_candidate;
         appendLog('ice', `backend ICE candidate observed: ${{session.last_local_candidate}}`);
+      }}
+      if (state.remoteDescriptionApplied && session.last_local_candidate && !state.appliedBackendCandidates.has(session.last_local_candidate)) {{
+        await state.pc.addIceCandidate({{
+          candidate: session.last_local_candidate,
+          sdpMid: session.encoded_sender_video_mid || '0',
+          sdpMLineIndex: 0,
+        }});
+        state.appliedBackendCandidates.add(session.last_local_candidate);
+        appendLog('ice', `backend ICE candidate applied: ${{session.last_local_candidate}}`);
       }}
       if (!state.remoteDescriptionApplied && session.answer_sdp) {{
         appendLog('signaling', 'answer received from backend session');
@@ -616,7 +790,9 @@ window.videoSmokeHarness = (() => {{
     state.generation += 1;
     state.connectToken += 1;
     const token = state.connectToken;
+    const streamId = cfg.streamId;
     state.sessionPollAbort = false;
+    state.connectedStreamId = streamId;
     state.disconnectReason = `connecting from ${{origin}}`;
     state.offerStatus = 'creating offer';
     state.candidateStatus = 'waiting';
@@ -639,7 +815,7 @@ window.videoSmokeHarness = (() => {{
       while (bufferedLocalCandidates.length > 0) {{
         const candidate = bufferedLocalCandidates.shift();
         try {{
-          await postCandidate(cfg.serverBase, cfg.streamId, candidate);
+          await postCandidate(cfg.serverBase, streamId, candidate);
           state.candidateStatus = 'posted';
           appendLog('ice', `candidate posted: ${{candidate}}`);
         }} catch (error) {{
@@ -692,7 +868,7 @@ window.videoSmokeHarness = (() => {{
         return;
       }}
       try {{
-        await postCandidate(cfg.serverBase, cfg.streamId, candidate);
+        await postCandidate(cfg.serverBase, streamId, candidate);
         state.candidateStatus = 'posted';
         appendLog('ice', `candidate posted immediately: ${{candidate}}`);
       }} catch (error) {{
@@ -724,7 +900,7 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
 
       appendLog('signaling', 'posting SDP offer to server');
-      const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{cfg.streamId}}/offer`, {{
+      const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/offer`, {{
         method: 'POST',
         headers: {{'Content-Type': 'text/plain'}},
         body: pc.localDescription.sdp,
@@ -743,12 +919,12 @@ window.videoSmokeHarness = (() => {{
       appendLog('signaling', 'offer posted successfully');
       updateSummary();
 
-      await refreshSession();
+      await refreshSession(streamId);
       await flushBufferedCandidates();
 
       const pollLoop = async () => {{
         while (!state.sessionPollAbort && token === state.connectToken) {{
-          await refreshSession();
+          await refreshSession(streamId);
           await refreshStats();
           await new Promise((resolve) => setTimeout(resolve, cfg.sessionPollMs));
         }}
@@ -789,6 +965,19 @@ window.videoSmokeHarness = (() => {{
       appendLog('ui', 'manual refresh requested');
       await refreshSession();
       await refreshStats();
+    }});
+    byId('smoke-stream-select')?.addEventListener('change', (event) => {{
+      const nextStreamId = event.target.value || '';
+      const cfg = state.config || loadConfig();
+      cfg.streamId = nextStreamId;
+      state.config = syncSelectedStreamConfig(cfg);
+      saveConfig();
+      syncFormFromConfig();
+      updateSummary();
+      appendLog('ui', `selected smoke stream ${{nextStreamId || '(none)'}}`);
+      if (state.pc) {{
+        connect('stream selector changed').catch((error) => appendLog('error', `stream switch failed: ${{error}}`));
+      }}
     }});
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
@@ -836,6 +1025,16 @@ window.videoSmokeHarness = (() => {{
     readConfigForm,
   }};
 }})();
+
+if (!window.__videoSmokeHarnessBootstrapped) {{
+  window.__videoSmokeHarnessBootstrapped = true;
+  const bootstrapHarness = () => window.videoSmokeHarness?.init();
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', bootstrapHarness, {{once: true}});
+  }} else {{
+    setTimeout(bootstrapHarness, 0);
+  }}
+}}
 </script>
 """
 
@@ -855,12 +1054,12 @@ PAGE_HTML = """
     </div>
   </div>
 
-  <div class="tab-row">
+  <div id="smoke-tab-button-row" class="tab-row">
     <button id="tab-smoke" class="tab-button active">Smoke debug</button>
     <button id="tab-widget" class="tab-button">Widget preview</button>
   </div>
 
-  <div class="info-note">
+  <div id="info-note-block" class="info-note">
     <div><strong>Mode:</strong> <span id="active-mode-label"></span></div>
     <div id="managed-server-note"></div>
     <div id="page-reload-note"></div>
@@ -884,12 +1083,17 @@ PAGE_HTML = """
         <div class="panel-header">
           <div>
             <div class="panel-title">Player</div>
-            <div class="panel-subtitle">Full smoke/debug view with all telemetry.</div>
+            <div class="panel-subtitle">Full smoke/debug view with all telemetry. Choose which configured stream this tab should watch.</div>
           </div>
           <div class="playback-headline">
             <div id="playback-headline">idle</div>
             <div id="playback-detail" class="panel-subtitle">waiting</div>
           </div>
+        </div>
+        <div class="smoke-stream-picker">
+          <label for="smoke-stream-select">Smoke tab stream</label>
+          <select id="smoke-stream-select"></select>
+          <div id="smoke-stream-hint" class="panel-subtitle">Pick a stream before connecting</div>
         </div>
         <div id="video-shell" class="video-shell">
           <video id="smoke-video" autoplay playsinline muted controls></video>
@@ -963,6 +1167,13 @@ PAGE_HTML = """
   </div>
 
   <div id="widget-tab-panel" style="display:none;">
+    <div id="widget-dashboard-wrapper" class="widget-dashboard-wrapper">
+      <div class="summary-card">
+        <div class="summary-label">Manual multi-stream compare</div>
+        <div class="info-note">Each card below loads an isolated widget instance bound to one stream.</div>
+        <div id="multi-stream-dashboard" class="multi-stream-dashboard"></div>
+      </div>
+    </div>
     <div class="widget-layout">
       <div id="widget-shell" class="widget-box">
         <div class="widget-header">
@@ -981,6 +1192,8 @@ PAGE_HTML = """
               <strong id="widget-health-summary">idle • no stream</strong>
             </div>
           </div>
+          <div class="widget-status-chip combined">Expected <strong id="widget-expected-fps">n/a</strong> fps</div>
+          <div class="widget-status-chip combined">Geometry <strong id="widget-target-geometry">n/a</strong></div>
         </div>
         <div id="widget-debug-sections" class="widget-debug-sections" style="display:none;">
           <div id="widget-connection-section" class="widget-debug-card">
@@ -1084,6 +1297,7 @@ PAGE_HTML = """
       <label class="checkbox-row"><input id="config-widget-show-playback" type="checkbox"> Include playback/track fields</label>
       <label class="checkbox-row"><input id="config-widget-show-video" type="checkbox"> Include video element fields</label>
       <label class="checkbox-row"><input id="config-widget-show-session" type="checkbox"> Include session summary fields</label>
+      <label>Expected fps<input id="config-widget-fps" type="number" min="0" step="0.1"></label>
       <div class="settings-actions">
         <button id="save-settings" class="toolbar-button primary">Save settings</button>
       </div>
@@ -1108,6 +1322,9 @@ body { background: #111827; }
 .toolbar-button.primary { background: #2563eb; }
 .toolbar-button.danger { background: #7f1d1d; }
 .toolbar-button.small { padding: 0.35rem 0.7rem; }
+.smoke-stream-picker { display: grid; gap: 0.35rem; margin-bottom: 0.85rem; }
+.smoke-stream-picker label { font-size: 0.9rem; color: #cbd5e1; font-weight: 600; }
+.smoke-stream-picker select { width: 100%; max-width: 420px; background: #020617; color: #e5eefc; border: 1px solid #334155; border-radius: 0.7rem; padding: 0.65rem 0.8rem; }
 .info-note { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 0.85rem 1rem; margin-bottom: 1rem; }
 .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
 .summary-card, .panel-card, .video-panel { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; }
@@ -1128,7 +1345,12 @@ body { background: #111827; }
 .subpanel-title { margin-top: 1rem; font-weight: 700; }
 .json-box pre { margin: 0.75rem 0 0; max-height: 220px; overflow: auto; background: #020617; color: #cbd5e1; padding: 0.9rem; border-radius: 0.75rem; }
 .widget-layout { position: relative; }
-.widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; max-width: 760px; }
+.multi-stream-dashboard { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; margin-top:12px; }
+  .multi-card { border:1px solid #d0d7de; border-radius:12px; background:#fff; padding:12px; }
+  .multi-card-header { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; font-size:13px; color:#4b5563; }
+  .multi-widget-frame { width:100%; min-height:420px; border:0; border-radius:10px; background:#f8fafc; }
+  .widget-dashboard-wrapper { margin-bottom:16px; }
+  .widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; max-width: 760px; }
 .widget-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 0.75rem; }
 .widget-video-wrap { background: #020617; border: 1px solid #334155; border-radius: 1rem; padding: 0.75rem; }
 #widget-video { width: 100%; min-height: 260px; background: #000; border-radius: 0.75rem; }
@@ -1174,15 +1396,13 @@ def index() -> None:
 This page is a manual browser harness for the current H264 WebRTC consumer path.
 
 - **Video server:** `{ARGS.video_server_url}`
-- **Default stream id:** `{ARGS.stream_id}`
+- **Default primary stream id:** `{DEFAULT_STREAM_ID}`
+- **Configured streams:** `{', '.join(spec['streamId'] for spec in STREAM_SPECS)}`
 - **Mode:** `{INITIAL_CONFIG['modeLabel']}`
 - **Settings access:** use the **Settings** button or right-click the video area.
             """
         ).classes('max-w-5xl w-full')
         ui.html(PAGE_HTML).classes('w-full')
-
-    ui.timer(0.2, lambda: ui.run_javascript('window.videoSmokeHarness.init()'), once=True)
-
 
 if __name__ in {'__main__', '__mp_main__'}:
     try:

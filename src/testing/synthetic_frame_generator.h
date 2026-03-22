@@ -12,13 +12,23 @@ class SyntheticFrameGenerator {
  public:
   explicit SyntheticFrameGenerator(StreamConfig config);
 
-  const StreamConfig& config() const { return config_; }
+ const StreamConfig& config() const { return config_; }
   VideoFrameView next_frame();
 
  private:
+  enum class PatternVariant {
+    GradientOrbit,
+    CheckerPulse,
+    DiagonalSweep,
+  };
+
+  PatternVariant pattern_variant() const;
   StreamConfig config_;
+  uint8_t channel_seed(size_t channel) const;
+
   std::vector<uint8_t> buffer_;
   uint64_t frame_counter_{0};
+  uint32_t stream_seed_{0};
 };
 
 }  // namespace video_server
