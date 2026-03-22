@@ -461,8 +461,9 @@ window.videoSmokeHarness = (() => {{
   function renderMultiStreamDashboard() {{
     const root = byId('multi-stream-dashboard');
     if (!root) return;
-    const catalog = (state.config?.streamCatalog || []).slice();
-    const showMultiGrid = !widgetMode && catalog.length > 1;
+    const cfg = state.config || loadConfig();
+    const catalog = (cfg.streamCatalog || []).slice();
+    const showMultiGrid = !widgetMode && cfg.activeTab === 'widget' && catalog.length > 1;
     setDisplay('widget-dashboard-wrapper', showMultiGrid ? 'block' : 'none');
     setDisplay('widget-shell', showMultiGrid ? 'none' : 'block');
     setDisplay('widget-context-menu', showMultiGrid ? 'none' : 'none');
@@ -503,6 +504,7 @@ window.videoSmokeHarness = (() => {{
     setDisplay('widget-tab-panel', tabName === 'widget' ? 'block' : 'none');
     byId('tab-smoke')?.classList.toggle('active', tabName === 'smoke');
     byId('tab-widget')?.classList.toggle('active', tabName === 'widget');
+    renderMultiStreamDashboard();
     if (widgetMode) {{
       setDisplay('toolbar', 'none');
       setDisplay('smoke-tab-button-row', 'none');
