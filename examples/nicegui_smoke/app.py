@@ -1016,6 +1016,16 @@ window.videoSmokeHarness = (() => {{
     readConfigForm,
   }};
 }})();
+
+if (!window.__videoSmokeHarnessBootstrapped) {{
+  window.__videoSmokeHarnessBootstrapped = true;
+  const bootstrapHarness = () => window.videoSmokeHarness?.init();
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', bootstrapHarness, {{once: true}});
+  }} else {{
+    setTimeout(bootstrapHarness, 0);
+  }}
+}}
 </script>
 """
 
@@ -1384,9 +1394,6 @@ This page is a manual browser harness for the current H264 WebRTC consumer path.
             """
         ).classes('max-w-5xl w-full')
         ui.html(PAGE_HTML).classes('w-full')
-
-    ui.timer(0.2, lambda: ui.run_javascript('window.videoSmokeHarness.init()'), once=True)
-
 
 if __name__ in {'__main__', '__mp_main__'}:
     try:
