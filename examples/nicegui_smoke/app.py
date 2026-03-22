@@ -188,7 +188,7 @@ window.videoSmokeDefaults = {json.dumps(INITIAL_CONFIG)};
 window.videoSmokeHarness = (() => {{
   const search = new URLSearchParams(window.location.search);
   const widgetMode = search.get('widget') === '1';
-  const STORAGE_KEY = 'video-smoke-harness-config-v2' + (search.get('stream_id') ? ':' + search.get('stream_id') : '');
+  const STORAGE_KEY = 'video-smoke-harness-config-v3' + (search.get('stream_id') ? ':' + search.get('stream_id') : '');
   const state = {{
     config: null,
     pc: null,
@@ -263,7 +263,12 @@ window.videoSmokeHarness = (() => {{
     }} catch (error) {{
       console.warn('[video-smoke] failed to parse saved config', error);
     }}
-    state.config = Object.assign({{}}, window.videoSmokeDefaults || {{}}, saved);
+    const defaults = Object.assign({{}}, window.videoSmokeDefaults || {{}});
+    state.config = Object.assign({{}}, defaults, saved);
+    state.config.streamCatalog = Array.isArray(defaults.streamCatalog) ? defaults.streamCatalog : (state.config.streamCatalog || []);
+    state.config.modeLabel = defaults.modeLabel || state.config.modeLabel;
+    state.config.smokeServerManaged = !!defaults.smokeServerManaged;
+    state.config = syncSelectedStreamConfig(state.config);
     state.config.sessionPollMs = Math.max(200, Number(state.config.sessionPollMs) || 500);
     state.config.logFilter = state.config.logFilter || 'all';
     state.config.placeholderDisplay = state.config.placeholderDisplay || 'default';
@@ -276,6 +281,20 @@ window.videoSmokeHarness = (() => {{
     state.config.widgetShowSession = !!state.config.widgetShowSession;
     state.config.activeTab = widgetMode ? 'widget' : (state.config.activeTab || ((state.config.streamCatalog || []).length > 1 ? 'widget' : 'smoke'));
     return state.config;
+  }}
+
+  function syncSelectedStreamConfig(cfg) {{
+    const catalog = Array.isArray(cfg.streamCatalog) ? cfg.streamCatalog : [];
+    const selected = catalog.find((spec) => spec.streamId === cfg.streamId) || catalog[0] || null;
+    if (!selected) return cfg;
+    if (!cfg.streamId || !catalog.some((spec) => spec.streamId === cfg.streamId)) {{
+      cfg.streamId = selected.streamId;
+    }}
+    if (!search.get('fps')) cfg.widgetFps = selected.fps;
+    if (!search.get('width')) cfg.widgetWidth = selected.width;
+    if (!search.get('height')) cfg.widgetHeight = selected.height;
+    if (!search.get('label')) cfg.widgetLabel = selected.label || selected.streamId;
+    return cfg;
   }}
 
   function saveConfig() {{
@@ -529,6 +548,7 @@ window.videoSmokeHarness = (() => {{
     cfg.serverBase = (byId('config-server-url')?.value || '').trim();
     cfg.streamId = (byId('config-stream-id')?.value || '').trim();
     cfg.widgetFps = Math.max(0, Number(byId('config-widget-fps')?.value) || 0);
+    syncSelectedStreamConfig(cfg);
     cfg.debugMode = !!byId('config-debug-mode')?.checked;
     cfg.autoReconnect = !!byId('config-auto-reconnect')?.checked;
     cfg.autoConnect = !!byId('config-auto-connect')?.checked;
