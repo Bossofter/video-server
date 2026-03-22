@@ -35,7 +35,6 @@ struct Options {
   std::string host{"127.0.0.1"};
   uint16_t port{8080};
   std::vector<StreamSpec> streams;
-  std::string ffmpeg_path;
   double duration_seconds{0.0};
   double stats_interval_seconds{5.0};
   bool print_observability_summary{false};
@@ -109,7 +108,7 @@ std::vector<StreamSpec> default_demo_streams() {
 
 void print_usage(const char* argv0) {
   spdlog::info(
-      "Usage: {} [--host HOST] [--port PORT] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo] --ffmpeg PATH",
+      "Usage: {} [--host HOST] [--port PORT] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
       argv0);
 }
 
@@ -167,10 +166,6 @@ std::optional<Options> parse_args(int argc, char** argv) {
       options.streams.push_back(*parsed);
     } else if (arg == "--multi-stream-demo") {
       options.streams = default_demo_streams();
-    } else if (arg == "--ffmpeg") {
-      const char* value = require_value("--ffmpeg");
-      if (!value) return std::nullopt;
-      options.ffmpeg_path = value;
     } else if (arg == "--duration-seconds") {
       const char* value = require_value("--duration-seconds");
       if (!value || !parse_double(value, options.duration_seconds)) return std::nullopt;
@@ -188,10 +183,6 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
   }
 
-  if (options.ffmpeg_path.empty()) {
-    spdlog::error("--ffmpeg is required");
-    return std::nullopt;
-  }
 
   if (options.streams.empty()) {
     StreamSpec legacy{legacy_stream_id.value_or("synthetic-h264"),
@@ -250,7 +241,6 @@ int main(int argc, char** argv) {
   const auto run_started_at = Clock::now();
 
   for (auto& stream : streams) {
-    stream->pipeline_config.ffmpeg_path = options->ffmpeg_path;
     stream->pipeline_config.input_width = stream->config.width;
     stream->pipeline_config.input_height = stream->config.height;
     stream->pipeline_config.input_pixel_format = video_server::VideoPixelFormat::RGB24;

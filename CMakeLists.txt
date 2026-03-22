@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(ENABLE_VIDEO_SERVER)
+  find_package(FFMPEG REQUIRED COMPONENTS avcodec avutil swscale)
+
   add_library(video_server_core
     src/core/video_server_core.cpp
     src/core/video_types.cpp
@@ -25,6 +27,13 @@ if(ENABLE_VIDEO_SERVER)
       ${CMAKE_CURRENT_SOURCE_DIR}/src/core
       ${CMAKE_CURRENT_SOURCE_DIR}/src/transforms
       ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
+  )
+
+  target_include_directories(video_server_core PUBLIC ${FFMPEG_INCLUDE_DIRS})
+
+  target_link_libraries(video_server_core
+    PUBLIC
+      ${FFMPEG_LIBRARIES}
   )
 endif()
 

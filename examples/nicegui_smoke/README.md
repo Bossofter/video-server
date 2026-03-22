@@ -7,7 +7,7 @@ It remains intentionally separate from the reusable server core:
 - the C++ smoke server executable starts `WebRtcVideoServer`
 - registers one or more synthetic streams
 - pushes raw synthetic frames for server-side observability
-- runs the existing raw→H264 ffmpeg subprocess pipeline per stream
+- runs the shared raw→H264 in-process libav pipeline per stream
 - feeds those H264 access units into the existing `push_access_unit()` path
 - the NiceGUI page consumes the stream(s) using the existing HTTP signaling API and native browser `<video>` elements
 - all browser debug UX, reconnect logic, telemetry, and console hooks live in `examples/nicegui_smoke/app.py`
@@ -38,7 +38,7 @@ By default, the smoke harness now launches a three-stream demo unless you explic
 - `bravo`: `1280x720 @ 30 fps` with the orbit-style synthetic pattern
 - `charlie`: `320x240 @ 30 fps` with the checker-style synthetic pattern
 
-Each stream gets its own raw-frame generator, ffmpeg pipeline, server registration, and WebRTC signaling/session slot.
+Each stream gets its own raw-frame generator, libav-backed raw pipeline, server registration, and WebRTC signaling/session slot.
 
 ## Custom multi-stream launch
 
@@ -81,7 +81,7 @@ The page is now a more useful day-to-day debug client instead of a basic smoke t
 If you already launched the smoke server yourself:
 
 ```bash
-./build/video_server_nicegui_smoke_server --ffmpeg "$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" --multi-stream-demo
+./build/video_server_nicegui_smoke_server --multi-stream-demo
 python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
 ```
 

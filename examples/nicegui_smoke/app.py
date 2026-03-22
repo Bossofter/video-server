@@ -16,7 +16,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-import imageio_ffmpeg
 from nicegui import app, ui
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -104,7 +103,6 @@ def widget_url(spec: dict[str, Any]) -> str:
 
 
 def start_smoke_server() -> subprocess.Popen[str]:
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     smoke_binary = Path(ARGS.smoke_binary)
     if not smoke_binary.exists():
         raise FileNotFoundError(
@@ -135,10 +133,6 @@ def start_smoke_server() -> subprocess.Popen[str]:
             '--fps',
             str(ARGS.fps),
         ])
-    cmd.extend([
-        '--ffmpeg',
-        ffmpeg_exe,
-    ])
     if ARGS.stress_duration_seconds > 0:
         cmd.extend(['--duration-seconds', str(ARGS.stress_duration_seconds)])
         cmd.extend(['--stats-interval-seconds', str(ARGS.stress_stats_interval_seconds)])
