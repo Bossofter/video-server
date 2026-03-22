@@ -12,4 +12,6 @@ fi
 # python -m venv .venv
 # source .venv/bin/activate
 # pip install -r examples/nicegui_smoke/requirements.txt
-python examples/nicegui_smoke/app.py --start-server "$@"
+python3 -m py_compile examples/nicegui_smoke/app.py
+python3 -m ruff check examples/nicegui_smoke/app.py
+python3 examples/nicegui_smoke/app.py --start-server "$@"

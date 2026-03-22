@@ -424,7 +424,7 @@ window.videoSmokeHarness = (() => {{
     setText('session-startup', session.encoded_sender_startup_sequence_sent ? 'yes' : 'no');
     setText('session-first-dec', session.encoded_sender_first_decodable_frame_sent ? 'yes' : 'no');
     setText('session-packets-open', String(session.encoded_sender_packets_sent_after_track_open ?? 'n/a'));
-    setHtml('session-json', `<pre>${{shortJson(session)}}</pre>`);
+    setHtml('session-json', '<pre>' + shortJson(session) + '</pre>');
 
     const stats = state.statsSummary || {{}};
     setText('stats-packets', String(stats.packetsReceived ?? 'n/a'));
