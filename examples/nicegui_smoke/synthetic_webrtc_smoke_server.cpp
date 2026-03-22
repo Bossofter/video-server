@@ -98,9 +98,9 @@ std::optional<StreamSpec> parse_stream_spec(const std::string& value) {
 
 std::vector<StreamSpec> default_demo_streams() {
   return {
-      StreamSpec{"alpha", "Synthetic demo alpha", 640, 360, 15.0},
+      StreamSpec{"alpha", "Synthetic demo alpha", 640, 360, 30.0},
       StreamSpec{"bravo", "Synthetic demo bravo", 1280, 720, 30.0},
-      StreamSpec{"charlie", "Synthetic demo charlie", 320, 240, 10.0},
+      StreamSpec{"charlie", "Synthetic demo charlie", 320, 240, 30.0},
   };
 }
 

@@ -62,9 +62,9 @@ def parse_stream_spec(value: str) -> dict[str, Any]:
 
 def default_demo_streams() -> list[dict[str, Any]]:
     return [
-        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 15.0, 'label': 'Alpha 640x360'},
+        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha 640x360'},
         {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo 1280x720'},
-        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 10.0, 'label': 'Charlie 320x240'},
+        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 30.0, 'label': 'Charlie 320x240'},
     ]
 
 
@@ -268,6 +268,11 @@ window.videoSmokeHarness = (() => {{
     state.config.streamCatalog = Array.isArray(defaults.streamCatalog) ? defaults.streamCatalog : (state.config.streamCatalog || []);
     state.config.modeLabel = defaults.modeLabel || state.config.modeLabel;
     state.config.smokeServerManaged = !!defaults.smokeServerManaged;
+    if (search.get('stream_id')) state.config.streamId = search.get('stream_id');
+    if (search.get('fps')) state.config.widgetFps = Number(search.get('fps')) || state.config.widgetFps;
+    if (search.get('width')) state.config.widgetWidth = Number(search.get('width')) || state.config.widgetWidth;
+    if (search.get('height')) state.config.widgetHeight = Number(search.get('height')) || state.config.widgetHeight;
+    if (search.get('label')) state.config.widgetLabel = search.get('label');
     state.config = syncSelectedStreamConfig(state.config);
     state.config.sessionPollMs = Math.max(200, Number(state.config.sessionPollMs) || 500);
     state.config.logFilter = state.config.logFilter || 'all';
