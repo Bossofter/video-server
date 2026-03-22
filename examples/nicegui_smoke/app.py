@@ -544,7 +544,7 @@ window.videoSmokeHarness = (() => {{
     const root = byId('multi-stream-dashboard');
     if (!root) return;
     const catalog = (state.config?.streamCatalog || []).slice();
-    const showMultiGrid = !widgetMode && catalog.length > 1;
+    const showMultiGrid = !widgetMode && catalog.length > 1 && (state.config?.activeTab || 'widget') === 'widget';
     setDisplay('widget-dashboard-wrapper', showMultiGrid ? 'block' : 'none');
     setDisplay('widget-shell', showMultiGrid ? 'none' : 'block');
     setDisplay('widget-context-menu', showMultiGrid ? 'none' : 'none');
@@ -578,6 +578,7 @@ window.videoSmokeHarness = (() => {{
 
   function switchTab(tabName) {{
     const cfg = state.config || loadConfig();
+    const previousTab = cfg.activeTab || 'smoke';
     cfg.activeTab = tabName;
     state.config = cfg;
     saveConfig();
@@ -585,6 +586,13 @@ window.videoSmokeHarness = (() => {{
     setDisplay('widget-tab-panel', tabName === 'widget' ? 'block' : 'none');
     byId('tab-smoke')?.classList.toggle('active', tabName === 'smoke');
     byId('tab-widget')?.classList.toggle('active', tabName === 'widget');
+    renderMultiStreamDashboard();
+    const multiStreamMode = !widgetMode && (cfg.streamCatalog || []).length > 1;
+    if (multiStreamMode && tabName === 'widget' && state.pc) {{
+      disconnect('switch to widget tab').catch((error) => appendLog('error', `widget tab disconnect failed: ${{error}}`));
+    }} else if (multiStreamMode && previousTab === 'widget' && tabName === 'smoke' && cfg.autoConnect && !state.pc) {{
+      connect('smoke tab activated').catch((error) => appendLog('error', `smoke tab connect failed: ${{error}}`));
+    }}
     if (widgetMode) {{
       setDisplay('toolbar', 'none');
       setDisplay('smoke-tab-button-row', 'none');
@@ -1114,7 +1122,9 @@ window.videoSmokeHarness = (() => {{
     syncFormFromConfig();
     appendLog('ui', 'harness initialized');
     updateSummary();
-    if (state.config.autoConnect) {{
+    const multiStreamWidgetTab = !widgetMode && (state.config.streamCatalog || []).length > 1 &&
+      (state.config.activeTab || 'widget') === 'widget';
+    if (state.config.autoConnect && !multiStreamWidgetTab) {{
       connect('page load').catch((error) => appendLog('error', `auto-connect failed: ${{error}}`));
     }}
   }}
