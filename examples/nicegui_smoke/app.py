@@ -9,6 +9,9 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -141,11 +144,45 @@ def start_smoke_server() -> subprocess.Popen[str]:
         if ARGS.stress_print_summary:
             cmd.append('--print-observability-summary')
     print('[nicegui-smoke] launching:', ' '.join(shlex.quote(part) for part in cmd), flush=True)
-    return subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
+
+    readiness_url = f'http://{ARGS.server_host}:{ARGS.server_port}/api/video/streams'
+    deadline = time.monotonic() + 5.0
+    last_error: Optional[Exception] = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f'Smoke server exited before becoming ready (exit code {process.returncode}). '
+                f'Check whether {ARGS.server_host}:{ARGS.server_port} is already in use.'
+            )
+        try:
+            with urllib.request.urlopen(readiness_url, timeout=0.5) as response:
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f'Smoke server exited while probing {readiness_url} '
+                        f'(exit code {process.returncode}).'
+                    )
+                if response.status == 200:
+                    return process
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+        except OSError as exc:
+            last_error = exc
+        time.sleep(0.1)
+
+    process.terminate()
+    raise RuntimeError(
+        f'Smoke server did not become ready at {readiness_url} within 5.0s'
+        + (f': {last_error}' if last_error else '.')
+    )
 
 
 if ARGS.start_server:
-    SMOKE_PROCESS = start_smoke_server()
+    try:
+        SMOKE_PROCESS = start_smoke_server()
+    except Exception as exc:
+        print(f'[nicegui-smoke] failed to launch smoke server: {exc}', file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc
     ARGS.video_server_url = f'http://{ARGS.server_host}:{ARGS.server_port}'
 
 
