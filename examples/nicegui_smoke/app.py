@@ -201,6 +201,7 @@ window.videoSmokeHarness = (() => {{
     statsSummary: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
+    connectedStreamId: '',
     remoteDescriptionApplied: false,
     remoteTrackReceived: false,
     playbackActive: false,
@@ -378,7 +379,7 @@ window.videoSmokeHarness = (() => {{
     updateBadge('summary-offer', state.offerStatus, state.offerStatus.includes('failed') ? 'bad' : '');
     updateBadge('summary-candidates', state.candidateStatus, state.candidateStatus.includes('failed') ? 'bad' : '');
     setText('summary-server', cfg.serverBase || '');
-    setText('summary-stream', cfg.streamId || '');
+    setText('summary-stream', state.connectedStreamId || cfg.streamId || '');
     setText('summary-generation', String(state.generation));
     setText('summary-last-stats', state.lastStatsAt || 'never');
     setText('playback-headline', status.text);
@@ -396,7 +397,7 @@ window.videoSmokeHarness = (() => {{
     setText('debug-ice-gathering-state', pc ? pc.iceGatheringState : 'closed');
     setText('debug-signaling-state', pc ? pc.signalingState : 'closed');
     setText('debug-generation', String(state.generation));
-    setText('debug-server-stream', `${{cfg.serverBase}} / ${{cfg.streamId}}`);
+    setText('debug-server-stream', `${{cfg.serverBase}} / ${{state.connectedStreamId || cfg.streamId || ''}}`);
     setText('debug-offer-status', state.offerStatus);
     setText('debug-candidate-status', state.candidateStatus);
     setText('debug-remote-description', state.remoteDescriptionApplied ? 'yes' : 'no');
@@ -614,6 +615,7 @@ window.videoSmokeHarness = (() => {{
     state.sessionPollAbort = true;
     state.offerStatus = 'idle';
     state.candidateStatus = 'idle';
+    state.connectedStreamId = '';
     state.remoteDescriptionApplied = false;
     state.remoteTrackReceived = false;
     state.playbackActive = false;
@@ -735,12 +737,14 @@ window.videoSmokeHarness = (() => {{
     }}
   }}
 
-  async function refreshSession() {{
+  async function refreshSession(streamIdOverride=null) {{
     const token = state.connectToken;
     const cfg = state.config;
     if (!cfg) return;
+    const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
+    if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{cfg.streamId}}/session`);
+      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/session`);
       if (!sessionResponse.ok) {{
         appendLog('session', `session poll failed: HTTP ${{sessionResponse.status}}`);
         return;
@@ -786,7 +790,9 @@ window.videoSmokeHarness = (() => {{
     state.generation += 1;
     state.connectToken += 1;
     const token = state.connectToken;
+    const streamId = cfg.streamId;
     state.sessionPollAbort = false;
+    state.connectedStreamId = streamId;
     state.disconnectReason = `connecting from ${{origin}}`;
     state.offerStatus = 'creating offer';
     state.candidateStatus = 'waiting';
@@ -809,7 +815,7 @@ window.videoSmokeHarness = (() => {{
       while (bufferedLocalCandidates.length > 0) {{
         const candidate = bufferedLocalCandidates.shift();
         try {{
-          await postCandidate(cfg.serverBase, cfg.streamId, candidate);
+          await postCandidate(cfg.serverBase, streamId, candidate);
           state.candidateStatus = 'posted';
           appendLog('ice', `candidate posted: ${{candidate}}`);
         }} catch (error) {{
@@ -862,7 +868,7 @@ window.videoSmokeHarness = (() => {{
         return;
       }}
       try {{
-        await postCandidate(cfg.serverBase, cfg.streamId, candidate);
+        await postCandidate(cfg.serverBase, streamId, candidate);
         state.candidateStatus = 'posted';
         appendLog('ice', `candidate posted immediately: ${{candidate}}`);
       }} catch (error) {{
@@ -894,7 +900,7 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
 
       appendLog('signaling', 'posting SDP offer to server');
-      const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{cfg.streamId}}/offer`, {{
+      const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/offer`, {{
         method: 'POST',
         headers: {{'Content-Type': 'text/plain'}},
         body: pc.localDescription.sdp,
@@ -913,12 +919,12 @@ window.videoSmokeHarness = (() => {{
       appendLog('signaling', 'offer posted successfully');
       updateSummary();
 
-      await refreshSession();
+      await refreshSession(streamId);
       await flushBufferedCandidates();
 
       const pollLoop = async () => {{
         while (!state.sessionPollAbort && token === state.connectToken) {{
-          await refreshSession();
+          await refreshSession(streamId);
           await refreshStats();
           await new Promise((resolve) => setTimeout(resolve, cfg.sessionPollMs));
         }}
@@ -969,6 +975,9 @@ window.videoSmokeHarness = (() => {{
       syncFormFromConfig();
       updateSummary();
       appendLog('ui', `selected smoke stream ${{nextStreamId || '(none)'}}`);
+      if (state.pc) {{
+        connect('stream selector changed').catch((error) => appendLog('error', `stream switch failed: ${{error}}`));
+      }}
     }});
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
