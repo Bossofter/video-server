@@ -1,49 +1,64 @@
 #include "video_server/raw_video_pipeline.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <cerrno>
-#include <chrono>
-#include <csignal>
-#include <cstdio>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
-#include <spawn.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-extern char **environ;
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
+#include <libavutil/error.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
+#include <libavutil/pixfmt.h>
+#include <libavutil/rational.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/version.h>
+#include <libswscale/swscale.h>
+}
 
 namespace video_server {
 namespace {
 
-const char* pixel_format_to_ffmpeg(VideoPixelFormat pixel_format) {
+constexpr uint8_t kNalTypeIdr = 5;
+constexpr uint8_t kNalTypeSps = 7;
+constexpr uint8_t kNalTypePps = 8;
+
+std::string av_error_string(int error_code) {
+  char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
+  av_strerror(error_code, buffer, sizeof(buffer));
+  return std::string(buffer);
+}
+
+AVPixelFormat pixel_format_to_av(VideoPixelFormat pixel_format) {
   switch (pixel_format) {
     case VideoPixelFormat::RGB24:
-      return "rgb24";
+      return AV_PIX_FMT_RGB24;
     case VideoPixelFormat::BGR24:
-      return "bgr24";
+      return AV_PIX_FMT_BGR24;
     case VideoPixelFormat::RGBA32:
-      return "rgba";
+      return AV_PIX_FMT_RGBA;
     case VideoPixelFormat::BGRA32:
-      return "bgra";
+      return AV_PIX_FMT_BGRA;
     case VideoPixelFormat::GRAY8:
-      return "gray";
+      return AV_PIX_FMT_GRAY8;
     case VideoPixelFormat::NV12:
-      return "nv12";
+      return AV_PIX_FMT_NV12;
     case VideoPixelFormat::I420:
-      return "yuv420p";
+      return AV_PIX_FMT_YUV420P;
   }
-  return nullptr;
+  return AV_PIX_FMT_NONE;
 }
 
 uint32_t bytes_per_pixel(VideoPixelFormat pixel_format) {
@@ -65,17 +80,6 @@ bool is_planar_pixel_format(VideoPixelFormat pixel_format) {
   return pixel_format == VideoPixelFormat::NV12 || pixel_format == VideoPixelFormat::I420;
 }
 
-size_t expected_frame_size(const RawVideoPipelineConfig& config) {
-  switch (config.input_pixel_format) {
-    case VideoPixelFormat::NV12:
-    case VideoPixelFormat::I420:
-      return static_cast<size_t>(config.input_width) * config.input_height * 3u / 2u;
-    default:
-      return static_cast<size_t>(config.input_width) * config.input_height *
-             bytes_per_pixel(config.input_pixel_format);
-  }
-}
-
 bool start_code_at(const std::vector<uint8_t>& bytes, size_t index, size_t* prefix_size) {
   if (index + 4 <= bytes.size() && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
       bytes[index + 2] == 0x00 && bytes[index + 3] == 0x01) {
@@ -90,17 +94,32 @@ bool start_code_at(const std::vector<uint8_t>& bytes, size_t index, size_t* pref
   return false;
 }
 
-uint8_t first_nal_type(const std::vector<uint8_t>& bytes) {
-  for (size_t i = 0; i < bytes.size(); ++i) {
+bool start_code_at(const uint8_t* bytes, size_t size, size_t index, size_t* prefix_size) {
+  if (index + 4 <= size && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
+      bytes[index + 2] == 0x00 && bytes[index + 3] == 0x01) {
+    *prefix_size = 4;
+    return true;
+  }
+  if (index + 3 <= size && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
+      bytes[index + 2] == 0x01) {
+    *prefix_size = 3;
+    return true;
+  }
+  return false;
+}
+
+bool contains_nal_type(const uint8_t* data, size_t size, uint8_t nal_type) {
+  for (size_t i = 0; i < size; ++i) {
     size_t prefix = 0;
-    if (!start_code_at(bytes, i, &prefix)) {
+    if (!start_code_at(data, size, i, &prefix)) {
       continue;
     }
-    if (i + prefix < bytes.size()) {
-      return static_cast<uint8_t>(bytes[i + prefix] & 0x1f);
+    if (i + prefix < size && static_cast<uint8_t>(data[i + prefix] & 0x1f) == nal_type) {
+      return true;
     }
+    i += prefix;
   }
-  return 0;
+  return false;
 }
 
 bool contains_nal_type(const std::vector<uint8_t>& bytes, uint8_t nal_type) {
@@ -117,31 +136,62 @@ bool contains_nal_type(const std::vector<uint8_t>& bytes, uint8_t nal_type) {
   return false;
 }
 
-std::string make_filter_chain(const RawVideoPipelineConfig& config) {
-  std::vector<std::string> filters;
-  if (config.scale_mode == RawPipelineScaleMode::Resize && config.output_width.has_value() &&
-      config.output_height.has_value()) {
-    std::ostringstream resize;
-    resize << "scale=" << *config.output_width << ':' << *config.output_height;
-    filters.push_back(resize.str());
+int64_t rescale_timestamp_ns_to_pts(uint64_t timestamp_ns, AVRational time_base) {
+  if (time_base.num <= 0 || time_base.den <= 0) {
+    return 0;
   }
-  if (config.output_fps.has_value() && *config.output_fps > 0.0) {
-    std::ostringstream fps;
-    fps << "fps=" << *config.output_fps;
-    filters.push_back(fps.str());
+  const int64_t den = static_cast<int64_t>(time_base.den);
+  const int64_t num = static_cast<int64_t>(time_base.num);
+  const long double scaled = (static_cast<long double>(timestamp_ns) * den) /
+                             (static_cast<long double>(num) * 1000000000.0L);
+  if (scaled > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+    return std::numeric_limits<int64_t>::max();
   }
-  if (filters.empty()) {
-    return {};
+  if (scaled < static_cast<long double>(std::numeric_limits<int64_t>::min())) {
+    return std::numeric_limits<int64_t>::min();
   }
-  std::ostringstream out;
-  for (size_t i = 0; i < filters.size(); ++i) {
-    if (i != 0) {
-      out << ',';
-    }
-    out << filters[i];
-  }
-  return out.str();
+  return static_cast<int64_t>(std::llround(scaled));
 }
+
+struct AvFrameDeleter {
+  void operator()(AVFrame* frame) const {
+    if (frame != nullptr) {
+      av_frame_free(&frame);
+    }
+  }
+};
+
+struct AvPacketDeleter {
+  void operator()(AVPacket* packet) const {
+    if (packet != nullptr) {
+      av_packet_free(&packet);
+    }
+  }
+};
+
+struct AvCodecContextDeleter {
+  void operator()(AVCodecContext* ctx) const {
+    if (ctx != nullptr) {
+      avcodec_free_context(&ctx);
+    }
+  }
+};
+
+struct SwsContextDeleter {
+  void operator()(SwsContext* ctx) const {
+    if (ctx != nullptr) {
+      sws_freeContext(ctx);
+    }
+  }
+};
+
+struct AvBsfContextDeleter {
+  void operator()(AVBSFContext* ctx) const {
+    if (ctx != nullptr) {
+      av_bsf_free(&ctx);
+    }
+  }
+};
 
 class RawToH264Pipeline final : public IRawVideoPipeline {
  public:
@@ -160,58 +210,18 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     if (!validate_config(error_message)) {
       return false;
     }
-
-    int stdin_pipe[2] = {-1, -1};
-    int stdout_pipe[2] = {-1, -1};
-    if (::pipe(stdin_pipe) != 0 || ::pipe(stdout_pipe) != 0) {
-      set_error_locked(std::string("failed to create pipes: ") + std::strerror(errno), error_message);
-      close_pipe(stdin_pipe);
-      close_pipe(stdout_pipe);
+    if (!initialize_encoder_locked(error_message)) {
       return false;
     }
-
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, stdin_pipe[0], STDIN_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, stdout_pipe[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, stdin_pipe[1]);
-    posix_spawn_file_actions_addclose(&actions, stdout_pipe[0]);
-
-    auto args = build_ffmpeg_args();
-    std::vector<char*> argv;
-    argv.reserve(args.size() + 1);
-    for (std::string& arg : args) {
-      argv.push_back(arg.data());
-    }
-    argv.push_back(nullptr);
-
-    pid_t pid = -1;
-    const int spawn_result =
-        ::posix_spawnp(&pid, config_.ffmpeg_path.c_str(), &actions, nullptr, argv.data(), environ);
-    posix_spawn_file_actions_destroy(&actions);
-    ::close(stdin_pipe[0]);
-    ::close(stdout_pipe[1]);
-
-    if (spawn_result != 0) {
-      ::close(stdin_pipe[1]);
-      ::close(stdout_pipe[0]);
-      set_error_locked(std::string("failed to start ffmpeg: ") + std::strerror(spawn_result), error_message);
-      return false;
-    }
-
-    child_pid_ = pid;
-    stdin_fd_ = stdin_pipe[1];
-    stdout_fd_ = stdout_pipe[0];
-    running_ = true;
     failed_ = false;
     last_error_.clear();
-    reader_thread_ = std::thread([this]() { this->read_loop(); });
+    running_ = true;
     return true;
   }
 
   bool push_frame(const VideoFrameView& frame, std::string* error_message = nullptr) override {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_ || stdin_fd_ < 0) {
+    if (!running_) {
       set_error_value(error_message, failed_ && !last_error_.empty() ? last_error_ : "pipeline is not running");
       return false;
     }
@@ -222,65 +232,29 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     if (!validate_frame(frame, error_message)) {
       return false;
     }
-
-    last_seen_timestamp_ns_ = frame.timestamp_ns;
-    const size_t frame_size = expected_frame_size(config_);
-    const uint8_t* ptr = static_cast<const uint8_t*>(frame.data);
-    if (!write_all_locked(ptr, frame_size, error_message)) {
-      failed_ = true;
-      running_ = false;
-      close_fd_if_open(stdin_fd_);
-      stdin_fd_ = -1;
+    if (should_drop_frame_locked(frame.timestamp_ns)) {
+      return true;
+    }
+    if (!encode_frame_locked(frame, error_message)) {
+      fail_pipeline_locked();
       return false;
     }
     return true;
   }
 
   void stop() override {
-    int stdin_fd = -1;
-    int stdout_fd = -1;
-    pid_t child_pid = -1;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!running_ && !reader_thread_.joinable()) {
-        return;
-      }
-      stdin_fd = stdin_fd_;
-      stdout_fd = stdout_fd_;
-      child_pid = child_pid_;
-      stdin_fd_ = -1;
-      stdout_fd_ = -1;
-      child_pid_ = -1;
-      running_ = false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_ && !codec_context_ && !bitstream_filter_) {
+      return;
     }
-
-    close_fd_if_open(stdin_fd);
-    close_fd_if_open(stdout_fd);
-
-    if (reader_thread_.joinable()) {
-      reader_thread_.join();
-    }
-
-    if (child_pid > 0) {
-      int status = 0;
-      pid_t waited = ::waitpid(child_pid, &status, WNOHANG);
-      if (waited == 0) {
-        ::kill(child_pid, SIGTERM);
-        for (int i = 0; i < 20; ++i) {
-          waited = ::waitpid(child_pid, &status, WNOHANG);
-          if (waited == child_pid) {
-            break;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        }
-        if (waited == 0) {
-          ::kill(child_pid, SIGKILL);
-          ::waitpid(child_pid, &status, 0);
-        }
-      } else if (waited < 0 && errno == ECHILD) {
-        // already reaped
+    if (!failed_ && codec_context_) {
+      std::string ignored_error;
+      if (!flush_encoder_locked(&ignored_error)) {
+        fail_pipeline_locked();
       }
     }
+    release_encoder_locked();
+    running_ = false;
   }
 
  private:
@@ -297,15 +271,8 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
       set_error_locked("input dimensions and fps must be valid", error_message);
       return false;
     }
-    if (pixel_format_to_ffmpeg(config_.input_pixel_format) == nullptr) {
-      set_error_locked("unsupported ffmpeg input pixel format", error_message);
-      return false;
-    }
-    if (!config_.emit_access_unit_delimiters) {
-      set_error_locked(
-          "emit_access_unit_delimiters=false is not currently supported; the first-pass ffmpeg backend "
-          "requires AUD NAL units for correct access-unit splitting",
-          error_message);
+    if (pixel_format_to_av(config_.input_pixel_format) == AV_PIX_FMT_NONE) {
+      set_error_locked("unsupported libav input pixel format", error_message);
       return false;
     }
     if (config_.scale_mode == RawPipelineScaleMode::Resize) {
@@ -314,6 +281,10 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
         set_error_locked("resize mode requires output width and height", error_message);
         return false;
       }
+    }
+    if (config_.output_fps.has_value() && *config_.output_fps <= 0.0) {
+      set_error_locked("output_fps must be > 0 when provided", error_message);
+      return false;
     }
     return true;
   }
@@ -334,203 +305,321 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
         set_error_value(error_message, "pipeline currently requires tightly packed raw frames");
         return false;
       }
+      return true;
     }
-    return true;
-  }
-
-  bool write_all_locked(const uint8_t* data, size_t size, std::string* error_message) {
-    size_t written = 0;
-    while (written < size) {
-      const ssize_t rc = ::write(stdin_fd_, data + written, size - written);
-      if (rc > 0) {
-        written += static_cast<size_t>(rc);
-        continue;
-      }
-      if (rc < 0 && errno == EINTR) {
-        continue;
-      }
-      const int local_errno = (rc < 0) ? errno : EPIPE;
-      set_error_locked(std::string("ffmpeg stdin write failed: ") + std::strerror(local_errno), error_message);
-      fail_pipeline_locked();
+    if (frame.stride_bytes != 0) {
+      set_error_value(error_message, "planar frame views must use tightly packed default layout (stride_bytes=0)");
       return false;
     }
     return true;
   }
 
-  bool emit_access_unit_locked(const std::vector<uint8_t>& access_unit_bytes, uint64_t timestamp_ns) {
-    // First-pass timestamp mapping: ffmpeg stdout is observed asynchronously, so the emitted access
-    // unit currently reuses the most recently pushed raw-frame timestamp seen before this flush.
+  bool initialize_encoder_locked(std::string* error_message) {
+    const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
+    if (codec == nullptr) {
+      codec = avcodec_find_encoder_by_name("libopenh264");
+    }
+    if (codec == nullptr) {
+      codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    }
+    if (codec == nullptr) {
+      set_error_locked("failed to locate a libav H264 encoder (tried libx264, libopenh264, then AV_CODEC_ID_H264)", error_message);
+      return false;
+    }
+
+    std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context(avcodec_alloc_context3(codec));
+    if (!codec_context) {
+      set_error_locked("failed to allocate libav codec context", error_message);
+      return false;
+    }
+
+    const uint32_t output_width = config_.scale_mode == RawPipelineScaleMode::Resize && config_.output_width.has_value()
+                                      ? *config_.output_width
+                                      : config_.input_width;
+    const uint32_t output_height = config_.scale_mode == RawPipelineScaleMode::Resize && config_.output_height.has_value()
+                                       ? *config_.output_height
+                                       : config_.input_height;
+    const double configured_output_fps = config_.output_fps.value_or(config_.input_fps);
+    AVRational frame_rate = av_d2q(configured_output_fps, 100000);
+    if (frame_rate.num <= 0 || frame_rate.den <= 0) {
+      frame_rate = AVRational{static_cast<int>(std::lround(configured_output_fps * 1000.0)), 1000};
+    }
+    AVRational time_base = av_inv_q(frame_rate);
+
+    codec_context->codec_type = AVMEDIA_TYPE_VIDEO;
+    codec_context->codec_id = codec->id;
+    codec_context->width = static_cast<int>(output_width);
+    codec_context->height = static_cast<int>(output_height);
+    codec_context->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec_context->time_base = time_base;
+    codec_context->framerate = frame_rate;
+    codec_context->gop_size = std::max(1, static_cast<int>(std::lround(configured_output_fps)));
+    codec_context->max_b_frames = 0;
+    codec_context->thread_count = 1;
+
+    const std::string codec_name = codec->name != nullptr ? codec->name : "";
+    const bool is_x264_family = codec_name.find("x264") != std::string::npos;
+    av_opt_set(codec_context->priv_data, "preset", config_.encoder_preset.c_str(), 0);
+    av_opt_set(codec_context->priv_data, "tune", config_.encoder_tune.c_str(), 0);
+    if (is_x264_family) {
+      av_opt_set(codec_context->priv_data, "profile", config_.encoder_profile.c_str(), 0);
+      av_opt_set(codec_context->priv_data, "scenecut", "0", 0);
+    }
+    av_opt_set(codec_context->priv_data, "repeat-headers", config_.repeat_headers ? "1" : "0", 0);
+    av_opt_set(codec_context->priv_data, "aud", config_.emit_access_unit_delimiters ? "1" : "0", 0);
+
+    int rc = avcodec_open2(codec_context.get(), codec, nullptr);
+    if (rc < 0) {
+      set_error_locked("failed to initialize libav H264 encoder: " + av_error_string(rc), error_message);
+      return false;
+    }
+
+    const AVBitStreamFilter* filter = av_bsf_get_by_name("h264_mp4toannexb");
+    if (filter == nullptr) {
+      set_error_locked("failed to locate libav h264_mp4toannexb bitstream filter", error_message);
+      return false;
+    }
+    std::unique_ptr<AVBSFContext, AvBsfContextDeleter> bitstream_filter;
+    AVBSFContext* raw_bsf = nullptr;
+    rc = av_bsf_alloc(filter, &raw_bsf);
+    if (rc < 0 || raw_bsf == nullptr) {
+      set_error_locked("failed to allocate libav bitstream filter context: " + av_error_string(rc), error_message);
+      return false;
+    }
+    bitstream_filter.reset(raw_bsf);
+    rc = avcodec_parameters_from_context(bitstream_filter->par_in, codec_context.get());
+    if (rc < 0) {
+      set_error_locked("failed to seed bitstream filter codec parameters: " + av_error_string(rc), error_message);
+      return false;
+    }
+    bitstream_filter->time_base_in = codec_context->time_base;
+    rc = av_bsf_init(bitstream_filter.get());
+    if (rc < 0) {
+      set_error_locked("failed to initialize libav h264_mp4toannexb filter: " + av_error_string(rc), error_message);
+      return false;
+    }
+
+    std::unique_ptr<AVFrame, AvFrameDeleter> input_frame(av_frame_alloc());
+    std::unique_ptr<AVFrame, AvFrameDeleter> encoder_frame(av_frame_alloc());
+    if (!input_frame || !encoder_frame) {
+      set_error_locked("failed to allocate libav frames", error_message);
+      return false;
+    }
+
+    input_frame->format = pixel_format_to_av(config_.input_pixel_format);
+    input_frame->width = static_cast<int>(config_.input_width);
+    input_frame->height = static_cast<int>(config_.input_height);
+
+    encoder_frame->format = codec_context->pix_fmt;
+    encoder_frame->width = codec_context->width;
+    encoder_frame->height = codec_context->height;
+    rc = av_frame_get_buffer(encoder_frame.get(), 32);
+    if (rc < 0) {
+      set_error_locked("failed to allocate encoder frame buffer: " + av_error_string(rc), error_message);
+      return false;
+    }
+
+    std::unique_ptr<SwsContext, SwsContextDeleter> sws_context(sws_getContext(
+        static_cast<int>(config_.input_width), static_cast<int>(config_.input_height),
+        pixel_format_to_av(config_.input_pixel_format), codec_context->width, codec_context->height,
+        codec_context->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr));
+    if (!sws_context) {
+      set_error_locked("failed to initialize libswscale conversion context", error_message);
+      return false;
+    }
+
+    std::unique_ptr<AVPacket, AvPacketDeleter> packet(av_packet_alloc());
+    std::unique_ptr<AVPacket, AvPacketDeleter> filtered_packet(av_packet_alloc());
+    if (!packet || !filtered_packet) {
+      set_error_locked("failed to allocate libav packets", error_message);
+      return false;
+    }
+
+    output_width_ = output_width;
+    output_height_ = output_height;
+    fps_filter_interval_ns_ = config_.output_fps.has_value()
+                                  ? static_cast<uint64_t>(std::llround(1000000000.0 / *config_.output_fps))
+                                  : 0;
+    next_allowed_timestamp_ns_ = 0;
+    next_frame_index_ = 0;
+    codec_context_ = std::move(codec_context);
+    bitstream_filter_ = std::move(bitstream_filter);
+    input_frame_ = std::move(input_frame);
+    encoder_frame_ = std::move(encoder_frame);
+    sws_context_ = std::move(sws_context);
+    packet_ = std::move(packet);
+    filtered_packet_ = std::move(filtered_packet);
+    return true;
+  }
+
+  void release_encoder_locked() {
+    filtered_packet_.reset();
+    packet_.reset();
+    sws_context_.reset();
+    encoder_frame_.reset();
+    input_frame_.reset();
+    bitstream_filter_.reset();
+    codec_context_.reset();
+  }
+
+  bool should_drop_frame_locked(uint64_t timestamp_ns) {
+    if (fps_filter_interval_ns_ == 0) {
+      return false;
+    }
+    if (next_allowed_timestamp_ns_ == 0 || timestamp_ns >= next_allowed_timestamp_ns_) {
+      next_allowed_timestamp_ns_ = timestamp_ns + fps_filter_interval_ns_;
+      return false;
+    }
+    return true;
+  }
+
+  bool populate_input_frame_locked(const VideoFrameView& frame, std::string* error_message) {
+    input_frame_->pts = static_cast<int64_t>(next_frame_index_);
+    const uint8_t* data = static_cast<const uint8_t*>(frame.data);
+    const int width = static_cast<int>(frame.width);
+    const int height = static_cast<int>(frame.height);
+    switch (frame.pixel_format) {
+      case VideoPixelFormat::RGB24:
+      case VideoPixelFormat::BGR24:
+      case VideoPixelFormat::RGBA32:
+      case VideoPixelFormat::BGRA32:
+      case VideoPixelFormat::GRAY8:
+        input_frame_->data[0] = const_cast<uint8_t*>(data);
+        input_frame_->linesize[0] = static_cast<int>(frame.stride_bytes);
+        break;
+      case VideoPixelFormat::NV12: {
+        const int y_stride = width;
+        const int uv_stride = width;
+        input_frame_->data[0] = const_cast<uint8_t*>(data);
+        input_frame_->linesize[0] = y_stride;
+        input_frame_->data[1] = const_cast<uint8_t*>(data + static_cast<size_t>(width) * height);
+        input_frame_->linesize[1] = uv_stride;
+        break;
+      }
+      case VideoPixelFormat::I420: {
+        const int y_stride = width;
+        const int uv_stride = width / 2;
+        const size_t y_plane = static_cast<size_t>(width) * height;
+        const size_t u_plane = y_plane / 4u;
+        input_frame_->data[0] = const_cast<uint8_t*>(data);
+        input_frame_->linesize[0] = y_stride;
+        input_frame_->data[1] = const_cast<uint8_t*>(data + y_plane);
+        input_frame_->linesize[1] = uv_stride;
+        input_frame_->data[2] = const_cast<uint8_t*>(data + y_plane + u_plane);
+        input_frame_->linesize[2] = uv_stride;
+        break;
+      }
+    }
+    int rc = av_frame_make_writable(encoder_frame_.get());
+    if (rc < 0) {
+      set_error_locked("failed to prepare encoder frame buffer: " + av_error_string(rc), error_message);
+      return false;
+    }
+    rc = sws_scale(sws_context_.get(), input_frame_->data, input_frame_->linesize, 0, height,
+                   encoder_frame_->data, encoder_frame_->linesize);
+    if (rc <= 0) {
+      set_error_locked("libswscale failed to convert raw frame into encoder format", error_message);
+      return false;
+    }
+    encoder_frame_->pts = rescale_timestamp_ns_to_pts(frame.timestamp_ns, codec_context_->time_base);
+    if (encoder_frame_->pts < 0) {
+      encoder_frame_->pts = static_cast<int64_t>(next_frame_index_);
+    }
+    ++next_frame_index_;
+    return true;
+  }
+
+  bool encode_frame_locked(const VideoFrameView& frame, std::string* error_message) {
+    if (!populate_input_frame_locked(frame, error_message)) {
+      return false;
+    }
+    int rc = avcodec_send_frame(codec_context_.get(), encoder_frame_.get());
+    if (rc < 0) {
+      set_error_locked("libav encoder send_frame failed: " + av_error_string(rc), error_message);
+      return false;
+    }
+    return drain_encoder_locked(error_message);
+  }
+
+  bool flush_encoder_locked(std::string* error_message) {
+    const int rc = avcodec_send_frame(codec_context_.get(), nullptr);
+    if (rc < 0 && rc != AVERROR_EOF) {
+      set_error_locked("libav encoder flush send_frame failed: " + av_error_string(rc), error_message);
+      return false;
+    }
+    return drain_encoder_locked(error_message, true);
+  }
+
+  bool drain_encoder_locked(std::string* error_message, bool flushing = false) {
+    while (true) {
+      int rc = avcodec_receive_packet(codec_context_.get(), packet_.get());
+      if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
+        return true;
+      }
+      if (rc < 0) {
+        set_error_locked("libav encoder receive_packet failed: " + av_error_string(rc), error_message);
+        return false;
+      }
+      const bool ok = submit_packet_locked(packet_.get(), error_message, flushing);
+      av_packet_unref(packet_.get());
+      if (!ok) {
+        return false;
+      }
+    }
+  }
+
+  bool submit_packet_locked(AVPacket* packet, std::string* error_message, bool flushing) {
+    int rc = av_bsf_send_packet(bitstream_filter_.get(), packet);
+    if (rc < 0) {
+      set_error_locked("failed to push H264 packet through Annex-B bitstream filter: " + av_error_string(rc),
+                       error_message);
+      return false;
+    }
+    while (true) {
+      rc = av_bsf_receive_packet(bitstream_filter_.get(), filtered_packet_.get());
+      if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
+        if (flushing) {
+          return true;
+        }
+        return true;
+      }
+      if (rc < 0) {
+        set_error_locked("failed to read Annex-B packet from bitstream filter: " + av_error_string(rc),
+                         error_message);
+        return false;
+      }
+      if (!emit_access_unit_locked(filtered_packet_.get(), error_message)) {
+        av_packet_unref(filtered_packet_.get());
+        return false;
+      }
+      av_packet_unref(filtered_packet_.get());
+    }
+  }
+
+  bool emit_access_unit_locked(const AVPacket* packet, std::string* error_message) {
     EncodedAccessUnitView view{};
-    view.data = access_unit_bytes.data();
-    view.size_bytes = access_unit_bytes.size();
+    view.data = packet->data;
+    view.size_bytes = static_cast<size_t>(packet->size);
     view.codec = VideoCodec::H264;
-    view.timestamp_ns = timestamp_ns;
-    view.keyframe = contains_nal_type(access_unit_bytes, 5);
-    view.codec_config = contains_nal_type(access_unit_bytes, 7) && contains_nal_type(access_unit_bytes, 8) &&
-                        !view.keyframe;
+    view.timestamp_ns = static_cast<uint64_t>(av_rescale_q(packet->pts, codec_context_->time_base,
+                                                           AVRational{1, 1000000000}));
+    view.keyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0 || contains_nal_type(packet->data, view.size_bytes, kNalTypeIdr);
+    view.codec_config = contains_nal_type(packet->data, view.size_bytes, kNalTypeSps) &&
+                        contains_nal_type(packet->data, view.size_bytes, kNalTypePps) && !view.keyframe;
     if (!sink_(view)) {
       set_error_locked(
           "encoded access-unit sink rejected H264 access unit for stream '" + stream_id_ +
               "'; pipeline will stop and reject later push_frame() calls",
-          nullptr);
-      fail_pipeline_locked();
+          error_message);
       return false;
     }
     return true;
-  }
-
-  void read_loop() {
-    std::vector<uint8_t> buffer;
-    std::vector<uint8_t> current_access_unit;
-    std::array<uint8_t, 8192> chunk{};
-
-    auto flush_current = [&](uint64_t timestamp_ns) -> bool {
-      if (current_access_unit.empty()) {
-        return true;
-      }
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (failed_) {
-        current_access_unit.clear();
-        return false;
-      }
-      const bool sink_ok = emit_access_unit_locked(current_access_unit, timestamp_ns);
-      current_access_unit.clear();
-      return sink_ok;
-    };
-
-    while (true) {
-      int local_stdout_fd = -1;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (failed_) {
-          break;
-        }
-        local_stdout_fd = stdout_fd_;
-      }
-      if (local_stdout_fd < 0) {
-        break;
-      }
-
-      const ssize_t bytes_read = ::read(local_stdout_fd, chunk.data(), chunk.size());
-      if (bytes_read > 0) {
-        buffer.insert(buffer.end(), chunk.begin(), chunk.begin() + bytes_read);
-
-        std::vector<size_t> starts;
-        for (size_t i = 0; i < buffer.size();) {
-          size_t prefix = 0;
-          if (start_code_at(buffer, i, &prefix)) {
-            starts.push_back(i);
-            i += prefix;
-          } else {
-            ++i;
-          }
-        }
-
-        if (starts.size() < 2) {
-          continue;
-        }
-
-        for (size_t i = 0; i + 1 < starts.size(); ++i) {
-          const size_t begin = starts[i];
-          const size_t end = starts[i + 1];
-          std::vector<uint8_t> nal(buffer.begin() + static_cast<std::ptrdiff_t>(begin),
-                                   buffer.begin() + static_cast<std::ptrdiff_t>(end));
-          const uint8_t type = first_nal_type(nal);
-          if (type == 9 && !current_access_unit.empty()) {
-            if (!flush_current(last_seen_timestamp_ns_)) {
-              return;
-            }
-          }
-          current_access_unit.insert(current_access_unit.end(), nal.begin(), nal.end());
-        }
-        buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(starts.back()));
-        continue;
-      }
-
-      if (bytes_read == 0) {
-        break;
-      }
-      if (errno == EINTR) {
-        continue;
-      }
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!failed_) {
-        set_error_locked(std::string("ffmpeg stdout read failed: ") + std::strerror(errno), nullptr);
-        fail_pipeline_locked();
-      }
-      break;
-    }
-
-    if (!buffer.empty()) {
-      current_access_unit.insert(current_access_unit.end(), buffer.begin(), buffer.end());
-    }
-    if (!current_access_unit.empty()) {
-      flush_current(last_seen_timestamp_ns_);
-    }
-  }
-
-  std::vector<std::string> build_ffmpeg_args() const {
-    std::vector<std::string> args;
-    args.emplace_back(config_.ffmpeg_path);
-    args.emplace_back("-hide_banner");
-    args.emplace_back("-loglevel");
-    args.emplace_back("error");
-    args.emplace_back("-f");
-    args.emplace_back("rawvideo");
-    args.emplace_back("-pix_fmt");
-    args.emplace_back(pixel_format_to_ffmpeg(config_.input_pixel_format));
-    args.emplace_back("-s:v");
-    args.emplace_back(std::to_string(config_.input_width) + "x" + std::to_string(config_.input_height));
-    args.emplace_back("-r");
-    args.emplace_back(std::to_string(config_.input_fps));
-    args.emplace_back("-i");
-    args.emplace_back("pipe:0");
-    const std::string filter_chain = make_filter_chain(config_);
-    if (!filter_chain.empty()) {
-      args.emplace_back("-vf");
-      args.emplace_back(filter_chain);
-    }
-    args.emplace_back("-an");
-    args.emplace_back("-c:v");
-    args.emplace_back("libx264");
-    args.emplace_back("-pix_fmt");
-    args.emplace_back("yuv420p");
-    args.emplace_back("-preset");
-    args.emplace_back(config_.encoder_preset);
-    args.emplace_back("-tune");
-    args.emplace_back(config_.encoder_tune);
-    args.emplace_back("-profile:v");
-    args.emplace_back(config_.encoder_profile);
-    args.emplace_back("-bf");
-    args.emplace_back("0");
-    const int gop = std::max(1, static_cast<int>(config_.output_fps.value_or(config_.input_fps)));
-    args.emplace_back("-g");
-    args.emplace_back(std::to_string(gop));
-    args.emplace_back("-keyint_min");
-    args.emplace_back(std::to_string(gop));
-    std::ostringstream x264;
-    x264 << "scenecut=0";
-    if (config_.emit_access_unit_delimiters) {
-      x264 << ":aud=1";
-    }
-    if (config_.repeat_headers) {
-      x264 << ":repeat-headers=1";
-    }
-    args.emplace_back("-x264-params");
-    args.emplace_back(x264.str());
-    args.emplace_back("-f");
-    args.emplace_back("h264");
-    args.emplace_back("pipe:1");
-    return args;
   }
 
   void fail_pipeline_locked() {
     failed_ = true;
     running_ = false;
-    close_fd_if_open(stdin_fd_);
-    close_fd_if_open(stdout_fd_);
-    stdin_fd_ = -1;
-    stdout_fd_ = -1;
+    release_encoder_locked();
   }
 
   void set_error_locked(const std::string& value, std::string* error_message) {
@@ -544,17 +633,6 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     }
   }
 
-  static void close_fd_if_open(int fd) {
-    if (fd >= 0) {
-      ::close(fd);
-    }
-  }
-
-  static void close_pipe(int pipe_fds[2]) {
-    close_fd_if_open(pipe_fds[0]);
-    close_fd_if_open(pipe_fds[1]);
-  }
-
   const std::string stream_id_;
   const RawVideoPipelineConfig config_;
   EncodedAccessUnitSink sink_;
@@ -562,15 +640,21 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
   mutable std::mutex mutex_;
   bool running_{false};
   bool failed_{false};
-  int stdin_fd_{-1};
-  int stdout_fd_{-1};
-  pid_t child_pid_{-1};
-  std::thread reader_thread_;
   std::string last_error_;
-  // Approximate timestamp bridge for the first ffmpeg subprocess backend; see comment above
-  // emit_access_unit_locked(...). A stricter frame-to-access-unit timestamp mapping may require a
-  // richer correlation strategy in a future backend pass.
-  std::atomic<uint64_t> last_seen_timestamp_ns_{0};
+
+  uint32_t output_width_{0};
+  uint32_t output_height_{0};
+  uint64_t fps_filter_interval_ns_{0};
+  uint64_t next_allowed_timestamp_ns_{0};
+  uint64_t next_frame_index_{0};
+
+  std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context_;
+  std::unique_ptr<AVBSFContext, AvBsfContextDeleter> bitstream_filter_;
+  std::unique_ptr<AVFrame, AvFrameDeleter> input_frame_;
+  std::unique_ptr<AVFrame, AvFrameDeleter> encoder_frame_;
+  std::unique_ptr<SwsContext, SwsContextDeleter> sws_context_;
+  std::unique_ptr<AVPacket, AvPacketDeleter> packet_;
+  std::unique_ptr<AVPacket, AvPacketDeleter> filtered_packet_;
 };
 
 }  // namespace

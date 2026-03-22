@@ -18,7 +18,8 @@ enum class RawPipelineScaleMode {
 };
 
 struct RawVideoPipelineConfig {
-  // Current first-pass ffmpeg backend limitation: raw input must be tightly packed.
+  // Legacy compatibility field retained for callers that previously named an ffmpeg binary.
+  // The primary raw->H264 backend is now in-process libav-based, so this field is ignored.
   std::string ffmpeg_path{"ffmpeg"};
   uint32_t input_width{0};
   uint32_t input_height{0};
@@ -32,8 +33,8 @@ struct RawVideoPipelineConfig {
   std::string encoder_tune{"zerolatency"};
   std::string encoder_profile{"baseline"};
   bool repeat_headers{true};
-  // Current first-pass backend requires AUD NAL units for access-unit splitting; setting this to
-  // false is rejected until a non-AUD fallback splitter is implemented.
+  // Requests AUD NAL emission from encoders that support it. The libav backend normalizes
+  // packets to Annex-B access units either way, so this remains a best-effort tuning knob.
   bool emit_access_unit_delimiters{true};
 };
 
@@ -48,7 +49,7 @@ class IRawVideoPipeline {
 };
 
 // Returning false from the sink is treated as a hard pipeline failure; the pipeline records
-// the error, stops the ffmpeg subprocess bridge, and later push_frame() calls fail with that error.
+// the error, stops the in-process encoder backend, and later push_frame() calls fail with that error.
 using EncodedAccessUnitSink = std::function<bool(const EncodedAccessUnitView& access_unit)>;
 
 std::unique_ptr<IRawVideoPipeline> make_raw_to_h264_pipeline(std::string stream_id,

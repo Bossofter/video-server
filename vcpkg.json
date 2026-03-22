@@ -5,6 +5,12 @@
   "dependencies": [
     "gtest",
     {
+      "name": "ffmpeg",
+      "features": [
+        "openh264"
+      ]
+    },
+    {
       "name": "libdatachannel",
       "features": [
         "srtp"

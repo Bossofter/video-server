@@ -1,2 +1,1 @@
 nicegui>=2.0.0
-imageio-ffmpeg>=0.5.1
