@@ -34,9 +34,9 @@ http://127.0.0.1:8090/
 
 By default, the smoke harness now launches a three-stream demo unless you explicitly pass single-stream sizing/id flags. `--multi-stream-demo` selects the same default set explicitly:
 
-- `alpha`: `640x360 @ 30 fps`
-- `bravo`: `1280x720 @ 30 fps`
-- `charlie`: `320x240 @ 30 fps`
+- `alpha`: `640x360 @ 30 fps` with the sweep-style synthetic pattern
+- `bravo`: `1280x720 @ 30 fps` with the orbit-style synthetic pattern
+- `charlie`: `320x240 @ 30 fps` with the checker-style synthetic pattern
 
 Each stream gets its own raw-frame generator, ffmpeg pipeline, server registration, and WebRTC signaling/session slot.
 
@@ -47,11 +47,13 @@ You can provide repeatable `--stream` arguments instead of the default demo set:
 ```bash
 python examples/nicegui_smoke/app.py \
   --start-server \
-  --stream alpha:640:360:30:Alpha \
-  --stream bravo:1280:720:30:Bravo \
-  --stream charlie:320:240:30:Charlie \
+  --stream alpha:640:360:30:Alpha-Sweep \
+  --stream bravo:1280:720:30:Bravo-Orbit \
+  --stream charlie:320:240:30:Charlie-Checker \
   --auto-connect --debug
 ```
+
+The smoke tab now also includes a dropdown selector so you can point the full debug player at any configured stream before connecting or reconnecting.
 
 Stream format:
 
@@ -80,7 +82,7 @@ If you already launched the smoke server yourself:
 
 ```bash
 ./build/video_server_nicegui_smoke_server --ffmpeg "$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" --multi-stream-demo
-python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream alpha:640:360:30:Alpha --stream bravo:1280:720:30:Bravo --stream charlie:320:240:30:Charlie --auto-connect
+python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
 ```
 
 ## Caveats

@@ -62,9 +62,9 @@ def parse_stream_spec(value: str) -> dict[str, Any]:
 
 def default_demo_streams() -> list[dict[str, Any]]:
     return [
-        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha 640x360'},
-        {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo 1280x720'},
-        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 30.0, 'label': 'Charlie 320x240'},
+        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha Sweep 640x360'},
+        {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo Orbit 1280x720'},
+        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 30.0, 'label': 'Charlie Checker 320x240'},
     ]
 
 
@@ -524,6 +524,7 @@ window.videoSmokeHarness = (() => {{
 
   function syncFormFromConfig() {{
     const cfg = state.config || loadConfig();
+    syncSmokeStreamSelector();
     setValue('config-server-url', cfg.serverBase || '');
     setValue('config-stream-id', cfg.streamId || '');
     setValue('config-widget-fps', String(cfg.widgetFps || ''));
@@ -546,6 +547,34 @@ window.videoSmokeHarness = (() => {{
     setText('page-reload-note', cfg.autoConnect ? 'Page reload will reconnect automatically using the saved settings.' : 'Page reload keeps the settings but waits for a manual connect.');
     setDisplay('debug-panel', cfg.debugMode ? 'block' : 'none');
     switchTab(cfg.activeTab || 'smoke');
+  }}
+
+  function syncSmokeStreamSelector() {{
+    const select = byId('smoke-stream-select');
+    const hint = byId('smoke-stream-hint');
+    if (!select) return;
+    const cfg = state.config || loadConfig();
+    const catalog = Array.isArray(cfg.streamCatalog) ? cfg.streamCatalog : [];
+    const currentValue = cfg.streamId || '';
+    const options = catalog.map((spec) => {{
+      const selected = spec.streamId === currentValue ? ' selected' : '';
+      const label = spec.label || spec.streamId;
+      return `<option value="${{escapeHtml(spec.streamId)}}"${{selected}}>${{escapeHtml(`${{spec.streamId}} — ${{label}}`)}}</option>`;
+    }});
+    if (currentValue && !catalog.some((spec) => spec.streamId === currentValue)) {{
+      options.unshift(`<option value="${{escapeHtml(currentValue)}}" selected>${{escapeHtml(`${{currentValue}} — custom`)}}</option>`);
+    }}
+    if (!options.length) {{
+      options.push('<option value="">No streams configured</option>');
+    }}
+    select.innerHTML = options.join('');
+    select.value = currentValue;
+    if (hint) {{
+      const selected = catalog.find((spec) => spec.streamId === currentValue);
+      hint.textContent = selected
+        ? `${{selected.label || selected.streamId}} • ${{selected.width}}x${{selected.height}} @ ${{selected.fps}} fps`
+        : (currentValue ? `Custom stream ${{currentValue}}` : 'Pick a stream before connecting');
+    }}
   }}
 
   function readConfigForm() {{
@@ -931,6 +960,16 @@ window.videoSmokeHarness = (() => {{
       await refreshSession();
       await refreshStats();
     }});
+    byId('smoke-stream-select')?.addEventListener('change', (event) => {{
+      const nextStreamId = event.target.value || '';
+      const cfg = state.config || loadConfig();
+      cfg.streamId = nextStreamId;
+      state.config = syncSelectedStreamConfig(cfg);
+      saveConfig();
+      syncFormFromConfig();
+      updateSummary();
+      appendLog('ui', `selected smoke stream ${{nextStreamId || '(none)'}}`);
+    }});
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
     byId('context-connect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context connect'); }});
@@ -1025,12 +1064,17 @@ PAGE_HTML = """
         <div class="panel-header">
           <div>
             <div class="panel-title">Player</div>
-            <div class="panel-subtitle">Full smoke/debug view with all telemetry.</div>
+            <div class="panel-subtitle">Full smoke/debug view with all telemetry. Choose which configured stream this tab should watch.</div>
           </div>
           <div class="playback-headline">
             <div id="playback-headline">idle</div>
             <div id="playback-detail" class="panel-subtitle">waiting</div>
           </div>
+        </div>
+        <div class="smoke-stream-picker">
+          <label for="smoke-stream-select">Smoke tab stream</label>
+          <select id="smoke-stream-select"></select>
+          <div id="smoke-stream-hint" class="panel-subtitle">Pick a stream before connecting</div>
         </div>
         <div id="video-shell" class="video-shell">
           <video id="smoke-video" autoplay playsinline muted controls></video>
@@ -1259,6 +1303,9 @@ body { background: #111827; }
 .toolbar-button.primary { background: #2563eb; }
 .toolbar-button.danger { background: #7f1d1d; }
 .toolbar-button.small { padding: 0.35rem 0.7rem; }
+.smoke-stream-picker { display: grid; gap: 0.35rem; margin-bottom: 0.85rem; }
+.smoke-stream-picker label { font-size: 0.9rem; color: #cbd5e1; font-weight: 600; }
+.smoke-stream-picker select { width: 100%; max-width: 420px; background: #020617; color: #e5eefc; border: 1px solid #334155; border-radius: 0.7rem; padding: 0.65rem 0.8rem; }
 .info-note { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 0.85rem 1rem; margin-bottom: 1rem; }
 .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
 .summary-card, .panel-card, .video-panel { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; }

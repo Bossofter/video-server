@@ -12,10 +12,17 @@ class SyntheticFrameGenerator {
  public:
   explicit SyntheticFrameGenerator(StreamConfig config);
 
-  const StreamConfig& config() const { return config_; }
+ const StreamConfig& config() const { return config_; }
   VideoFrameView next_frame();
 
  private:
+  enum class PatternVariant {
+    GradientOrbit,
+    CheckerPulse,
+    DiagonalSweep,
+  };
+
+  PatternVariant pattern_variant() const;
   StreamConfig config_;
   uint8_t channel_seed(size_t channel) const;
 
