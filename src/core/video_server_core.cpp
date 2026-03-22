@@ -226,6 +226,80 @@ std::shared_ptr<const LatestEncodedUnit> VideoServerCore::get_latest_encoded_uni
   return it->second.latest_encoded_unit;
 }
 
+std::optional<StreamDebugSnapshot> VideoServerCore::get_stream_debug_snapshot(const std::string& stream_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
+    return std::nullopt;
+  }
+
+  StreamDebugSnapshot snapshot;
+  const StreamState& stream = it->second;
+  snapshot.stream_id = stream.info.stream_id;
+  snapshot.label = stream.info.label;
+  snapshot.configured_width = stream.info.config.width;
+  snapshot.configured_height = stream.info.config.height;
+  snapshot.configured_fps = stream.info.config.nominal_fps;
+  snapshot.total_frames_received = stream.info.frames_received;
+  snapshot.total_frames_transformed = stream.info.frames_transformed;
+  snapshot.total_frames_dropped = stream.info.frames_dropped;
+  snapshot.total_access_units_received = stream.info.access_units_received;
+
+  if (stream.latest_frame && stream.latest_frame->valid) {
+    snapshot.latest_raw_frame_available = true;
+    snapshot.latest_raw_frame_id = stream.latest_frame->frame_id;
+    snapshot.latest_raw_timestamp_ns = stream.latest_frame->timestamp_ns;
+    snapshot.latest_raw_width = stream.latest_frame->width;
+    snapshot.latest_raw_height = stream.latest_frame->height;
+  }
+
+  if (stream.latest_encoded_unit && stream.latest_encoded_unit->valid) {
+    snapshot.latest_encoded_access_unit_available = true;
+    snapshot.latest_encoded_timestamp_ns = stream.latest_encoded_unit->timestamp_ns;
+    snapshot.latest_encoded_sequence_id = stream.latest_encoded_unit->sequence_id;
+    snapshot.latest_encoded_size_bytes = stream.latest_encoded_unit->bytes.size();
+    snapshot.latest_encoded_keyframe = stream.latest_encoded_unit->keyframe;
+    snapshot.latest_encoded_codec_config = stream.latest_encoded_unit->codec_config;
+  }
+
+  return snapshot;
+}
+
+std::vector<StreamDebugSnapshot> VideoServerCore::list_stream_debug_snapshots() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<StreamDebugSnapshot> snapshots;
+  snapshots.reserve(streams_.size());
+  for (const auto& [_, stream] : streams_) {
+    StreamDebugSnapshot snapshot;
+    snapshot.stream_id = stream.info.stream_id;
+    snapshot.label = stream.info.label;
+    snapshot.configured_width = stream.info.config.width;
+    snapshot.configured_height = stream.info.config.height;
+    snapshot.configured_fps = stream.info.config.nominal_fps;
+    snapshot.total_frames_received = stream.info.frames_received;
+    snapshot.total_frames_transformed = stream.info.frames_transformed;
+    snapshot.total_frames_dropped = stream.info.frames_dropped;
+    snapshot.total_access_units_received = stream.info.access_units_received;
+    if (stream.latest_frame && stream.latest_frame->valid) {
+      snapshot.latest_raw_frame_available = true;
+      snapshot.latest_raw_frame_id = stream.latest_frame->frame_id;
+      snapshot.latest_raw_timestamp_ns = stream.latest_frame->timestamp_ns;
+      snapshot.latest_raw_width = stream.latest_frame->width;
+      snapshot.latest_raw_height = stream.latest_frame->height;
+    }
+    if (stream.latest_encoded_unit && stream.latest_encoded_unit->valid) {
+      snapshot.latest_encoded_access_unit_available = true;
+      snapshot.latest_encoded_timestamp_ns = stream.latest_encoded_unit->timestamp_ns;
+      snapshot.latest_encoded_sequence_id = stream.latest_encoded_unit->sequence_id;
+      snapshot.latest_encoded_size_bytes = stream.latest_encoded_unit->bytes.size();
+      snapshot.latest_encoded_keyframe = stream.latest_encoded_unit->keyframe;
+      snapshot.latest_encoded_codec_config = stream.latest_encoded_unit->codec_config;
+    }
+    snapshots.push_back(std::move(snapshot));
+  }
+  return snapshots;
+}
+
 bool VideoServerCore::is_valid_rotation(int degrees) {
   return degrees == 0 || degrees == 90 || degrees == 180 || degrees == 270;
 }

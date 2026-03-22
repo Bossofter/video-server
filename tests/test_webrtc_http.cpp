@@ -877,6 +877,30 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
 
   server.stop();
 }
+
+TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability) {
+  video_server::WebRtcVideoServer server({"127.0.0.1", 0, false});
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+  ASSERT_TRUE(server.register_stream({"bravo", "Bravo", 3, 1, 30.0, video_server::VideoPixelFormat::GRAY8}));
+
+  std::vector<uint8_t> alpha_pixels = {1, 2, 3, 4};
+  video_server::VideoFrameView alpha_frame{alpha_pixels.data(), 2, 2, 2, video_server::VideoPixelFormat::GRAY8, 100, 7};
+  ASSERT_TRUE(server.push_frame("alpha", alpha_frame));
+  const std::array<uint8_t, 6> alpha_au{0x00, 0x00, 0x00, 0x01, 0x65, 0x88};
+  video_server::EncodedAccessUnitView alpha_access{alpha_au.data(), alpha_au.size(), video_server::VideoCodec::H264,
+                                                   222, true, false};
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_access));
+
+  const auto response = server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+  ASSERT_EQ(response.status, 200);
+  EXPECT_NE(response.body.find("\"stream_count\":2"), std::string::npos);
+  EXPECT_NE(response.body.find("\"active_session_count\":0"), std::string::npos);
+  EXPECT_NE(response.body.find("\"stream_id\":\"alpha\""), std::string::npos);
+  EXPECT_NE(response.body.find("\"stream_id\":\"bravo\""), std::string::npos);
+  EXPECT_NE(response.body.find("\"latest_raw_frame_available\":true"), std::string::npos);
+  EXPECT_NE(response.body.find("\"total_access_units_received\":1"), std::string::npos);
+}
+
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) {
   video_server::WebRtcVideoServer server({"127.0.0.1", 0, false});
   const video_server::StreamConfig alpha{"alpha", "Alpha", 640, 360, 15.0, video_server::VideoPixelFormat::GRAY8};

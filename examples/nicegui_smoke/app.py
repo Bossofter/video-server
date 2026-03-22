@@ -7,8 +7,12 @@ import json
 import os
 import shlex
 import signal
+import socket
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,6 +42,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--debug', action='store_true', help='Start with debug telemetry visible.')
     parser.add_argument('--auto-reconnect', action='store_true', help='Retry automatically after connection failures/disconnects.')
     parser.add_argument('--session-poll-ms', type=int, default=500, help='Session poll interval in milliseconds.')
+    parser.add_argument('--stress-duration-seconds', type=float, default=0.0, help='Optional smoke-server soak duration.')
+    parser.add_argument('--stress-stats-interval-seconds', type=float, default=5.0, help='Observability summary print cadence for soak mode.')
+    parser.add_argument('--stress-print-summary', action='store_true', help='Ask the smoke server to print periodic observability summaries.')
     return parser.parse_args()
 
 
@@ -132,12 +139,66 @@ def start_smoke_server() -> subprocess.Popen[str]:
         '--ffmpeg',
         ffmpeg_exe,
     ])
+    if ARGS.stress_duration_seconds > 0:
+        cmd.extend(['--duration-seconds', str(ARGS.stress_duration_seconds)])
+        cmd.extend(['--stats-interval-seconds', str(ARGS.stress_stats_interval_seconds)])
+        if ARGS.stress_print_summary:
+            cmd.append('--print-observability-summary')
+
+    probe_host = ARGS.server_host
+    if probe_host in ('0.0.0.0', '::', ''):
+        probe_host = '127.0.0.1'
+    try:
+        with socket.create_connection((probe_host, ARGS.server_port), timeout=0.25):
+            raise RuntimeError(
+                f'Cannot launch smoke server because {probe_host}:{ARGS.server_port} is already in use. '
+                'Stop the existing process or choose a different --server-port.'
+            )
+    except ConnectionRefusedError:
+        pass
+    except OSError:
+        pass
+
     print('[nicegui-smoke] launching:', ' '.join(shlex.quote(part) for part in cmd), flush=True)
-    return subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
+
+    readiness_url = f'http://{probe_host}:{ARGS.server_port}/api/video/streams'
+    deadline = time.monotonic() + 5.0
+    last_error: Optional[Exception] = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f'Smoke server exited before becoming ready (exit code {process.returncode}). '
+                f'Check whether {ARGS.server_host}:{ARGS.server_port} is already in use.'
+            )
+        try:
+            with urllib.request.urlopen(readiness_url, timeout=0.5) as response:
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f'Smoke server exited while probing {readiness_url} '
+                        f'(exit code {process.returncode}).'
+                    )
+                if response.status == 200:
+                    return process
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+        except OSError as exc:
+            last_error = exc
+        time.sleep(0.1)
+
+    process.terminate()
+    raise RuntimeError(
+        f'Smoke server did not become ready at {readiness_url} within 5.0s'
+        + (f': {last_error}' if last_error else '.')
+    )
 
 
 if ARGS.start_server:
-    SMOKE_PROCESS = start_smoke_server()
+    try:
+        SMOKE_PROCESS = start_smoke_server()
+    except Exception as exc:
+        print(f'[nicegui-smoke] failed to launch smoke server: {exc}', file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc
     ARGS.video_server_url = f'http://{ARGS.server_host}:{ARGS.server_port}'
 
 
@@ -199,6 +260,7 @@ window.videoSmokeHarness = (() => {{
     statsInterval: null,
     sessionSummary: null,
     statsSummary: null,
+    observabilitySummary: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
     connectedStreamId: '',
@@ -415,7 +477,7 @@ window.videoSmokeHarness = (() => {{
     setText('session-startup', session.encoded_sender_startup_sequence_sent ? 'yes' : 'no');
     setText('session-first-dec', session.encoded_sender_first_decodable_frame_sent ? 'yes' : 'no');
     setText('session-packets-open', String(session.encoded_sender_packets_sent_after_track_open ?? 'n/a'));
-    setHtml('session-json', `<pre>${{shortJson(session)}}</pre>`);
+    setHtml('session-json', '<pre>' + shortJson(session) + '</pre>');
 
     const stats = state.statsSummary || {{}};
     setText('stats-packets', String(stats.packetsReceived ?? 'n/a'));
@@ -425,6 +487,26 @@ window.videoSmokeHarness = (() => {{
     setText('stats-frames-dropped', String(stats.framesDropped ?? 'n/a'));
     setText('stats-resolution', stats.frameWidth && stats.frameHeight ? `${{stats.frameWidth}}x${{stats.frameHeight}}` : 'n/a');
     setText('stats-fps', String(stats.framesPerSecond ?? 'n/a'));
+
+    const obs = state.observabilitySummary || {{}};
+    setText('obs-stream-count', String(obs.stream_count ?? 'n/a'));
+    setText('obs-session-count', String(obs.active_session_count ?? 'n/a'));
+    const obsStreams = Array.isArray(obs.streams) ? obs.streams : [];
+    setHtml('observability-grid', obsStreams.map((stream) => {{
+      const session = stream.current_session || {{}};
+      const counters = session.counters || {{}};
+      return `
+        <div class="widget-debug-card">
+          <span>${{escapeHtml(stream.stream_id || 'unknown stream')}}</span>
+          <strong>${{escapeHtml(`${{stream.configured_width || '?'}}x${{stream.configured_height || '?'}} @ ${{stream.configured_fps || '?'}} fps`)}}</strong>
+          <span>sender: <strong>${{escapeHtml(session.sender_state || 'no-session')}}</strong></span>
+          <span>status: <strong>${{escapeHtml(session.last_packetization_status || 'n/a')}}</strong></span>
+          <span>AU recv/send: <strong>${{stream.total_access_units_received ?? 0}} / ${{counters.delivered_units ?? 0}}</strong></span>
+          <span>Packets/open: <strong>${{counters.packets_sent_after_track_open ?? 0}}</strong></span>
+          <span>Startup/first-dec: <strong>${{counters.startup_sequence_injections ?? 0}} / ${{counters.first_decodable_transitions ?? 0}}</strong></span>
+          <span>Track closed/send fail: <strong>${{counters.track_closed_events ?? 0}} / ${{counters.send_failures ?? 0}}</strong></span>
+        </div>`;
+    }}).join(''));
 
     const healthClass = status.className || '';
     const healthText = status.text;
@@ -462,7 +544,7 @@ window.videoSmokeHarness = (() => {{
     const root = byId('multi-stream-dashboard');
     if (!root) return;
     const catalog = (state.config?.streamCatalog || []).slice();
-    const showMultiGrid = !widgetMode && catalog.length > 1;
+    const showMultiGrid = !widgetMode && catalog.length > 1 && (state.config?.activeTab || 'widget') === 'widget';
     setDisplay('widget-dashboard-wrapper', showMultiGrid ? 'block' : 'none');
     setDisplay('widget-shell', showMultiGrid ? 'none' : 'block');
     setDisplay('widget-context-menu', showMultiGrid ? 'none' : 'none');
@@ -496,6 +578,7 @@ window.videoSmokeHarness = (() => {{
 
   function switchTab(tabName) {{
     const cfg = state.config || loadConfig();
+    const previousTab = cfg.activeTab || 'smoke';
     cfg.activeTab = tabName;
     state.config = cfg;
     saveConfig();
@@ -503,6 +586,13 @@ window.videoSmokeHarness = (() => {{
     setDisplay('widget-tab-panel', tabName === 'widget' ? 'block' : 'none');
     byId('tab-smoke')?.classList.toggle('active', tabName === 'smoke');
     byId('tab-widget')?.classList.toggle('active', tabName === 'widget');
+    renderMultiStreamDashboard();
+    const multiStreamMode = !widgetMode && (cfg.streamCatalog || []).length > 1;
+    if (multiStreamMode && tabName === 'widget' && state.pc) {{
+      disconnect('switch to widget tab').catch((error) => appendLog('error', `widget tab disconnect failed: ${{error}}`));
+    }} else if (multiStreamMode && previousTab === 'widget' && tabName === 'smoke' && cfg.autoConnect && !state.pc) {{
+      connect('smoke tab activated').catch((error) => appendLog('error', `smoke tab connect failed: ${{error}}`));
+    }}
     if (widgetMode) {{
       setDisplay('toolbar', 'none');
       setDisplay('smoke-tab-button-row', 'none');
@@ -623,6 +713,7 @@ window.videoSmokeHarness = (() => {{
     state.appliedBackendCandidates = new Set();
     state.sessionSummary = null;
     state.statsSummary = null;
+    state.observabilitySummary = null;
     state.selectedCodec = '';
     state.lastStatsAt = '';
     state.disconnectReason = reason;
@@ -696,6 +787,10 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_first_decodable_frame_sent: session.encoded_sender_first_decodable_frame_sent,
       encoded_sender_packets_attempted: session.encoded_sender_packets_attempted,
       encoded_sender_packets_sent_after_track_open: session.encoded_sender_packets_sent_after_track_open,
+      encoded_sender_startup_sequence_injections: session.encoded_sender_startup_sequence_injections,
+      encoded_sender_first_decodable_transitions: session.encoded_sender_first_decodable_transitions,
+      encoded_sender_track_closed_events: session.encoded_sender_track_closed_events,
+      encoded_sender_send_failures: session.encoded_sender_send_failures,
       encoded_sender_negotiated_h264_payload_type: session.encoded_sender_negotiated_h264_payload_type,
       encoded_sender_negotiated_h264_fmtp: session.encoded_sender_negotiated_h264_fmtp,
       encoded_sender_video_mid: session.encoded_sender_video_mid,
@@ -752,6 +847,7 @@ window.videoSmokeHarness = (() => {{
       const session = await sessionResponse.json();
       if (token !== state.connectToken) return;
       state.sessionSummary = summarizeSession(session);
+      await refreshObservability();
       if (session.last_local_candidate && session.last_local_candidate !== state.lastBackendCandidate) {{
         state.lastBackendCandidate = session.last_local_candidate;
         appendLog('ice', `backend ICE candidate observed: ${{session.last_local_candidate}}`);
@@ -775,6 +871,22 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
     }} catch (error) {{
       appendLog('session', `session refresh failed: ${{error}}`);
+    }}
+  }}
+
+  async function refreshObservability() {{
+    const cfg = state.config;
+    if (!cfg?.serverBase) return;
+    try {{
+      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`);
+      if (!response.ok) {{
+        appendLog('session', `observability poll failed: HTTP ${{response.status}}`);
+        return;
+      }}
+      state.observabilitySummary = await response.json();
+      updateSummary();
+    }} catch (error) {{
+      appendLog('session', `observability poll failed: ${{error}}`);
     }}
   }}
 
@@ -1010,7 +1122,9 @@ window.videoSmokeHarness = (() => {{
     syncFormFromConfig();
     appendLog('ui', 'harness initialized');
     updateSummary();
-    if (state.config.autoConnect) {{
+    const multiStreamWidgetTab = !widgetMode && (state.config.streamCatalog || []).length > 1 &&
+      (state.config.activeTab || 'widget') === 'widget';
+    if (state.config.autoConnect && !multiStreamWidgetTab) {{
       connect('page load').catch((error) => appendLog('error', `auto-connect failed: ${{error}}`));
     }}
   }}
@@ -1220,6 +1334,11 @@ PAGE_HTML = """
             <span>sender_state</span>
             <strong id="widget-session-sender">n/a</strong>
           </div>
+          <div id="widget-observability-section" class="widget-debug-card">
+            <span>observability streams/sessions</span>
+            <strong><span id="obs-stream-count">n/a</span> / <span id="obs-session-count">n/a</span></strong>
+            <div id="observability-grid" class="observability-grid"></div>
+          </div>
         </div>
       </div>
 
@@ -1367,6 +1486,7 @@ body { background: #111827; }
 .widget-debug-sections { display: grid; gap: 0.75rem; margin-top: 0.9rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .widget-debug-card span { display: block; color: #94a3b8; font-size: 0.8rem; margin-bottom: 0.25rem; }
 .widget-debug-card strong { display: block; margin-bottom: 0.45rem; }
+.observability-grid { display: grid; gap: 0.5rem; }
 .context-menu { position: fixed; z-index: 60; width: min(320px, calc(100vw - 2rem)); background: #020617; border: 1px solid #334155; border-radius: 1rem; box-shadow: 0 18px 40px rgba(0,0,0,0.35); padding: 0.75rem; }
 .context-group + .context-group { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #1e293b; }
 .context-title, .settings-section-title { font-weight: 700; margin-bottom: 0.35rem; }

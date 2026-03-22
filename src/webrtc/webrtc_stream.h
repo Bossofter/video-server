@@ -51,6 +51,16 @@ struct EncodedVideoSenderSnapshot {
   uint64_t packets_attempted{0};
   uint64_t packets_sent_after_track_open{0};
   uint64_t startup_packets_sent{0};
+  uint64_t startup_sequence_injections{0};
+  uint64_t first_decodable_transitions{0};
+  uint64_t packetization_failures{0};
+  uint64_t track_closed_events{0};
+  uint64_t send_failures{0};
+  uint64_t skipped_no_track{0};
+  uint64_t skipped_track_not_open{0};
+  uint64_t skipped_codec_config_wait{0};
+  uint64_t skipped_keyframe_wait{0};
+  uint64_t skipped_startup_idr_wait{0};
   uint64_t last_delivered_sequence_id{0};
   uint64_t last_delivered_timestamp_ns{0};
   size_t last_delivered_size_bytes{0};

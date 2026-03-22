@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "video_server/observability.h"
 #include "video_server/video_server.h"
 
 namespace video_server {
@@ -45,6 +46,8 @@ class VideoServerCore : public IVideoServer {
 
   std::shared_ptr<const LatestFrame> get_latest_frame_for_stream(const std::string& stream_id) const;
   std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit_for_stream(const std::string& stream_id) const;
+  std::optional<StreamDebugSnapshot> get_stream_debug_snapshot(const std::string& stream_id) const;
+  std::vector<StreamDebugSnapshot> list_stream_debug_snapshots() const;
 
  private:
   struct StreamState {

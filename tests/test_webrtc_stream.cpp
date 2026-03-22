@@ -272,6 +272,38 @@ TEST(WebRtcStreamSessionTest, DoesNotSendWhileTrackExistsButIsClosed) {
   EXPECT_TRUE(track_sink->sent_packets.empty());
 }
 
+TEST(WebRtcStreamSessionTest, SenderSnapshotCountersExplainRepeatedReconnectLikeTransitions) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", false);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 9999);
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+  auto missing_track = sender->snapshot();
+  EXPECT_EQ(missing_track.skipped_no_track, 2u);
+
+  track_sink->set_exists(true);
+  sender->on_encoded_access_unit(make_non_idr_unit(3000));
+  auto closed_track = sender->snapshot();
+  EXPECT_GE(closed_track.skipped_track_not_open, 1u);
+
+  track_sink->set_open(true);
+  sender->on_encoded_access_unit(make_non_idr_unit(4000));
+  auto after_open = sender->snapshot();
+  EXPECT_EQ(after_open.startup_sequence_injections, 1u);
+  EXPECT_EQ(after_open.first_decodable_transitions, 1u);
+  EXPECT_TRUE(after_open.startup_sequence_sent);
+
+  track_sink->set_throw_on_closed(true);
+  track_sink->set_close_on_send_attempt(1);
+  sender->on_encoded_access_unit(make_large_idr_unit(5000, 2500));
+  auto after_failure = sender->snapshot();
+  EXPECT_GE(after_failure.packetization_failures, 1u);
+  EXPECT_GE(after_failure.track_closed_events, 1u);
+  EXPECT_EQ(after_failure.sender_state, "track-closed-during-send");
+}
+
 TEST(WebRtcStreamSessionTest, ClosedTrackRaceDuringSendIsCaughtAndLaterRecoveryStillWorks) {
   auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(true, "video", true);
   track_sink->set_throw_on_closed(true);

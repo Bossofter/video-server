@@ -374,22 +374,27 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
       cached_codec_config = cached_codec_config_;
       cached_startup_idr = cached_startup_idr_;
       if (!has_track) {
+        ++skipped_no_track_;
         sender_state_ = "video-track-missing";
         last_packetization_status_ = "no-video-track";
         startup_gate_reason = "no-video-track";
       } else if (!codec_config_seen_) {
+        ++skipped_codec_config_wait_;
         sender_state_ = "waiting-for-h264-codec-config";
         last_packetization_status_ = "codec-config-required";
         startup_gate_reason = "codec-config-required";
       } else if (!cached_idr_available_) {
+        ++skipped_keyframe_wait_;
         sender_state_ = "waiting-for-h264-keyframe";
         last_packetization_status_ = "keyframe-required";
         startup_gate_reason = "keyframe-required";
       } else if (!track_open) {
+        ++skipped_track_not_open_;
         sender_state_ = "waiting-for-video-track-open";
         last_packetization_status_ = "track-not-open-yet";
         startup_gate_reason = "track-not-open";
       } else if (!first_decodable_frame_sent && !startup_sequence_required && !contains_idr) {
+        ++skipped_startup_idr_wait_;
         sender_state_ = "waiting-for-decoded-startup-idr";
         last_packetization_status_ = "startup-idr-required";
         startup_gate_reason = "startup-idr-required";
@@ -530,8 +535,12 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
       packets_sent_after_track_open_ += packet_count;
       if (sent_startup_sequence) {
         startup_sequence_sent_ = true;
+        if (!first_decodable_frame_sent_) {
+          ++first_decodable_transitions_;
+        }
         first_decodable_frame_sent_ = true;
         startup_packets_sent_ += startup_packet_count;
+        ++startup_sequence_injections_;
       }
       h264_delivery_active_ = true;
       video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
@@ -574,6 +583,16 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.packets_attempted = packets_attempted_;
     snapshot.packets_sent_after_track_open = packets_sent_after_track_open_;
     snapshot.startup_packets_sent = startup_packets_sent_;
+    snapshot.startup_sequence_injections = startup_sequence_injections_;
+    snapshot.first_decodable_transitions = first_decodable_transitions_;
+    snapshot.packetization_failures = packetization_failures_;
+    snapshot.track_closed_events = track_closed_events_;
+    snapshot.send_failures = send_failures_;
+    snapshot.skipped_no_track = skipped_no_track_;
+    snapshot.skipped_track_not_open = skipped_track_not_open_;
+    snapshot.skipped_codec_config_wait = skipped_codec_config_wait_;
+    snapshot.skipped_keyframe_wait = skipped_keyframe_wait_;
+    snapshot.skipped_startup_idr_wait = skipped_startup_idr_wait_;
     snapshot.last_delivered_sequence_id = last_delivered_sequence_id_;
     snapshot.last_delivered_timestamp_ns = last_delivered_timestamp_ns_;
     snapshot.last_delivered_size_bytes = last_delivered_size_bytes_;
@@ -608,6 +627,12 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
     ready_for_video_track_ = video_track_exists_ && codec_config_seen_ && cached_idr_available_;
     h264_delivery_active_ = false;
+    ++packetization_failures_;
+    if (sender_state.find("track-closed") != std::string::npos) {
+      ++track_closed_events_;
+    } else {
+      ++send_failures_;
+    }
     sender_state_ = std::move(sender_state);
     last_packetization_status_ = std::move(packetization_status);
   }
@@ -639,6 +664,16 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   uint64_t packets_attempted_{0};
   uint64_t packets_sent_after_track_open_{0};
   uint64_t startup_packets_sent_{0};
+  uint64_t startup_sequence_injections_{0};
+  uint64_t first_decodable_transitions_{0};
+  uint64_t packetization_failures_{0};
+  uint64_t track_closed_events_{0};
+  uint64_t send_failures_{0};
+  uint64_t skipped_no_track_{0};
+  uint64_t skipped_track_not_open_{0};
+  uint64_t skipped_codec_config_wait_{0};
+  uint64_t skipped_keyframe_wait_{0};
+  uint64_t skipped_startup_idr_wait_{0};
   uint64_t last_delivered_sequence_id_{0};
   uint64_t last_delivered_timestamp_ns_{0};
   size_t last_delivered_size_bytes_{0};

@@ -217,4 +217,47 @@ TEST(VideoServerCoreTest, ManagesFramesAndEncodedUnits) {
   EXPECT_FALSE(server.remove_stream(cfg.stream_id));
 }
 
+TEST(VideoServerCoreTest, StreamDebugSnapshotsRemainPerStreamAndStableUnderRepeatedUpdates) {
+  video_server::VideoServerCore server;
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+  ASSERT_TRUE(server.register_stream({"bravo", "Bravo", 3, 1, 30.0, video_server::VideoPixelFormat::GRAY8}));
+
+  std::vector<uint8_t> alpha_pixels = {10, 20, 30, 40};
+  std::vector<uint8_t> bravo_pixels = {1, 2, 3};
+  std::vector<uint8_t> encoded_a = {0x00, 0x00, 0x00, 0x01, 0x65, 0xaa};
+  std::vector<uint8_t> encoded_b = {0x00, 0x00, 0x00, 0x01, 0x41, 0xbb};
+  for (uint64_t i = 0; i < 5; ++i) {
+    ASSERT_TRUE(server.push_frame("alpha", make_gray_frame(alpha_pixels, 2, 2, 100 + i, i + 1)));
+    ASSERT_TRUE(server.push_frame("bravo", make_gray_frame(bravo_pixels, 3, 1, 200 + i, i + 11)));
+    video_server::EncodedAccessUnitView au_a{encoded_a.data(), encoded_a.size(), video_server::VideoCodec::H264,
+                                             300 + i, i % 2 == 0, false};
+    video_server::EncodedAccessUnitView au_b{encoded_b.data(), encoded_b.size(), video_server::VideoCodec::H264,
+                                             400 + i, false, false};
+    ASSERT_TRUE(server.push_access_unit("alpha", au_a));
+    ASSERT_TRUE(server.push_access_unit("bravo", au_b));
+  }
+
+  const auto alpha = server.get_stream_debug_snapshot("alpha");
+  const auto bravo = server.get_stream_debug_snapshot("bravo");
+  ASSERT_TRUE(alpha.has_value());
+  ASSERT_TRUE(bravo.has_value());
+  EXPECT_EQ(alpha->stream_id, "alpha");
+  EXPECT_EQ(bravo->stream_id, "bravo");
+  EXPECT_EQ(alpha->configured_width, 2u);
+  EXPECT_EQ(bravo->configured_width, 3u);
+  EXPECT_TRUE(alpha->latest_raw_frame_available);
+  EXPECT_TRUE(bravo->latest_raw_frame_available);
+  EXPECT_EQ(alpha->latest_raw_frame_id, 5u);
+  EXPECT_EQ(bravo->latest_raw_frame_id, 15u);
+  EXPECT_EQ(alpha->total_access_units_received, 5u);
+  EXPECT_EQ(bravo->total_access_units_received, 5u);
+  EXPECT_EQ(alpha->latest_encoded_timestamp_ns, 304u);
+  EXPECT_EQ(bravo->latest_encoded_timestamp_ns, 404u);
+  EXPECT_TRUE(alpha->latest_encoded_keyframe);
+  EXPECT_FALSE(bravo->latest_encoded_keyframe);
+
+  const auto all = server.list_stream_debug_snapshots();
+  ASSERT_EQ(all.size(), 2u);
+}
+
 }  // namespace

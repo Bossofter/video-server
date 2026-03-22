@@ -243,6 +243,80 @@ std::string output_config_json(const StreamOutputConfig& cfg) {
   return out.str();
 }
 
+std::string sender_debug_counters_json(const SenderDebugCounters& counters) {
+  std::ostringstream out;
+  out << "{"
+      << "\"delivered_units\":" << counters.delivered_units << ","
+      << "\"duplicate_units_skipped\":" << counters.duplicate_units_skipped << ","
+      << "\"failed_units\":" << counters.failed_units << ","
+      << "\"packetization_failures\":" << counters.packetization_failures << ","
+      << "\"track_closed_events\":" << counters.track_closed_events << ","
+      << "\"send_failures\":" << counters.send_failures << ","
+      << "\"packets_attempted\":" << counters.packets_attempted << ","
+      << "\"packets_sent_after_track_open\":" << counters.packets_sent_after_track_open << ","
+      << "\"startup_packets_sent\":" << counters.startup_packets_sent << ","
+      << "\"startup_sequence_injections\":" << counters.startup_sequence_injections << ","
+      << "\"first_decodable_transitions\":" << counters.first_decodable_transitions << ","
+      << "\"skipped_no_track\":" << counters.skipped_no_track << ","
+      << "\"skipped_track_not_open\":" << counters.skipped_track_not_open << ","
+      << "\"skipped_codec_config_wait\":" << counters.skipped_codec_config_wait << ","
+      << "\"skipped_keyframe_wait\":" << counters.skipped_keyframe_wait << ","
+      << "\"skipped_startup_idr_wait\":" << counters.skipped_startup_idr_wait << "}";
+  return out.str();
+}
+
+std::string session_debug_snapshot_json(const StreamSessionDebugSnapshot& session) {
+  std::ostringstream out;
+  out << "{"
+      << "\"session_generation\":" << session.session_generation << ","
+      << "\"stream_id\":\"" << json_escape(session.stream_id) << "\","
+      << "\"peer_state\":\"" << json_escape(session.peer_state) << "\","
+      << "\"sender_state\":\"" << json_escape(session.sender_state) << "\","
+      << "\"last_packetization_status\":\"" << json_escape(session.last_packetization_status) << "\","
+      << "\"track_exists\":" << bool_to_json(session.track_exists) << ","
+      << "\"track_open\":" << bool_to_json(session.track_open) << ","
+      << "\"startup_sequence_sent\":" << bool_to_json(session.startup_sequence_sent) << ","
+      << "\"first_decodable_frame_sent\":" << bool_to_json(session.first_decodable_frame_sent) << ","
+      << "\"codec_config_seen\":" << bool_to_json(session.codec_config_seen) << ","
+      << "\"cached_idr_available\":" << bool_to_json(session.cached_idr_available) << ","
+      << "\"video_mid\":\"" << json_escape(session.video_mid) << "\","
+      << "\"counters\":" << sender_debug_counters_json(session.counters) << "}";
+  return out.str();
+}
+
+std::string stream_debug_snapshot_json(const StreamDebugSnapshot& stream) {
+  std::ostringstream out;
+  out << "{"
+      << "\"stream_id\":\"" << json_escape(stream.stream_id) << "\","
+      << "\"label\":\"" << json_escape(stream.label) << "\","
+      << "\"configured_width\":" << stream.configured_width << ","
+      << "\"configured_height\":" << stream.configured_height << ","
+      << "\"configured_fps\":" << stream.configured_fps << ","
+      << "\"latest_raw_frame_available\":" << bool_to_json(stream.latest_raw_frame_available) << ","
+      << "\"latest_raw_frame_id\":" << stream.latest_raw_frame_id << ","
+      << "\"latest_raw_timestamp_ns\":" << stream.latest_raw_timestamp_ns << ","
+      << "\"latest_raw_width\":" << stream.latest_raw_width << ","
+      << "\"latest_raw_height\":" << stream.latest_raw_height << ","
+      << "\"latest_encoded_access_unit_available\":" << bool_to_json(stream.latest_encoded_access_unit_available) << ","
+      << "\"latest_encoded_timestamp_ns\":" << stream.latest_encoded_timestamp_ns << ","
+      << "\"latest_encoded_sequence_id\":" << stream.latest_encoded_sequence_id << ","
+      << "\"latest_encoded_size_bytes\":" << stream.latest_encoded_size_bytes << ","
+      << "\"latest_encoded_keyframe\":" << bool_to_json(stream.latest_encoded_keyframe) << ","
+      << "\"latest_encoded_codec_config\":" << bool_to_json(stream.latest_encoded_codec_config) << ","
+      << "\"total_frames_received\":" << stream.total_frames_received << ","
+      << "\"total_frames_transformed\":" << stream.total_frames_transformed << ","
+      << "\"total_frames_dropped\":" << stream.total_frames_dropped << ","
+      << "\"total_access_units_received\":" << stream.total_access_units_received << ","
+      << "\"current_session\":";
+  if (stream.current_session.has_value()) {
+    out << session_debug_snapshot_json(*stream.current_session);
+  } else {
+    out << "null";
+  }
+  out << "}";
+  return out.str();
+}
+
 }  // namespace
 
 class WebRtcVideoServer::Impl {
@@ -270,6 +344,58 @@ class WebRtcVideoServer::Impl {
     }
   }
 
+  ServerDebugSnapshot get_debug_snapshot() const {
+    ServerDebugSnapshot snapshot;
+    snapshot.streams = core_.list_stream_debug_snapshots();
+
+    const auto sessions = signaling_.list_sessions();
+    snapshot.stream_count = snapshot.streams.size();
+    snapshot.active_session_count = sessions.size();
+
+    std::unordered_map<std::string, StreamSessionDebugSnapshot> sessions_by_stream;
+    for (const auto& session : sessions) {
+      StreamSessionDebugSnapshot session_snapshot;
+      session_snapshot.session_generation = session.session_generation;
+      session_snapshot.stream_id = session.stream_id;
+      session_snapshot.peer_state = session.peer_state;
+      session_snapshot.sender_state = session.media_source.encoded_sender.sender_state;
+      session_snapshot.last_packetization_status = session.media_source.encoded_sender.last_packetization_status;
+      session_snapshot.track_exists = session.media_source.encoded_sender.video_track_exists;
+      session_snapshot.track_open = session.media_source.encoded_sender.video_track_open;
+      session_snapshot.startup_sequence_sent = session.media_source.encoded_sender.startup_sequence_sent;
+      session_snapshot.first_decodable_frame_sent = session.media_source.encoded_sender.first_decodable_frame_sent;
+      session_snapshot.codec_config_seen = session.media_source.encoded_sender.codec_config_seen;
+      session_snapshot.cached_idr_available = session.media_source.encoded_sender.cached_idr_available;
+      session_snapshot.video_mid = session.media_source.encoded_sender.video_mid;
+      session_snapshot.counters = SenderDebugCounters{
+          session.media_source.encoded_sender.delivered_units,
+          session.media_source.encoded_sender.duplicate_units_skipped,
+          session.media_source.encoded_sender.failed_units,
+          session.media_source.encoded_sender.packetization_failures,
+          session.media_source.encoded_sender.track_closed_events,
+          session.media_source.encoded_sender.send_failures,
+          session.media_source.encoded_sender.packets_attempted,
+          session.media_source.encoded_sender.packets_sent_after_track_open,
+          session.media_source.encoded_sender.startup_packets_sent,
+          session.media_source.encoded_sender.startup_sequence_injections,
+          session.media_source.encoded_sender.first_decodable_transitions,
+          session.media_source.encoded_sender.skipped_no_track,
+          session.media_source.encoded_sender.skipped_track_not_open,
+          session.media_source.encoded_sender.skipped_codec_config_wait,
+          session.media_source.encoded_sender.skipped_keyframe_wait,
+          session.media_source.encoded_sender.skipped_startup_idr_wait};
+      sessions_by_stream[session.stream_id] = std::move(session_snapshot);
+    }
+
+    for (auto& stream : snapshot.streams) {
+      const auto it = sessions_by_stream.find(stream.stream_id);
+      if (it != sessions_by_stream.end()) {
+        stream.current_session = it->second;
+      }
+    }
+    return snapshot;
+  }
+
   HttpResponse handle_http(const HttpRequest& request) {
     if (is_api_path(request.path) && request.method == "OPTIONS") {
       HttpResponse response{204, "", "application/json"};
@@ -290,6 +416,21 @@ class WebRtcVideoServer::Impl {
         if (i != 0) out << ',';
         out << "{\"stream_id\":\"" << json_escape(streams[i].stream_id) << "\",\"label\":\""
             << json_escape(streams[i].label) << "\",\"active\":" << bool_to_json(streams[i].active) << '}';
+      }
+      out << "]}";
+      return finalize(HttpResponse{200, out.str(), "application/json"});
+    }
+
+    if (request.method == "GET" && request.path == "/api/video/debug/stats") {
+      const auto snapshot = get_debug_snapshot();
+      std::ostringstream out;
+      out << "{"
+          << "\"stream_count\":" << snapshot.stream_count << ","
+          << "\"active_session_count\":" << snapshot.active_session_count << ","
+          << "\"streams\":[";
+      for (size_t i = 0; i < snapshot.streams.size(); ++i) {
+        if (i != 0) out << ",";
+        out << stream_debug_snapshot_json(snapshot.streams[i]);
       }
       out << "]}";
       return finalize(HttpResponse{200, out.str(), "application/json"});
@@ -517,6 +658,26 @@ class WebRtcVideoServer::Impl {
             << session->media_source.encoded_sender.packets_sent_after_track_open << ','
             << "\"encoded_sender_startup_packets_sent\":"
             << session->media_source.encoded_sender.startup_packets_sent << ','
+            << "\"encoded_sender_startup_sequence_injections\":"
+            << session->media_source.encoded_sender.startup_sequence_injections << ','
+            << "\"encoded_sender_first_decodable_transitions\":"
+            << session->media_source.encoded_sender.first_decodable_transitions << ','
+            << "\"encoded_sender_packetization_failures\":"
+            << session->media_source.encoded_sender.packetization_failures << ','
+            << "\"encoded_sender_track_closed_events\":"
+            << session->media_source.encoded_sender.track_closed_events << ','
+            << "\"encoded_sender_send_failures\":"
+            << session->media_source.encoded_sender.send_failures << ','
+            << "\"encoded_sender_skipped_no_track\":"
+            << session->media_source.encoded_sender.skipped_no_track << ','
+            << "\"encoded_sender_skipped_track_not_open\":"
+            << session->media_source.encoded_sender.skipped_track_not_open << ','
+            << "\"encoded_sender_skipped_codec_config_wait\":"
+            << session->media_source.encoded_sender.skipped_codec_config_wait << ','
+            << "\"encoded_sender_skipped_keyframe_wait\":"
+            << session->media_source.encoded_sender.skipped_keyframe_wait << ','
+            << "\"encoded_sender_skipped_startup_idr_wait\":"
+            << session->media_source.encoded_sender.skipped_startup_idr_wait << ','
             << "\"encoded_sender_last_delivered_sequence_id\":"
             << session->media_source.encoded_sender.last_delivered_sequence_id << ','
             << "\"encoded_sender_last_delivered_timestamp_ns\":"
@@ -601,6 +762,8 @@ std::optional<StreamOutputConfig> WebRtcVideoServer::get_stream_output_config(
     const std::string& stream_id) const {
   return impl_->core_.get_stream_output_config(stream_id);
 }
+
+ServerDebugSnapshot WebRtcVideoServer::get_debug_snapshot() const { return impl_->get_debug_snapshot(); }
 
 WebRtcHttpResponse WebRtcVideoServer::handle_http_request_for_test(const std::string& method,
                                                                    const std::string& path,

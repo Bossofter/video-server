@@ -36,6 +36,9 @@ struct Options {
   uint16_t port{8080};
   std::vector<StreamSpec> streams;
   std::string ffmpeg_path;
+  double duration_seconds{0.0};
+  double stats_interval_seconds{5.0};
+  bool print_observability_summary{false};
 };
 
 bool parse_uint16(const char* value, uint16_t& out) {
@@ -168,6 +171,14 @@ std::optional<Options> parse_args(int argc, char** argv) {
       const char* value = require_value("--ffmpeg");
       if (!value) return std::nullopt;
       options.ffmpeg_path = value;
+    } else if (arg == "--duration-seconds") {
+      const char* value = require_value("--duration-seconds");
+      if (!value || !parse_double(value, options.duration_seconds)) return std::nullopt;
+    } else if (arg == "--stats-interval-seconds") {
+      const char* value = require_value("--stats-interval-seconds");
+      if (!value || !parse_double(value, options.stats_interval_seconds)) return std::nullopt;
+    } else if (arg == "--print-observability-summary") {
+      options.print_observability_summary = true;
     } else if (arg == "--help" || arg == "-h") {
       print_usage(argv[0]);
       std::exit(0);
@@ -236,6 +247,7 @@ int main(int argc, char** argv) {
   }
 
   std::atomic<bool> stop_requested{false};
+  const auto run_started_at = Clock::now();
 
   for (auto& stream : streams) {
     stream->pipeline_config.ffmpeg_path = options->ffmpeg_path;
@@ -274,11 +286,37 @@ int main(int argc, char** argv) {
 
   spdlog::info("[smoke-server] started HTTP/WebRTC server on http://{}:{} with {} stream(s)", options->host,
                options->port, streams.size());
-  spdlog::info("[smoke-server] press ENTER to stop");
-
-  std::string line;
-  std::getline(std::cin, line);
-  stop_requested = true;
+  if (options->duration_seconds > 0.0) {
+    spdlog::info("[smoke-server] soak mode active for {:.2f}s (summary={}, stats every {:.2f}s)",
+                 options->duration_seconds, options->print_observability_summary, options->stats_interval_seconds);
+    auto next_stats_at = run_started_at + std::chrono::duration<double>(options->stats_interval_seconds);
+    const auto stop_at = run_started_at + std::chrono::duration<double>(options->duration_seconds);
+    while (!stop_requested.load() && Clock::now() < stop_at) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      if (options->print_observability_summary && Clock::now() >= next_stats_at) {
+        const auto snapshot = server.get_debug_snapshot();
+        spdlog::info("[smoke-server] observability summary streams={} active_sessions={}", snapshot.stream_count,
+                     snapshot.active_session_count);
+        for (const auto& stream : snapshot.streams) {
+          const auto& session = stream.current_session;
+          spdlog::info(
+              "[smoke-server] stream={} raw={} encoded={} au={} sender={} packets={} startup_injections={} track_closed={}",
+              stream.stream_id, stream.latest_raw_frame_available, stream.latest_encoded_access_unit_available,
+              stream.total_access_units_received, session ? session->sender_state : std::string("no-session"),
+              session ? session->counters.packets_sent_after_track_open : 0,
+              session ? session->counters.startup_sequence_injections : 0,
+              session ? session->counters.track_closed_events : 0);
+        }
+        next_stats_at = Clock::now() + std::chrono::duration<double>(options->stats_interval_seconds);
+      }
+    }
+    stop_requested = true;
+  } else {
+    spdlog::info("[smoke-server] press ENTER to stop");
+    std::string line;
+    std::getline(std::cin, line);
+    stop_requested = true;
+  }
 
   for (auto& stream : streams) {
     if (stream->pipeline) {
