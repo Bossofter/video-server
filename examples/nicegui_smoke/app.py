@@ -38,6 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--debug', action='store_true', help='Start with debug telemetry visible.')
     parser.add_argument('--auto-reconnect', action='store_true', help='Retry automatically after connection failures/disconnects.')
     parser.add_argument('--session-poll-ms', type=int, default=500, help='Session poll interval in milliseconds.')
+    parser.add_argument('--stress-duration-seconds', type=float, default=0.0, help='Optional smoke-server soak duration.')
+    parser.add_argument('--stress-stats-interval-seconds', type=float, default=5.0, help='Observability summary print cadence for soak mode.')
+    parser.add_argument('--stress-print-summary', action='store_true', help='Ask the smoke server to print periodic observability summaries.')
     return parser.parse_args()
 
 
@@ -132,6 +135,11 @@ def start_smoke_server() -> subprocess.Popen[str]:
         '--ffmpeg',
         ffmpeg_exe,
     ])
+    if ARGS.stress_duration_seconds > 0:
+        cmd.extend(['--duration-seconds', str(ARGS.stress_duration_seconds)])
+        cmd.extend(['--stats-interval-seconds', str(ARGS.stress_stats_interval_seconds)])
+        if ARGS.stress_print_summary:
+            cmd.append('--print-observability-summary')
     print('[nicegui-smoke] launching:', ' '.join(shlex.quote(part) for part in cmd), flush=True)
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
 
@@ -199,6 +207,7 @@ window.videoSmokeHarness = (() => {{
     statsInterval: null,
     sessionSummary: null,
     statsSummary: null,
+    observabilitySummary: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
     connectedStreamId: '',
@@ -426,6 +435,26 @@ window.videoSmokeHarness = (() => {{
     setText('stats-resolution', stats.frameWidth && stats.frameHeight ? `${{stats.frameWidth}}x${{stats.frameHeight}}` : 'n/a');
     setText('stats-fps', String(stats.framesPerSecond ?? 'n/a'));
 
+    const obs = state.observabilitySummary || {{}};
+    setText('obs-stream-count', String(obs.stream_count ?? 'n/a'));
+    setText('obs-session-count', String(obs.active_session_count ?? 'n/a'));
+    const obsStreams = Array.isArray(obs.streams) ? obs.streams : [];
+    setHtml('observability-grid', obsStreams.map((stream) => {{
+      const session = stream.current_session || {{}};
+      const counters = session.counters || {{}};
+      return `
+        <div class="widget-debug-card">
+          <span>${{escapeHtml(stream.stream_id || 'unknown stream')}}</span>
+          <strong>${{escapeHtml(`${{stream.configured_width || '?'}}x${{stream.configured_height || '?'}} @ ${{stream.configured_fps || '?'}} fps`)}}</strong>
+          <span>sender: <strong>${{escapeHtml(session.sender_state || 'no-session')}}</strong></span>
+          <span>status: <strong>${{escapeHtml(session.last_packetization_status || 'n/a')}}</strong></span>
+          <span>AU recv/send: <strong>${{stream.total_access_units_received ?? 0}} / ${{counters.delivered_units ?? 0}}</strong></span>
+          <span>Packets/open: <strong>${{counters.packets_sent_after_track_open ?? 0}}</strong></span>
+          <span>Startup/first-dec: <strong>${{counters.startup_sequence_injections ?? 0}} / ${{counters.first_decodable_transitions ?? 0}}</strong></span>
+          <span>Track closed/send fail: <strong>${{counters.track_closed_events ?? 0}} / ${{counters.send_failures ?? 0}}</strong></span>
+        </div>`;
+    }}).join(''));
+
     const healthClass = status.className || '';
     const healthText = status.text;
     const healthDot = byId('widget-health-dot');
@@ -623,6 +652,7 @@ window.videoSmokeHarness = (() => {{
     state.appliedBackendCandidates = new Set();
     state.sessionSummary = null;
     state.statsSummary = null;
+    state.observabilitySummary = null;
     state.selectedCodec = '';
     state.lastStatsAt = '';
     state.disconnectReason = reason;
@@ -696,6 +726,10 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_first_decodable_frame_sent: session.encoded_sender_first_decodable_frame_sent,
       encoded_sender_packets_attempted: session.encoded_sender_packets_attempted,
       encoded_sender_packets_sent_after_track_open: session.encoded_sender_packets_sent_after_track_open,
+      encoded_sender_startup_sequence_injections: session.encoded_sender_startup_sequence_injections,
+      encoded_sender_first_decodable_transitions: session.encoded_sender_first_decodable_transitions,
+      encoded_sender_track_closed_events: session.encoded_sender_track_closed_events,
+      encoded_sender_send_failures: session.encoded_sender_send_failures,
       encoded_sender_negotiated_h264_payload_type: session.encoded_sender_negotiated_h264_payload_type,
       encoded_sender_negotiated_h264_fmtp: session.encoded_sender_negotiated_h264_fmtp,
       encoded_sender_video_mid: session.encoded_sender_video_mid,
@@ -752,6 +786,7 @@ window.videoSmokeHarness = (() => {{
       const session = await sessionResponse.json();
       if (token !== state.connectToken) return;
       state.sessionSummary = summarizeSession(session);
+      await refreshObservability();
       if (session.last_local_candidate && session.last_local_candidate !== state.lastBackendCandidate) {{
         state.lastBackendCandidate = session.last_local_candidate;
         appendLog('ice', `backend ICE candidate observed: ${{session.last_local_candidate}}`);
@@ -775,6 +810,22 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
     }} catch (error) {{
       appendLog('session', `session refresh failed: ${{error}}`);
+    }}
+  }}
+
+  async function refreshObservability() {{
+    const cfg = state.config;
+    if (!cfg?.serverBase) return;
+    try {{
+      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`);
+      if (!response.ok) {{
+        appendLog('session', `observability poll failed: HTTP ${{response.status}}`);
+        return;
+      }}
+      state.observabilitySummary = await response.json();
+      updateSummary();
+    }} catch (error) {{
+      appendLog('session', `observability poll failed: ${{error}}`);
     }}
   }}
 
@@ -1220,6 +1271,11 @@ PAGE_HTML = """
             <span>sender_state</span>
             <strong id="widget-session-sender">n/a</strong>
           </div>
+          <div id="widget-observability-section" class="widget-debug-card">
+            <span>observability streams/sessions</span>
+            <strong><span id="obs-stream-count">n/a</span> / <span id="obs-session-count">n/a</span></strong>
+            <div id="observability-grid" class="observability-grid"></div>
+          </div>
         </div>
       </div>
 
@@ -1367,6 +1423,7 @@ body { background: #111827; }
 .widget-debug-sections { display: grid; gap: 0.75rem; margin-top: 0.9rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .widget-debug-card span { display: block; color: #94a3b8; font-size: 0.8rem; margin-bottom: 0.25rem; }
 .widget-debug-card strong { display: block; margin-bottom: 0.45rem; }
+.observability-grid { display: grid; gap: 0.5rem; }
 .context-menu { position: fixed; z-index: 60; width: min(320px, calc(100vw - 2rem)); background: #020617; border: 1px solid #334155; border-radius: 1rem; box-shadow: 0 18px 40px rgba(0,0,0,0.35); padding: 0.75rem; }
 .context-group + .context-group { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #1e293b; }
 .context-title, .settings-section-title { font-weight: 700; margin-bottom: 0.35rem; }

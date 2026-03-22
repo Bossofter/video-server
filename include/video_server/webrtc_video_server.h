@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "video_server/observability.h"
 #include "video_server/video_server.h"
 
 namespace video_server {
@@ -44,6 +45,7 @@ class WebRtcVideoServer : public IVideoServer {
   WebRtcHttpResponse handle_http_request_for_test(const std::string& method, const std::string& path,
                                                   const std::string& body = "",
                                                   std::unordered_map<std::string, std::string> headers = {});
+  ServerDebugSnapshot get_debug_snapshot() const;
 
  private:
   class Impl;

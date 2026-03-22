@@ -159,6 +159,34 @@ std::optional<SignalingSession> SignalingServer::get_session(const std::string& 
                           snapshot.media_source};
 }
 
+std::vector<SignalingSession> SignalingServer::list_sessions() const {
+  std::vector<std::pair<uint64_t, std::shared_ptr<WebRtcStreamSession>>> sessions;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sessions.reserve(sessions_.size());
+    for (const auto& [_, slot] : sessions_) {
+      if (slot.session) {
+        sessions.emplace_back(slot.session_generation, slot.session);
+      }
+    }
+  }
+
+  std::vector<SignalingSession> output;
+  output.reserve(sessions.size());
+  for (const auto& [generation, session] : sessions) {
+    const auto snapshot = session->snapshot();
+    output.push_back(SignalingSession{generation,
+                                      snapshot.stream_id,
+                                      snapshot.offer_sdp,
+                                      snapshot.answer_sdp,
+                                      snapshot.last_remote_candidate,
+                                      snapshot.last_local_candidate,
+                                      snapshot.peer_state,
+                                      snapshot.media_source});
+  }
+  return output;
+}
+
 void SignalingServer::remove_stream(const std::string& stream_id) {
   std::shared_ptr<WebRtcStreamSession> session;
   {

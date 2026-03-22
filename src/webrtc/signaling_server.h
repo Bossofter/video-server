@@ -42,6 +42,7 @@ class SignalingServer {
   void on_encoded_access_unit(const std::string& stream_id,
                               std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit);
   std::optional<SignalingSession> get_session(const std::string& stream_id) const;
+  std::vector<SignalingSession> list_sessions() const;
   void remove_stream(const std::string& stream_id);
   void stop();
 
