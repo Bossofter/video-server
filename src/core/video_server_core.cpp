@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "../transforms/display_transform.h"
+#include "video_server/video_types.h"
 
 namespace video_server {
 
@@ -203,6 +204,65 @@ std::optional<StreamOutputConfig> VideoServerCore::get_stream_output_config(
     return std::nullopt;
   }
   return it->second.info.output_config;
+}
+
+
+std::optional<StreamObservabilitySnapshot> VideoServerCore::get_stream_snapshot(const std::string& stream_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = streams_.find(stream_id);
+  if (it == streams_.end()) {
+    return std::nullopt;
+  }
+
+  StreamObservabilitySnapshot snapshot;
+  snapshot.info = it->second.info;
+  if (it->second.latest_frame && it->second.latest_frame->valid) {
+    snapshot.latest_raw_frame_exists = true;
+    snapshot.latest_raw_width = it->second.latest_frame->width;
+    snapshot.latest_raw_height = it->second.latest_frame->height;
+    snapshot.latest_raw_pixel_format = to_string(it->second.latest_frame->pixel_format);
+    snapshot.latest_raw_timestamp_ns = it->second.latest_frame->timestamp_ns;
+    snapshot.latest_raw_frame_id = it->second.latest_frame->frame_id;
+  }
+  if (it->second.latest_encoded_unit && it->second.latest_encoded_unit->valid) {
+    snapshot.latest_encoded_access_unit_exists = true;
+    snapshot.latest_encoded_codec = to_string(it->second.latest_encoded_unit->codec);
+    snapshot.latest_encoded_timestamp_ns = it->second.latest_encoded_unit->timestamp_ns;
+    snapshot.latest_encoded_sequence_id = it->second.latest_encoded_unit->sequence_id;
+    snapshot.latest_encoded_size_bytes = it->second.latest_encoded_unit->bytes.size();
+    snapshot.latest_encoded_keyframe = it->second.latest_encoded_unit->keyframe;
+    snapshot.latest_encoded_codec_config = it->second.latest_encoded_unit->codec_config;
+  }
+  return snapshot;
+}
+
+std::vector<StreamObservabilitySnapshot> VideoServerCore::list_stream_snapshots() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<StreamObservabilitySnapshot> snapshots;
+  snapshots.reserve(streams_.size());
+  for (const auto& [_, stream] : streams_) {
+    StreamObservabilitySnapshot snapshot;
+    snapshot.info = stream.info;
+    if (stream.latest_frame && stream.latest_frame->valid) {
+      snapshot.latest_raw_frame_exists = true;
+      snapshot.latest_raw_width = stream.latest_frame->width;
+      snapshot.latest_raw_height = stream.latest_frame->height;
+      snapshot.latest_raw_pixel_format = to_string(stream.latest_frame->pixel_format);
+      snapshot.latest_raw_timestamp_ns = stream.latest_frame->timestamp_ns;
+      snapshot.latest_raw_frame_id = stream.latest_frame->frame_id;
+    }
+    if (stream.latest_encoded_unit && stream.latest_encoded_unit->valid) {
+      snapshot.latest_encoded_access_unit_exists = true;
+      snapshot.latest_encoded_codec = to_string(stream.latest_encoded_unit->codec);
+      snapshot.latest_encoded_timestamp_ns = stream.latest_encoded_unit->timestamp_ns;
+      snapshot.latest_encoded_sequence_id = stream.latest_encoded_unit->sequence_id;
+      snapshot.latest_encoded_size_bytes = stream.latest_encoded_unit->bytes.size();
+      snapshot.latest_encoded_keyframe = stream.latest_encoded_unit->keyframe;
+      snapshot.latest_encoded_codec_config = stream.latest_encoded_unit->codec_config;
+    }
+    snapshots.push_back(std::move(snapshot));
+  }
+  return snapshots;
 }
 
 std::shared_ptr<const LatestFrame> VideoServerCore::get_latest_frame_for_stream(

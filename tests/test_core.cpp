@@ -84,6 +84,47 @@ TEST(VideoServerCoreTest, KeepsMultipleStreamsIsolated) {
   EXPECT_NE(alpha_encoded_latest->timestamp_ns, bravo_encoded_latest->timestamp_ns);
 }
 
+
+TEST(VideoServerCoreTest, StreamSnapshotsStayIsolatedUnderRepeatedUpdates) {
+  video_server::VideoServerCore server;
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 24.0, video_server::VideoPixelFormat::GRAY8}));
+  ASSERT_TRUE(server.register_stream({"bravo", "Bravo", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8}));
+
+  std::vector<uint8_t> alpha_pixels = {10, 11, 12, 13};
+  std::vector<uint8_t> bravo_pixels = {20, 21, 22, 23};
+  std::vector<uint8_t> alpha_encoded = {0x00, 0x00, 0x00, 0x01, 0x67, 0x42};
+  std::vector<uint8_t> bravo_encoded = {0x00, 0x00, 0x00, 0x01, 0x65, 0x88};
+
+  for (uint64_t i = 1; i <= 4; ++i) {
+    ASSERT_TRUE(server.push_frame("alpha", make_gray_frame(alpha_pixels, 2, 2, 100 * i, i)));
+    if (i % 2 == 0) {
+      ASSERT_TRUE(server.push_frame("bravo", make_gray_frame(bravo_pixels, 2, 2, 1000 + 100 * i, 10 + i)));
+    }
+    video_server::EncodedAccessUnitView alpha_unit{alpha_encoded.data(), alpha_encoded.size(), video_server::VideoCodec::H264, 500 + i, i % 2 == 0, i == 1};
+    ASSERT_TRUE(server.push_access_unit("alpha", alpha_unit));
+  }
+  video_server::EncodedAccessUnitView bravo_unit{bravo_encoded.data(), bravo_encoded.size(), video_server::VideoCodec::H264, 999, true, false};
+  ASSERT_TRUE(server.push_access_unit("bravo", bravo_unit));
+
+  const auto alpha = server.get_stream_snapshot("alpha");
+  const auto bravo = server.get_stream_snapshot("bravo");
+  ASSERT_TRUE(alpha.has_value());
+  ASSERT_TRUE(bravo.has_value());
+  EXPECT_EQ(alpha->info.frames_received, 4u);
+  EXPECT_EQ(bravo->info.frames_received, 2u);
+  EXPECT_EQ(alpha->info.access_units_received, 4u);
+  EXPECT_EQ(bravo->info.access_units_received, 1u);
+  EXPECT_TRUE(alpha->latest_raw_frame_exists);
+  EXPECT_TRUE(bravo->latest_raw_frame_exists);
+  EXPECT_EQ(alpha->latest_raw_frame_id, 4u);
+  EXPECT_EQ(bravo->latest_raw_frame_id, 14u);
+  EXPECT_EQ(alpha->latest_encoded_timestamp_ns, 504u);
+  EXPECT_EQ(bravo->latest_encoded_timestamp_ns, 999u);
+  EXPECT_EQ(alpha->latest_encoded_sequence_id, 504u);
+  EXPECT_EQ(bravo->latest_encoded_sequence_id, 999u);
+  EXPECT_NE(alpha->latest_encoded_timestamp_ns, bravo->latest_encoded_timestamp_ns);
+}
+
 TEST(VideoServerCoreTest, ManagesFramesAndEncodedUnits) {
   video_server::VideoServerCore server;
 

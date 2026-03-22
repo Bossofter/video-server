@@ -72,6 +72,55 @@ class FakeEncodedVideoTrackSink : public video_server::IEncodedVideoTrackSink {
 };
 
 
+
+TEST(WebRtcStreamSessionTest, SenderSnapshotReportsTrackClosedAndSendFailureCounters) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(true, "video", true);
+  track_sink->set_throw_on_closed(true);
+  track_sink->set_close_on_send_attempt(2);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 7777);
+  sender->bind_stream("stream-observe");
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+  sender->on_encoded_access_unit(make_non_idr_unit(3000));
+
+  const auto snapshot = sender->snapshot();
+  EXPECT_EQ(snapshot.bound_stream_id, "stream-observe");
+  EXPECT_GE(snapshot.packetization_failures, 1u);
+  EXPECT_EQ(snapshot.send_failures, 0u);
+  EXPECT_FALSE(snapshot.last_send_error.empty());
+  EXPECT_EQ(snapshot.last_packetization_status, "track-not-open-yet");
+}
+
+TEST(WebRtcStreamSessionTest, RepeatedTrackRecoveryKeepsSnapshotConsistent) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", true);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 8888);
+  sender->bind_stream("recovering-stream");
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+
+  for (uint64_t seq = 0; seq < 3; ++seq) {
+    track_sink->set_open(true);
+    sender->on_encoded_access_unit(make_non_idr_unit(3000 + seq));
+    track_sink->set_open(false);
+    sender->on_encoded_access_unit(make_non_idr_unit(4000 + seq));
+  }
+
+  const auto snapshot = sender->snapshot();
+  EXPECT_EQ(snapshot.bound_stream_id, "recovering-stream");
+  EXPECT_TRUE(snapshot.cached_codec_config_available);
+  EXPECT_TRUE(snapshot.cached_idr_available);
+  EXPECT_TRUE(snapshot.startup_sequence_sent);
+  EXPECT_TRUE(snapshot.first_decodable_frame_sent);
+  EXPECT_GE(snapshot.packets_attempted, 3u);
+  EXPECT_GE(snapshot.delivered_units, 5u);
+}
+
 TEST(WebRtcStreamSessionTest, SenderSnapshotsStayIsolatedAcrossIndependentSenders) {
   auto alpha_track = std::make_shared<FakeEncodedVideoTrackSink>();
   auto bravo_track = std::make_shared<FakeEncodedVideoTrackSink>(false, "video", true);

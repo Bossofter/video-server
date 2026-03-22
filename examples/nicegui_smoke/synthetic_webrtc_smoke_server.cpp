@@ -36,6 +36,8 @@ struct Options {
   uint16_t port{8080};
   std::vector<StreamSpec> streams;
   std::string ffmpeg_path;
+  double run_duration_seconds{0.0};
+  double summary_interval_seconds{0.0};
 };
 
 bool parse_uint16(const char* value, uint16_t& out) {
@@ -106,7 +108,7 @@ std::vector<StreamSpec> default_demo_streams() {
 
 void print_usage(const char* argv0) {
   spdlog::info(
-      "Usage: {} [--host HOST] [--port PORT] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo] --ffmpeg PATH",
+      "Usage: {} [--host HOST] [--port PORT] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo] [--duration-seconds N] [--summary-interval-seconds N] --ffmpeg PATH",
       argv0);
 }
 
@@ -164,6 +166,12 @@ std::optional<Options> parse_args(int argc, char** argv) {
       options.streams.push_back(*parsed);
     } else if (arg == "--multi-stream-demo") {
       options.streams = default_demo_streams();
+    } else if (arg == "--duration-seconds") {
+      const char* value = require_value("--duration-seconds");
+      if (!value || !parse_double(value, options.run_duration_seconds)) return std::nullopt;
+    } else if (arg == "--summary-interval-seconds") {
+      const char* value = require_value("--summary-interval-seconds");
+      if (!value || !parse_double(value, options.summary_interval_seconds)) return std::nullopt;
     } else if (arg == "--ffmpeg") {
       const char* value = require_value("--ffmpeg");
       if (!value) return std::nullopt;
@@ -192,6 +200,16 @@ std::optional<Options> parse_args(int argc, char** argv) {
   }
 
   return options;
+}
+
+
+void log_stats_summary(video_server::WebRtcVideoServer& server) {
+  const auto response = server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+  if (response.status != 200) {
+    spdlog::warn("[smoke-server] failed to read debug stats endpoint: status={}", response.status);
+    return;
+  }
+  spdlog::info("[smoke-server] debug stats snapshot {}", response.body);
 }
 
 struct RunningStream {
@@ -274,11 +292,39 @@ int main(int argc, char** argv) {
 
   spdlog::info("[smoke-server] started HTTP/WebRTC server on http://{}:{} with {} stream(s)", options->host,
                options->port, streams.size());
-  spdlog::info("[smoke-server] press ENTER to stop");
+  if (options->summary_interval_seconds > 0.0) {
+    spdlog::info("[smoke-server] summary interval enabled: every {} seconds", options->summary_interval_seconds);
+  }
+  if (options->run_duration_seconds > 0.0) {
+    spdlog::info("[smoke-server] soak duration enabled: {} seconds", options->run_duration_seconds);
+  } else {
+    spdlog::info("[smoke-server] press ENTER to stop");
+  }
 
-  std::string line;
-  std::getline(std::cin, line);
-  stop_requested = true;
+  const auto started_at = Clock::now();
+  auto last_summary_at = started_at;
+  if (options->run_duration_seconds > 0.0) {
+    while (!stop_requested.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      const auto now = Clock::now();
+      if (options->summary_interval_seconds > 0.0 &&
+          now - last_summary_at >= std::chrono::duration<double>(options->summary_interval_seconds)) {
+        log_stats_summary(server);
+        last_summary_at = now;
+      }
+      if (now - started_at >= std::chrono::duration<double>(options->run_duration_seconds)) {
+        spdlog::info("[smoke-server] soak runtime reached {:.2f}s", options->run_duration_seconds);
+        break;
+      }
+    }
+    stop_requested = true;
+  } else {
+    std::string line;
+    std::getline(std::cin, line);
+    stop_requested = true;
+  }
+
+  log_stats_summary(server);
 
   for (auto& stream : streams) {
     if (stream->pipeline) {

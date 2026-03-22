@@ -285,6 +285,11 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink, uint32_t ssrc)
       : video_track_sink_(std::move(video_track_sink)), ssrc_(ssrc) {}
 
+  void bind_stream(std::string stream_id) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bound_stream_id_ = std::move(stream_id);
+  }
+
   void set_negotiated_h264_parameters(int payload_type, std::string fmtp) override {
     std::lock_guard<std::mutex> lock(mutex_);
     negotiated_h264_payload_type_ = payload_type;
@@ -415,7 +420,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     }
 
     if (!track_sink->exists() || !track_sink->is_open()) {
-      mark_track_not_sendable("track-closed-before-send", "track-closed-before-send");
+      mark_track_not_sendable("track-closed-before-send", "track-closed-before-send", "track closed before packetization");
       spdlog::info("[h264-sender] track not sendable before packetization seq={} reason=track-closed-before-send "
                    "has_track_sink={}",
                    latest_encoded_unit->sequence_id, static_cast<bool>(track_sink));
@@ -517,7 +522,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
       const std::string message = ex.what();
       const bool track_closed = message.find("Track is closed") != std::string::npos;
       mark_track_not_sendable(track_closed ? "track-closed-during-send" : "track-send-failed",
-                              track_closed ? "track-closed-exception" : "track-send-exception");
+                              track_closed ? "track-closed-exception" : "track-send-exception", message);
       spdlog::warn("[h264-sender] send-failed seq={} packets_before_failure={} status={} error={}",
                    latest_encoded_unit->sequence_id, packet_count,
                    (track_closed ? "track-closed-during-send" : "track-send-failed"), message);
@@ -556,6 +561,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     std::lock_guard<std::mutex> lock(mutex_);
     EncodedVideoSenderSnapshot snapshot;
     snapshot.sender_state = sender_state_;
+    snapshot.bound_stream_id = bound_stream_id_;
     snapshot.codec = codec_;
     snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
     snapshot.codec_config_seen = codec_config_seen_;
@@ -574,6 +580,9 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.packets_attempted = packets_attempted_;
     snapshot.packets_sent_after_track_open = packets_sent_after_track_open_;
     snapshot.startup_packets_sent = startup_packets_sent_;
+    snapshot.packetization_failures = packetization_failures_;
+    snapshot.track_closed_events = track_closed_events_;
+    snapshot.send_failures = send_failures_;
     snapshot.last_delivered_sequence_id = last_delivered_sequence_id_;
     snapshot.last_delivered_timestamp_ns = last_delivered_timestamp_ns_;
     snapshot.last_delivered_size_bytes = last_delivered_size_bytes_;
@@ -586,6 +595,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
     snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
     snapshot.last_packetization_status = last_packetization_status_;
+    snapshot.last_send_error = last_send_error_;
     snapshot.video_mid = video_track_sink_ ? video_track_sink_->mid() : "";
     if (snapshot.sender_state == "video-track-missing" && snapshot.video_track_exists) {
       if (!snapshot.codec_config_seen) {
@@ -602,7 +612,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   }
 
  private:
-  void mark_track_not_sendable(std::string sender_state, std::string packetization_status) {
+  void mark_track_not_sendable(std::string sender_state, std::string packetization_status, std::string error_message = "") {
     std::lock_guard<std::mutex> lock(mutex_);
     video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
     video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
@@ -610,6 +620,13 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     h264_delivery_active_ = false;
     sender_state_ = std::move(sender_state);
     last_packetization_status_ = std::move(packetization_status);
+    last_send_error_ = std::move(error_message);
+    ++packetization_failures_;
+    if (sender_state_.find("track-closed") != std::string::npos || last_packetization_status_.find("track-closed") != std::string::npos) {
+      ++track_closed_events_;
+    } else if (!last_send_error_.empty()) {
+      ++send_failures_;
+    }
   }
 
   mutable std::mutex mutex_;
@@ -617,6 +634,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   std::shared_ptr<const LatestEncodedUnit> cached_codec_config_;
   std::shared_ptr<const LatestEncodedUnit> cached_startup_idr_;
   std::string sender_state_{"waiting-for-encoded-input"};
+  std::string bound_stream_id_;
   std::string codec_;
   uint32_t ssrc_{0};
   uint16_t sequence_number_{0};
@@ -639,6 +657,9 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   uint64_t packets_attempted_{0};
   uint64_t packets_sent_after_track_open_{0};
   uint64_t startup_packets_sent_{0};
+  uint64_t packetization_failures_{0};
+  uint64_t track_closed_events_{0};
+  uint64_t send_failures_{0};
   uint64_t last_delivered_sequence_id_{0};
   uint64_t last_delivered_timestamp_ns_{0};
   size_t last_delivered_size_bytes_{0};
@@ -649,6 +670,7 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   bool last_contains_idr_{false};
   bool last_contains_non_idr_{false};
   std::string last_packetization_status_{"awaiting-encoded-input"};
+  std::string last_send_error_;
 };
 
 class RtcTrackPacketSink : public IEncodedVideoTrackSink {
@@ -801,6 +823,7 @@ WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGette
   video_ssrc_ = make_random_ssrc();
   video_track_sink_ = std::make_shared<AttachableRtcTrackSink>();
   encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_, video_ssrc_);
+  encoded_sender_->bind_stream(stream_id_);
   media_source_->on_latest_frame(latest_frame_getter(stream_id_));
   auto latest_encoded = latest_encoded_unit_getter(stream_id_);
   media_source_->on_latest_encoded_unit(latest_encoded);

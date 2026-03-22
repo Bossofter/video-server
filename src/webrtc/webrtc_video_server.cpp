@@ -232,6 +232,176 @@ void apply_api_cors_headers(const HttpRequest& request, HttpResponse& response) 
   response.headers["Access-Control-Allow-Headers"] = "Content-Type";
 }
 
+
+std::string encoded_sender_json(const EncodedVideoSenderSnapshot& sender) {
+  std::ostringstream out;
+  out << "{"
+      << "\"bound_stream_id\":\"" << json_escape(sender.bound_stream_id) << "\","
+      << "\"sender_state\":\"" << json_escape(sender.sender_state) << "\","
+      << "\"codec\":\"" << json_escape(sender.codec) << "\","
+      << "\"has_pending_encoded_unit\":" << bool_to_json(sender.has_pending_encoded_unit) << ','
+      << "\"codec_config_seen\":" << bool_to_json(sender.codec_config_seen) << ','
+      << "\"ready_for_video_track\":" << bool_to_json(sender.ready_for_video_track) << ','
+      << "\"video_track_exists\":" << bool_to_json(sender.video_track_exists) << ','
+      << "\"video_track_open\":" << bool_to_json(sender.video_track_open) << ','
+      << "\"h264_delivery_active\":" << bool_to_json(sender.h264_delivery_active) << ','
+      << "\"keyframe_seen\":" << bool_to_json(sender.keyframe_seen) << ','
+      << "\"cached_codec_config_available\":" << bool_to_json(sender.cached_codec_config_available) << ','
+      << "\"cached_idr_available\":" << bool_to_json(sender.cached_idr_available) << ','
+      << "\"first_decodable_frame_sent\":" << bool_to_json(sender.first_decodable_frame_sent) << ','
+      << "\"startup_sequence_sent\":" << bool_to_json(sender.startup_sequence_sent) << ','
+      << "\"delivered_units\":" << sender.delivered_units << ','
+      << "\"duplicate_units_skipped\":" << sender.duplicate_units_skipped << ','
+      << "\"failed_units\":" << sender.failed_units << ','
+      << "\"packets_attempted\":" << sender.packets_attempted << ','
+      << "\"packets_sent_after_track_open\":" << sender.packets_sent_after_track_open << ','
+      << "\"startup_packets_sent\":" << sender.startup_packets_sent << ','
+      << "\"packetization_failures\":" << sender.packetization_failures << ','
+      << "\"track_closed_events\":" << sender.track_closed_events << ','
+      << "\"send_failures\":" << sender.send_failures << ','
+      << "\"last_delivered_sequence_id\":" << sender.last_delivered_sequence_id << ','
+      << "\"last_delivered_timestamp_ns\":" << sender.last_delivered_timestamp_ns << ','
+      << "\"last_delivered_size_bytes\":" << sender.last_delivered_size_bytes << ','
+      << "\"last_delivered_keyframe\":" << bool_to_json(sender.last_delivered_keyframe) << ','
+      << "\"last_delivered_codec_config\":" << bool_to_json(sender.last_delivered_codec_config) << ','
+      << "\"last_contains_sps\":" << bool_to_json(sender.last_contains_sps) << ','
+      << "\"last_contains_pps\":" << bool_to_json(sender.last_contains_pps) << ','
+      << "\"last_contains_idr\":" << bool_to_json(sender.last_contains_idr) << ','
+      << "\"last_contains_non_idr\":" << bool_to_json(sender.last_contains_non_idr) << ','
+      << "\"negotiated_h264_payload_type\":" << sender.negotiated_h264_payload_type << ','
+      << "\"negotiated_h264_fmtp\":\"" << json_escape(sender.negotiated_h264_fmtp) << "\","
+      << "\"last_packetization_status\":\"" << json_escape(sender.last_packetization_status) << "\","
+      << "\"last_send_error\":\"" << json_escape(sender.last_send_error) << "\","
+      << "\"video_mid\":\"" << json_escape(sender.video_mid) << "\"}";
+  return out.str();
+}
+
+std::string signaling_session_json(const SignalingSession& session) {
+  const auto& sender = session.media_source.encoded_sender;
+  std::ostringstream out;
+  out << "{"
+      << "\"session_generation\":" << session.session_generation << ','
+      << "\"stream_id\":\"" << json_escape(session.stream_id) << "\","
+      << "\"offer_sdp\":\"" << json_escape(session.offer_sdp) << "\","
+      << "\"answer_sdp\":\"" << json_escape(session.answer_sdp) << "\","
+      << "\"last_remote_candidate\":\"" << json_escape(session.last_remote_candidate) << "\","
+      << "\"last_local_candidate\":\"" << json_escape(session.last_local_candidate) << "\","
+      << "\"peer_state\":\"" << json_escape(session.peer_state) << "\","
+      << "\"media_bridge_state\":\"" << json_escape(session.media_source.bridge_state) << "\","
+      << "\"preferred_media_path\":\"" << json_escape(session.media_source.preferred_media_path) << "\","
+      << "\"latest_snapshot_available\":" << bool_to_json(session.media_source.latest_snapshot_available) << ','
+      << "\"latest_snapshot_frame_id\":" << session.media_source.latest_snapshot_frame_id << ','
+      << "\"latest_snapshot_timestamp_ns\":" << session.media_source.latest_snapshot_timestamp_ns << ','
+      << "\"latest_snapshot_width\":" << session.media_source.latest_snapshot_width << ','
+      << "\"latest_snapshot_height\":" << session.media_source.latest_snapshot_height << ','
+      << "\"latest_encoded_access_unit_available\":" << bool_to_json(session.media_source.latest_encoded_access_unit_available) << ','
+      << "\"latest_encoded_codec\":\"" << json_escape(session.media_source.latest_encoded_codec) << "\","
+      << "\"latest_encoded_timestamp_ns\":" << session.media_source.latest_encoded_timestamp_ns << ','
+      << "\"latest_encoded_sequence_id\":" << session.media_source.latest_encoded_sequence_id << ','
+      << "\"latest_encoded_size_bytes\":" << session.media_source.latest_encoded_size_bytes << ','
+      << "\"latest_encoded_keyframe\":" << bool_to_json(session.media_source.latest_encoded_keyframe) << ','
+      << "\"latest_encoded_codec_config\":" << bool_to_json(session.media_source.latest_encoded_codec_config) << ','
+      << "\"encoded_sender_state\":\"" << json_escape(sender.sender_state) << "\","
+      << "\"encoded_sender_codec\":\"" << json_escape(sender.codec) << "\","
+      << "\"encoded_sender_has_pending_encoded_unit\":" << bool_to_json(sender.has_pending_encoded_unit) << ','
+      << "\"encoded_sender_codec_config_seen\":" << bool_to_json(sender.codec_config_seen) << ','
+      << "\"encoded_sender_ready_for_video_track\":" << bool_to_json(sender.ready_for_video_track) << ','
+      << "\"encoded_sender_video_track_exists\":" << bool_to_json(sender.video_track_exists) << ','
+      << "\"encoded_sender_video_track_open\":" << bool_to_json(sender.video_track_open) << ','
+      << "\"encoded_sender_h264_delivery_active\":" << bool_to_json(sender.h264_delivery_active) << ','
+      << "\"encoded_sender_keyframe_seen\":" << bool_to_json(sender.keyframe_seen) << ','
+      << "\"encoded_sender_cached_codec_config_available\":" << bool_to_json(sender.cached_codec_config_available) << ','
+      << "\"encoded_sender_cached_idr_available\":" << bool_to_json(sender.cached_idr_available) << ','
+      << "\"encoded_sender_first_decodable_frame_sent\":" << bool_to_json(sender.first_decodable_frame_sent) << ','
+      << "\"encoded_sender_startup_sequence_sent\":" << bool_to_json(sender.startup_sequence_sent) << ','
+      << "\"encoded_sender_delivered_units\":" << sender.delivered_units << ','
+      << "\"encoded_sender_duplicate_units_skipped\":" << sender.duplicate_units_skipped << ','
+      << "\"encoded_sender_failed_units\":" << sender.failed_units << ','
+      << "\"encoded_sender_packets_attempted\":" << sender.packets_attempted << ','
+      << "\"encoded_sender_packets_sent_after_track_open\":" << sender.packets_sent_after_track_open << ','
+      << "\"encoded_sender_startup_packets_sent\":" << sender.startup_packets_sent << ','
+      << "\"encoded_sender_packetization_failures\":" << sender.packetization_failures << ','
+      << "\"encoded_sender_track_closed_events\":" << sender.track_closed_events << ','
+      << "\"encoded_sender_send_failures\":" << sender.send_failures << ','
+      << "\"encoded_sender_last_delivered_sequence_id\":" << sender.last_delivered_sequence_id << ','
+      << "\"encoded_sender_last_delivered_timestamp_ns\":" << sender.last_delivered_timestamp_ns << ','
+      << "\"encoded_sender_last_delivered_size_bytes\":" << sender.last_delivered_size_bytes << ','
+      << "\"encoded_sender_last_delivered_keyframe\":" << bool_to_json(sender.last_delivered_keyframe) << ','
+      << "\"encoded_sender_last_delivered_codec_config\":" << bool_to_json(sender.last_delivered_codec_config) << ','
+      << "\"encoded_sender_last_contains_sps\":" << bool_to_json(sender.last_contains_sps) << ','
+      << "\"encoded_sender_last_contains_pps\":" << bool_to_json(sender.last_contains_pps) << ','
+      << "\"encoded_sender_last_contains_idr\":" << bool_to_json(sender.last_contains_idr) << ','
+      << "\"encoded_sender_last_contains_non_idr\":" << bool_to_json(sender.last_contains_non_idr) << ','
+      << "\"encoded_sender_negotiated_h264_payload_type\":" << sender.negotiated_h264_payload_type << ','
+      << "\"encoded_sender_negotiated_h264_fmtp\":\"" << json_escape(sender.negotiated_h264_fmtp) << "\","
+      << "\"encoded_sender_last_packetization_status\":\"" << json_escape(sender.last_packetization_status) << "\","
+      << "\"encoded_sender_last_send_error\":\"" << json_escape(sender.last_send_error) << "\","
+      << "\"encoded_sender_video_mid\":\"" << json_escape(sender.video_mid) << "\","
+      << "\"encoded_sender\":" << encoded_sender_json(sender)
+      << '}';
+  return out.str();
+}
+
+std::string sender_observability_json(const SenderObservabilitySnapshot& sender) {
+  std::ostringstream out;
+  out << '{'
+      << "\"session_present\":" << bool_to_json(sender.session_present) << ','
+      << "\"session_generation\":" << sender.session_generation << ','
+      << "\"peer_state\":\"" << json_escape(sender.peer_state) << "\","
+      << "\"sender_state\":\"" << json_escape(sender.sender_state) << "\","
+      << "\"last_packetization_status\":\"" << json_escape(sender.last_packetization_status) << "\","
+      << "\"bound_stream_id\":\"" << json_escape(sender.bound_stream_id) << "\","
+      << "\"video_track_exists\":" << bool_to_json(sender.video_track_exists) << ','
+      << "\"video_track_open\":" << bool_to_json(sender.video_track_open) << ','
+      << "\"startup_sequence_sent\":" << bool_to_json(sender.startup_sequence_sent) << ','
+      << "\"first_decodable_frame_sent\":" << bool_to_json(sender.first_decodable_frame_sent) << ','
+      << "\"access_units_considered_for_send\":" << sender.access_units_considered_for_send << ','
+      << "\"packets_emitted\":" << sender.packets_emitted << ','
+      << "\"startup_sequence_injections\":" << sender.startup_sequence_injections << ','
+      << "\"duplicate_units_skipped\":" << sender.duplicate_units_skipped << ','
+      << "\"packetization_failures\":" << sender.packetization_failures << ','
+      << "\"track_closed_events\":" << sender.track_closed_events << ','
+      << "\"send_failures\":" << sender.send_failures << ','
+      << "\"last_send_error\":\"" << json_escape(sender.last_send_error) << "\"}";
+  return out.str();
+}
+
+std::string stream_snapshot_json(const StreamObservabilitySnapshot& snapshot) {
+  std::ostringstream out;
+  out << '{'
+      << "\"stream_id\":\"" << json_escape(snapshot.info.stream_id) << "\","
+      << "\"label\":\"" << json_escape(snapshot.info.label) << "\","
+      << "\"configured_width\":" << snapshot.info.config.width << ','
+      << "\"configured_height\":" << snapshot.info.config.height << ','
+      << "\"configured_fps\":" << snapshot.info.config.nominal_fps << ','
+      << "\"input_pixel_format\":\"" << json_escape(to_string(snapshot.info.config.input_pixel_format)) << "\","
+      << "\"active\":" << bool_to_json(snapshot.info.active) << ','
+      << "\"frames_received\":" << snapshot.info.frames_received << ','
+      << "\"frames_transformed\":" << snapshot.info.frames_transformed << ','
+      << "\"frames_dropped\":" << snapshot.info.frames_dropped << ','
+      << "\"access_units_received\":" << snapshot.info.access_units_received << ','
+      << "\"last_input_timestamp_ns\":" << snapshot.info.last_input_timestamp_ns << ','
+      << "\"last_output_timestamp_ns\":" << snapshot.info.last_output_timestamp_ns << ','
+      << "\"last_frame_timestamp_ns\":" << snapshot.info.last_frame_timestamp_ns << ','
+      << "\"last_frame_id\":" << snapshot.info.last_frame_id << ','
+      << "\"latest_raw_frame_exists\":" << bool_to_json(snapshot.latest_raw_frame_exists) << ','
+      << "\"latest_raw_width\":" << snapshot.latest_raw_width << ','
+      << "\"latest_raw_height\":" << snapshot.latest_raw_height << ','
+      << "\"latest_raw_pixel_format\":\"" << json_escape(snapshot.latest_raw_pixel_format) << "\","
+      << "\"latest_raw_timestamp_ns\":" << snapshot.latest_raw_timestamp_ns << ','
+      << "\"latest_raw_frame_id\":" << snapshot.latest_raw_frame_id << ','
+      << "\"latest_encoded_access_unit_exists\":" << bool_to_json(snapshot.latest_encoded_access_unit_exists) << ','
+      << "\"latest_encoded_codec\":\"" << json_escape(snapshot.latest_encoded_codec) << "\","
+      << "\"latest_encoded_timestamp_ns\":" << snapshot.latest_encoded_timestamp_ns << ','
+      << "\"latest_encoded_sequence_id\":" << snapshot.latest_encoded_sequence_id << ','
+      << "\"latest_encoded_size_bytes\":" << snapshot.latest_encoded_size_bytes << ','
+      << "\"latest_encoded_keyframe\":" << bool_to_json(snapshot.latest_encoded_keyframe) << ','
+      << "\"latest_encoded_codec_config\":" << bool_to_json(snapshot.latest_encoded_codec_config) << ','
+      << "\"sender\":" << sender_observability_json(snapshot.sender)
+      << '}';
+  return out.str();
+}
+
 std::string output_config_json(const StreamOutputConfig& cfg) {
   std::ostringstream out;
   out << "{"
@@ -281,6 +451,51 @@ class WebRtcVideoServer::Impl {
       apply_api_cors_headers(request, response);
       return response;
     };
+
+    if (request.method == "GET" && request.path == "/api/video/debug/stats") {
+      auto streams = core_.list_stream_snapshots();
+      auto sessions = signaling_.list_sessions();
+      std::unordered_map<std::string, SignalingSession> sessions_by_stream;
+      for (const auto& session : sessions) {
+        sessions_by_stream[session.stream_id] = session;
+      }
+      std::ostringstream out;
+      out << "{\"stream_count\":" << streams.size() << ",\"session_count\":" << sessions.size() << ",\"streams\":[";
+      for (size_t i = 0; i < streams.size(); ++i) {
+        auto snapshot = streams[i];
+        const auto session_it = sessions_by_stream.find(snapshot.info.stream_id);
+        if (session_it != sessions_by_stream.end()) {
+          const auto& sender = session_it->second.media_source.encoded_sender;
+          snapshot.sender.session_present = true;
+          snapshot.sender.session_generation = session_it->second.session_generation;
+          snapshot.sender.peer_state = session_it->second.peer_state;
+          snapshot.sender.sender_state = sender.sender_state;
+          snapshot.sender.last_packetization_status = sender.last_packetization_status;
+          snapshot.sender.bound_stream_id = sender.bound_stream_id;
+          snapshot.sender.video_track_exists = sender.video_track_exists;
+          snapshot.sender.video_track_open = sender.video_track_open;
+          snapshot.sender.startup_sequence_sent = sender.startup_sequence_sent;
+          snapshot.sender.first_decodable_frame_sent = sender.first_decodable_frame_sent;
+          snapshot.sender.access_units_considered_for_send = sender.delivered_units;
+          snapshot.sender.packets_emitted = sender.packets_attempted;
+          snapshot.sender.startup_sequence_injections = sender.startup_sequence_sent ? 1u : 0u;
+          snapshot.sender.duplicate_units_skipped = sender.duplicate_units_skipped;
+          snapshot.sender.packetization_failures = sender.packetization_failures;
+          snapshot.sender.track_closed_events = sender.track_closed_events;
+          snapshot.sender.send_failures = sender.send_failures;
+          snapshot.sender.last_send_error = sender.last_send_error;
+        }
+        if (i != 0) out << ',';
+        out << stream_snapshot_json(snapshot);
+      }
+      out << "],\"sessions\":[";
+      for (size_t i = 0; i < sessions.size(); ++i) {
+        if (i != 0) out << ',';
+        out << signaling_session_json(sessions[i]);
+      }
+      out << "]}";
+      return finalize(HttpResponse{200, out.str(), "application/json"});
+    }
 
     if (request.method == "GET" && request.path == "/api/video/streams") {
       auto streams = core_.list_streams();
@@ -458,92 +673,7 @@ class WebRtcVideoServer::Impl {
         if (!session.has_value()) {
           return finalize(json_error(404, "session not found"));
         }
-        std::ostringstream out;
-        out << "{\"session_generation\":" << session->session_generation << ','
-            << "\"stream_id\":\"" << json_escape(session->stream_id) << "\","
-            << "\"offer_sdp\":\"" << json_escape(session->offer_sdp) << "\","
-            << "\"answer_sdp\":\"" << json_escape(session->answer_sdp) << "\","
-            << "\"last_remote_candidate\":\"" << json_escape(session->last_remote_candidate) << "\","
-            << "\"last_local_candidate\":\"" << json_escape(session->last_local_candidate) << "\","
-            << "\"peer_state\":\"" << json_escape(session->peer_state) << "\","
-            << "\"media_bridge_state\":\"" << json_escape(session->media_source.bridge_state) << "\","
-            << "\"preferred_media_path\":\"" << json_escape(session->media_source.preferred_media_path) << "\","
-            << "\"latest_snapshot_available\":" << bool_to_json(session->media_source.latest_snapshot_available)
-            << ','
-            << "\"latest_snapshot_frame_id\":" << session->media_source.latest_snapshot_frame_id << ','
-            << "\"latest_snapshot_timestamp_ns\":" << session->media_source.latest_snapshot_timestamp_ns << ','
-            << "\"latest_snapshot_width\":" << session->media_source.latest_snapshot_width << ','
-            << "\"latest_snapshot_height\":" << session->media_source.latest_snapshot_height << ','
-            << "\"latest_encoded_access_unit_available\":"
-            << bool_to_json(session->media_source.latest_encoded_access_unit_available) << ','
-            << "\"latest_encoded_codec\":\"" << json_escape(session->media_source.latest_encoded_codec) << "\","
-            << "\"latest_encoded_timestamp_ns\":" << session->media_source.latest_encoded_timestamp_ns << ','
-            << "\"latest_encoded_sequence_id\":" << session->media_source.latest_encoded_sequence_id << ','
-            << "\"latest_encoded_size_bytes\":" << session->media_source.latest_encoded_size_bytes << ','
-            << "\"latest_encoded_keyframe\":" << bool_to_json(session->media_source.latest_encoded_keyframe) << ','
-            << "\"latest_encoded_codec_config\":"
-            << bool_to_json(session->media_source.latest_encoded_codec_config) << ','
-            << "\"encoded_sender_state\":\"" << json_escape(session->media_source.encoded_sender.sender_state)
-            << "\","
-            << "\"encoded_sender_codec\":\"" << json_escape(session->media_source.encoded_sender.codec) << "\","
-            << "\"encoded_sender_has_pending_encoded_unit\":"
-            << bool_to_json(session->media_source.encoded_sender.has_pending_encoded_unit) << ','
-            << "\"encoded_sender_codec_config_seen\":"
-            << bool_to_json(session->media_source.encoded_sender.codec_config_seen) << ','
-            << "\"encoded_sender_ready_for_video_track\":"
-            << bool_to_json(session->media_source.encoded_sender.ready_for_video_track) << ','
-            << "\"encoded_sender_video_track_exists\":"
-            << bool_to_json(session->media_source.encoded_sender.video_track_exists) << ','
-            << "\"encoded_sender_video_track_open\":"
-            << bool_to_json(session->media_source.encoded_sender.video_track_open) << ','
-            << "\"encoded_sender_h264_delivery_active\":"
-            << bool_to_json(session->media_source.encoded_sender.h264_delivery_active) << ','
-            << "\"encoded_sender_keyframe_seen\":"
-            << bool_to_json(session->media_source.encoded_sender.keyframe_seen) << ','
-            << "\"encoded_sender_cached_codec_config_available\":"
-            << bool_to_json(session->media_source.encoded_sender.cached_codec_config_available) << ','
-            << "\"encoded_sender_cached_idr_available\":"
-            << bool_to_json(session->media_source.encoded_sender.cached_idr_available) << ','
-            << "\"encoded_sender_first_decodable_frame_sent\":"
-            << bool_to_json(session->media_source.encoded_sender.first_decodable_frame_sent) << ','
-            << "\"encoded_sender_startup_sequence_sent\":"
-            << bool_to_json(session->media_source.encoded_sender.startup_sequence_sent) << ','
-            << "\"encoded_sender_delivered_units\":" << session->media_source.encoded_sender.delivered_units << ','
-            << "\"encoded_sender_duplicate_units_skipped\":"
-            << session->media_source.encoded_sender.duplicate_units_skipped << ','
-            << "\"encoded_sender_failed_units\":" << session->media_source.encoded_sender.failed_units << ','
-            << "\"encoded_sender_packets_attempted\":" << session->media_source.encoded_sender.packets_attempted << ','
-            << "\"encoded_sender_packets_sent_after_track_open\":"
-            << session->media_source.encoded_sender.packets_sent_after_track_open << ','
-            << "\"encoded_sender_startup_packets_sent\":"
-            << session->media_source.encoded_sender.startup_packets_sent << ','
-            << "\"encoded_sender_last_delivered_sequence_id\":"
-            << session->media_source.encoded_sender.last_delivered_sequence_id << ','
-            << "\"encoded_sender_last_delivered_timestamp_ns\":"
-            << session->media_source.encoded_sender.last_delivered_timestamp_ns << ','
-            << "\"encoded_sender_last_delivered_size_bytes\":"
-            << session->media_source.encoded_sender.last_delivered_size_bytes << ','
-            << "\"encoded_sender_last_delivered_keyframe\":"
-            << bool_to_json(session->media_source.encoded_sender.last_delivered_keyframe) << ','
-            << "\"encoded_sender_last_delivered_codec_config\":"
-            << bool_to_json(session->media_source.encoded_sender.last_delivered_codec_config) << ','
-            << "\"encoded_sender_last_contains_sps\":"
-            << bool_to_json(session->media_source.encoded_sender.last_contains_sps) << ','
-            << "\"encoded_sender_last_contains_pps\":"
-            << bool_to_json(session->media_source.encoded_sender.last_contains_pps) << ','
-            << "\"encoded_sender_last_contains_idr\":"
-            << bool_to_json(session->media_source.encoded_sender.last_contains_idr) << ','
-            << "\"encoded_sender_last_contains_non_idr\":"
-            << bool_to_json(session->media_source.encoded_sender.last_contains_non_idr) << ','
-            << "\"encoded_sender_negotiated_h264_payload_type\":"
-            << session->media_source.encoded_sender.negotiated_h264_payload_type << ','
-            << "\"encoded_sender_negotiated_h264_fmtp\":\""
-            << json_escape(session->media_source.encoded_sender.negotiated_h264_fmtp) << "\","
-            << "\"encoded_sender_last_packetization_status\":\""
-            << json_escape(session->media_source.encoded_sender.last_packetization_status) << "\","
-            << "\"encoded_sender_video_mid\":\""
-            << json_escape(session->media_source.encoded_sender.video_mid) << "\"}";
-        return finalize(HttpResponse{200, out.str(), "application/json"});
+        return finalize(HttpResponse{200, signaling_session_json(*session), "application/json"});
       }
     }
 

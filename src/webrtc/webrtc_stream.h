@@ -33,6 +33,7 @@ struct H264AccessUnitDescriptor {
 
 struct EncodedVideoSenderSnapshot {
   std::string sender_state;
+  std::string bound_stream_id;
   std::string codec;
   bool has_pending_encoded_unit{false};
   bool codec_config_seen{false};
@@ -51,6 +52,9 @@ struct EncodedVideoSenderSnapshot {
   uint64_t packets_attempted{0};
   uint64_t packets_sent_after_track_open{0};
   uint64_t startup_packets_sent{0};
+  uint64_t packetization_failures{0};
+  uint64_t track_closed_events{0};
+  uint64_t send_failures{0};
   uint64_t last_delivered_sequence_id{0};
   uint64_t last_delivered_timestamp_ns{0};
   size_t last_delivered_size_bytes{0};
@@ -63,6 +67,7 @@ struct EncodedVideoSenderSnapshot {
   int negotiated_h264_payload_type{0};
   std::string negotiated_h264_fmtp;
   std::string last_packetization_status;
+  std::string last_send_error;
   std::string video_mid;
 };
 
@@ -111,6 +116,7 @@ class IEncodedVideoSender {
   // Session-side delivery/packetization boundary for encoded units feeding the browser-facing track.
   virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
   virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
+  virtual void bind_stream(std::string stream_id) = 0;
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
 

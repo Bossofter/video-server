@@ -199,6 +199,7 @@ window.videoSmokeHarness = (() => {{
     statsInterval: null,
     sessionSummary: null,
     statsSummary: null,
+    debugStats: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
     connectedStreamId: '',
@@ -408,6 +409,7 @@ window.videoSmokeHarness = (() => {{
     setText('debug-last-stats', state.lastStatsAt || 'never');
 
     const session = state.sessionSummary || {{}};
+    const live = state.debugStats?.selectedStream || {{}};
     setText('session-peer-state', session.peer_state || 'n/a');
     setText('session-media-bridge', session.media_bridge_state || 'n/a');
     setText('session-sender-state', session.encoded_sender_state || 'n/a');
@@ -415,7 +417,15 @@ window.videoSmokeHarness = (() => {{
     setText('session-startup', session.encoded_sender_startup_sequence_sent ? 'yes' : 'no');
     setText('session-first-dec', session.encoded_sender_first_decodable_frame_sent ? 'yes' : 'no');
     setText('session-packets-open', String(session.encoded_sender_packets_sent_after_track_open ?? 'n/a'));
-    setHtml('session-json', `<pre>${{shortJson(session)}}</pre>`);
+    setHtml('session-json', `<pre>${shortJson(session)}</pre>`);
+    setText('stream-config', live.configText || 'n/a');
+    setText('stream-latest-raw', live.latestRawText || 'n/a');
+    setText('stream-latest-encoded', live.latestEncodedText || 'n/a');
+    setText('stream-access-units', String(live.accessUnitsReceived ?? 'n/a'));
+    setText('stream-considered', String(live.accessUnitsConsidered ?? 'n/a'));
+    setText('stream-packets', String(live.packetsEmitted ?? 'n/a'));
+    setText('stream-startup-count', String(live.startupSequenceInjections ?? 'n/a'));
+    setText('stream-failures', live.failuresText || 'n/a');
 
     const stats = state.statsSummary || {{}};
     setText('stats-packets', String(stats.packetsReceived ?? 'n/a'));
@@ -454,6 +464,8 @@ window.videoSmokeHarness = (() => {{
     setText('widget-video-time', video ? video.currentTime.toFixed(2) : 'n/a');
     setText('widget-session-peer', session.peer_state || 'n/a');
     setText('widget-session-sender', session.encoded_sender_state || 'n/a');
+    setText('widget-stream-packets', String(live.packetsEmitted ?? 'n/a'));
+    setText('widget-stream-status', live.senderStatusText || 'n/a');
     setText('widget-expected-fps', (cfg.widgetFps || 'n/a').toString());
     setText('widget-target-geometry', `${{cfg.widgetWidth || '?'}}x${{cfg.widgetHeight || '?'}}`);
   }}
@@ -625,6 +637,7 @@ window.videoSmokeHarness = (() => {{
     state.appliedBackendCandidates = new Set();
     state.sessionSummary = null;
     state.statsSummary = null;
+    state.debugStats = null;
     state.selectedCodec = '';
     state.lastStatsAt = '';
     state.disconnectReason = reason;
@@ -686,24 +699,69 @@ window.videoSmokeHarness = (() => {{
 
   function summarizeSession(session) {{
     if (!session || typeof session !== 'object') return null;
+    const sender = session.encoded_sender || {{}};
     return {{
       peer_state: session.peer_state,
       media_bridge_state: session.media_bridge_state,
-      encoded_sender_state: session.encoded_sender_state,
+      encoded_sender_state: sender.sender_state || session.encoded_sender_state,
       preferred_media_path: session.preferred_media_path,
-      encoded_sender_cached_codec_config_available: session.encoded_sender_cached_codec_config_available,
-      encoded_sender_cached_idr_available: session.encoded_sender_cached_idr_available,
-      encoded_sender_ready_for_video_track: session.encoded_sender_ready_for_video_track,
-      encoded_sender_startup_sequence_sent: session.encoded_sender_startup_sequence_sent,
-      encoded_sender_first_decodable_frame_sent: session.encoded_sender_first_decodable_frame_sent,
-      encoded_sender_packets_attempted: session.encoded_sender_packets_attempted,
-      encoded_sender_packets_sent_after_track_open: session.encoded_sender_packets_sent_after_track_open,
-      encoded_sender_negotiated_h264_payload_type: session.encoded_sender_negotiated_h264_payload_type,
-      encoded_sender_negotiated_h264_fmtp: session.encoded_sender_negotiated_h264_fmtp,
-      encoded_sender_video_mid: session.encoded_sender_video_mid,
+      encoded_sender_cached_codec_config_available: sender.cached_codec_config_available ?? session.encoded_sender_cached_codec_config_available,
+      encoded_sender_cached_idr_available: sender.cached_idr_available ?? session.encoded_sender_cached_idr_available,
+      encoded_sender_ready_for_video_track: sender.ready_for_video_track ?? session.encoded_sender_ready_for_video_track,
+      encoded_sender_startup_sequence_sent: sender.startup_sequence_sent ?? session.encoded_sender_startup_sequence_sent,
+      encoded_sender_first_decodable_frame_sent: sender.first_decodable_frame_sent ?? session.encoded_sender_first_decodable_frame_sent,
+      encoded_sender_packets_attempted: sender.packets_attempted ?? session.encoded_sender_packets_attempted,
+      encoded_sender_packets_sent_after_track_open: sender.packets_sent_after_track_open ?? session.encoded_sender_packets_sent_after_track_open,
+      encoded_sender_negotiated_h264_payload_type: sender.negotiated_h264_payload_type ?? session.encoded_sender_negotiated_h264_payload_type,
+      encoded_sender_negotiated_h264_fmtp: sender.negotiated_h264_fmtp ?? session.encoded_sender_negotiated_h264_fmtp,
+      encoded_sender_video_mid: sender.video_mid ?? session.encoded_sender_video_mid,
+      encoded_sender_last_packetization_status: sender.last_packetization_status ?? session.encoded_sender_last_packetization_status,
+      encoded_sender_last_send_error: sender.last_send_error ?? session.encoded_sender_last_send_error,
       last_local_candidate: session.last_local_candidate,
       answer_present: !!session.answer_sdp,
+      raw: session,
     }};
+  }}
+
+  function summarizeDebugStats(payload, streamId) {{
+    if (!payload || typeof payload !== 'object') return null;
+    const streams = Array.isArray(payload.streams) ? payload.streams : [];
+    const selected = streams.find((item) => item.stream_id === streamId) || null;
+    if (!selected) return {{streamCount: streams.length, selectedStream: null}};
+    const sender = selected.sender || {{}};
+    return {{
+      streamCount: streams.length,
+      selectedStream: {{
+        configText: `${{selected.configured_width}}x${{selected.configured_height}} @ ${{selected.configured_fps}} fps`,
+        latestRawText: selected.latest_raw_frame_exists ? `${{selected.latest_raw_width}}x${{selected.latest_raw_height}} frame=${{selected.latest_raw_frame_id}}` : 'none',
+        latestEncodedText: selected.latest_encoded_access_unit_exists ? `${{selected.latest_encoded_codec || 'H264'}} seq=${{selected.latest_encoded_sequence_id}} ts=${{selected.latest_encoded_timestamp_ns}}` : 'none',
+        accessUnitsReceived: selected.access_units_received,
+        accessUnitsConsidered: sender.access_units_considered_for_send,
+        packetsEmitted: sender.packets_emitted,
+        startupSequenceInjections: sender.startup_sequence_injections,
+        failuresText: `packetize=${{sender.packetization_failures ?? 0}} closed=${{sender.track_closed_events ?? 0}} send=${{sender.send_failures ?? 0}}`,
+        senderStatusText: `${{sender.sender_state || 'n/a'}} • ${{sender.last_packetization_status || 'n/a'}}`,
+        raw: selected,
+      }},
+    }};
+  }}
+
+  async function refreshDebugStats(streamIdOverride=null) {{
+    const cfg = state.config;
+    if (!cfg) return;
+    const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
+    try {{
+      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`);
+      if (!response.ok) {{
+        appendLog('stats', `debug stats poll failed: HTTP ${{response.status}}`);
+        return;
+      }}
+      const payload = await response.json();
+      state.debugStats = summarizeDebugStats(payload, streamId);
+      updateSummary();
+    }} catch (error) {{
+      appendLog('stats', `debug stats refresh failed: ${{error}}`);
+    }}
   }}
 
   function summarizeStats(report) {{
@@ -733,6 +791,7 @@ window.videoSmokeHarness = (() => {{
       state.statsSummary = summarizeStats(await state.pc.getStats());
       state.selectedCodec = state.statsSummary.codec || state.selectedCodec || '';
       state.lastStatsAt = nowStamp();
+      await refreshDebugStats();
       updateSummary();
     }} catch (error) {{
       appendLog('stats', `stats read failed: ${{error}}`);
@@ -927,12 +986,13 @@ window.videoSmokeHarness = (() => {{
       const pollLoop = async () => {{
         while (!state.sessionPollAbort && token === state.connectToken) {{
           await refreshSession(streamId);
+        await refreshDebugStats();
           await refreshStats();
           await new Promise((resolve) => setTimeout(resolve, cfg.sessionPollMs));
         }}
       }};
       pollLoop();
-      state.statsInterval = setInterval(() => refreshStats(), Math.max(1000, cfg.sessionPollMs));
+      state.statsInterval = setInterval(() => {{ refreshStats(); refreshDebugStats(); }}, Math.max(1000, cfg.sessionPollMs));
     }} catch (error) {{
       state.offerStatus = `failed: ${{error}}`;
       state.disconnectReason = `error: ${{error}}`;
@@ -1153,6 +1213,18 @@ PAGE_HTML = """
           </div>
           <div id="session-json" class="json-box"><pre>{}</pre></div>
 
+          <div class="subpanel-title">Stream observability</div>
+          <div class="debug-grid">
+            <div><span>config</span><strong id="stream-config">n/a</strong></div>
+            <div><span>latest raw</span><strong id="stream-latest-raw">n/a</strong></div>
+            <div><span>latest encoded</span><strong id="stream-latest-encoded">n/a</strong></div>
+            <div><span>AU received</span><strong id="stream-access-units">n/a</strong></div>
+            <div><span>AU considered</span><strong id="stream-considered">n/a</strong></div>
+            <div><span>packets emitted</span><strong id="stream-packets">n/a</strong></div>
+            <div><span>startup count</span><strong id="stream-startup-count">n/a</strong></div>
+            <div><span>failures</span><strong id="stream-failures">n/a</strong></div>
+          </div>
+
           <div class="subpanel-title">Browser stats</div>
           <div class="debug-grid">
             <div><span>packets</span><strong id="stats-packets">n/a</strong></div>
@@ -1221,6 +1293,10 @@ PAGE_HTML = """
             <strong id="widget-session-peer">n/a</strong>
             <span>sender_state</span>
             <strong id="widget-session-sender">n/a</strong>
+            <span>packets emitted</span>
+            <strong id="widget-stream-packets">n/a</strong>
+            <span>sender / last status</span>
+            <strong id="widget-stream-status">n/a</strong>
           </div>
         </div>
       </div>

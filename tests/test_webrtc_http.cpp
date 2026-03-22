@@ -973,7 +973,35 @@ TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) {
 
 
 
+TEST(WebRtcHttpTest, DebugStatsEndpointReflectsPerStreamObservability) {
+  video_server::WebRtcVideoServer server({"127.0.0.1", 0, false});
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 24.0, video_server::VideoPixelFormat::GRAY8}));
+  ASSERT_TRUE(server.register_stream({"bravo", "Bravo", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8}));
+
+  std::vector<uint8_t> alpha_frame_bytes = {1, 2, 3, 4};
+  std::vector<uint8_t> bravo_frame_bytes = {5, 6, 7, 8};
+  server.push_frame("alpha", video_server::VideoFrameView{alpha_frame_bytes.data(), 2, 2, 2, video_server::VideoPixelFormat::GRAY8, 111, 7});
+  server.push_frame("bravo", video_server::VideoFrameView{bravo_frame_bytes.data(), 2, 2, 2, video_server::VideoPixelFormat::GRAY8, 222, 9});
+
+  std::vector<uint8_t> alpha_encoded = {0x00, 0x00, 0x00, 0x01, 0x67, 0x42};
+  std::vector<uint8_t> bravo_encoded = {0x00, 0x00, 0x00, 0x01, 0x65, 0x88};
+  ASSERT_TRUE(server.push_access_unit("alpha", {alpha_encoded.data(), alpha_encoded.size(), video_server::VideoCodec::H264, 333, true, true}));
+  ASSERT_TRUE(server.push_access_unit("bravo", {bravo_encoded.data(), bravo_encoded.size(), video_server::VideoCodec::H264, 444, false, false}));
+
+  const auto response = server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+  ASSERT_EQ(response.status, 200);
+  EXPECT_NE(response.body.find("\"stream_count\":2"), std::string::npos);
+  EXPECT_NE(response.body.find("\"stream_id\":\"alpha\""), std::string::npos);
+  EXPECT_NE(response.body.find("\"stream_id\":\"bravo\""), std::string::npos);
+  EXPECT_NE(response.body.find("\"latest_encoded_timestamp_ns\":333"), std::string::npos);
+  EXPECT_NE(response.body.find("\"latest_encoded_timestamp_ns\":444"), std::string::npos);
+  EXPECT_NE(response.body.find("\"latest_raw_frame_id\":7"), std::string::npos);
+  EXPECT_NE(response.body.find("\"latest_raw_frame_id\":9"), std::string::npos);
+}
+
+
 #else
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) { GTEST_SKIP() << "WebRTC backend disabled"; }
+TEST(WebRtcHttpTest, DebugStatsEndpointReflectsPerStreamObservability) { GTEST_SKIP() << "WebRTC backend disabled"; }
 #endif

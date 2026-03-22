@@ -31,6 +31,45 @@ struct LatestFrame {
   bool valid{false};
 };
 
+struct SenderObservabilitySnapshot {
+  bool session_present{false};
+  uint64_t session_generation{0};
+  std::string peer_state;
+  std::string sender_state;
+  std::string last_packetization_status;
+  std::string bound_stream_id;
+  bool video_track_exists{false};
+  bool video_track_open{false};
+  bool startup_sequence_sent{false};
+  bool first_decodable_frame_sent{false};
+  uint64_t access_units_considered_for_send{0};
+  uint64_t packets_emitted{0};
+  uint64_t startup_sequence_injections{0};
+  uint64_t duplicate_units_skipped{0};
+  uint64_t packetization_failures{0};
+  uint64_t track_closed_events{0};
+  uint64_t send_failures{0};
+  std::string last_send_error;
+};
+
+struct StreamObservabilitySnapshot {
+  VideoStreamInfo info;
+  bool latest_raw_frame_exists{false};
+  uint32_t latest_raw_width{0};
+  uint32_t latest_raw_height{0};
+  std::string latest_raw_pixel_format;
+  uint64_t latest_raw_timestamp_ns{0};
+  uint64_t latest_raw_frame_id{0};
+  bool latest_encoded_access_unit_exists{false};
+  std::string latest_encoded_codec;
+  uint64_t latest_encoded_timestamp_ns{0};
+  uint64_t latest_encoded_sequence_id{0};
+  size_t latest_encoded_size_bytes{0};
+  bool latest_encoded_keyframe{false};
+  bool latest_encoded_codec_config{false};
+  SenderObservabilitySnapshot sender;
+};
+
 class VideoServerCore : public IVideoServer {
  public:
   bool register_stream(const StreamConfig& config) override;
@@ -45,6 +84,8 @@ class VideoServerCore : public IVideoServer {
 
   std::shared_ptr<const LatestFrame> get_latest_frame_for_stream(const std::string& stream_id) const;
   std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit_for_stream(const std::string& stream_id) const;
+  std::optional<StreamObservabilitySnapshot> get_stream_snapshot(const std::string& stream_id) const;
+  std::vector<StreamObservabilitySnapshot> list_stream_snapshots() const;
 
  private:
   struct StreamState {
