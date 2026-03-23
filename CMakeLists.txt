@@ -118,6 +118,7 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/transforms
     ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline
   )
 
   target_compile_definitions(video_server_tests PRIVATE VIDEO_SERVER_TEST_WEBRTC=$<BOOL:${ENABLE_WEBRTC_BACKEND}>)

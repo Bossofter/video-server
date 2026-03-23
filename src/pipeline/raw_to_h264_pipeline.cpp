@@ -1,16 +1,13 @@
 #include "video_server/raw_video_pipeline.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,10 +20,10 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
-#include <libavutil/samplefmt.h>
-#include <libavutil/version.h>
 #include <libswscale/swscale.h>
 }
+
+#include "raw_h264_encoder_backend.h"
 
 namespace video_server {
 namespace {
@@ -80,28 +77,13 @@ bool is_planar_pixel_format(VideoPixelFormat pixel_format) {
   return pixel_format == VideoPixelFormat::NV12 || pixel_format == VideoPixelFormat::I420;
 }
 
-bool start_code_at(const std::vector<uint8_t>& bytes, size_t index, size_t* prefix_size) {
-  if (index + 4 <= bytes.size() && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
-      bytes[index + 2] == 0x00 && bytes[index + 3] == 0x01) {
-    *prefix_size = 4;
-    return true;
-  }
-  if (index + 3 <= bytes.size() && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
-      bytes[index + 2] == 0x01) {
-    *prefix_size = 3;
-    return true;
-  }
-  return false;
-}
-
 bool start_code_at(const uint8_t* bytes, size_t size, size_t index, size_t* prefix_size) {
   if (index + 4 <= size && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
       bytes[index + 2] == 0x00 && bytes[index + 3] == 0x01) {
     *prefix_size = 4;
     return true;
   }
-  if (index + 3 <= size && bytes[index] == 0x00 && bytes[index + 1] == 0x00 &&
-      bytes[index + 2] == 0x01) {
+  if (index + 3 <= size && bytes[index] == 0x00 && bytes[index + 1] == 0x00 && bytes[index + 2] == 0x01) {
     *prefix_size = 3;
     return true;
   }
@@ -115,20 +97,6 @@ bool contains_nal_type(const uint8_t* data, size_t size, uint8_t nal_type) {
       continue;
     }
     if (i + prefix < size && static_cast<uint8_t>(data[i + prefix] & 0x1f) == nal_type) {
-      return true;
-    }
-    i += prefix;
-  }
-  return false;
-}
-
-bool contains_nal_type(const std::vector<uint8_t>& bytes, uint8_t nal_type) {
-  for (size_t i = 0; i < bytes.size(); ++i) {
-    size_t prefix = 0;
-    if (!start_code_at(bytes, i, &prefix)) {
-      continue;
-    }
-    if (i + prefix < bytes.size() && static_cast<uint8_t>(bytes[i + prefix] & 0x1f) == nal_type) {
       return true;
     }
     i += prefix;
@@ -193,143 +161,54 @@ struct AvBsfContextDeleter {
   }
 };
 
-class RawToH264Pipeline final : public IRawVideoPipeline {
+void set_error_value(std::string* error_message, const std::string& value) {
+  if (error_message != nullptr) {
+    *error_message = value;
+  }
+}
+
+const AVCodec* find_libav_h264_encoder(RawH264Encoder encoder) {
+  switch (encoder) {
+    case RawH264Encoder::LibX264:
+      return avcodec_find_encoder_by_name("libx264");
+    case RawH264Encoder::LibOpenH264:
+      return avcodec_find_encoder_by_name("libopenh264");
+    case RawH264Encoder::Automatic: {
+      const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
+      if (codec != nullptr) {
+        return codec;
+      }
+      codec = avcodec_find_encoder_by_name("libopenh264");
+      if (codec != nullptr) {
+        return codec;
+      }
+      return avcodec_find_encoder(AV_CODEC_ID_H264);
+    }
+  }
+  return nullptr;
+}
+
+class LibavH264EncoderBackend final : public IRawH264EncoderBackend {
  public:
-  RawToH264Pipeline(std::string stream_id, RawVideoPipelineConfig config, EncodedAccessUnitSink sink)
+  LibavH264EncoderBackend(std::string stream_id, RawVideoPipelineConfig config, EncodedAccessUnitSink sink)
       : stream_id_(std::move(stream_id)), config_(std::move(config)), sink_(std::move(sink)) {}
 
-  ~RawToH264Pipeline() override { stop(); }
+  ~LibavH264EncoderBackend() override { close(); }
 
-  const std::string& stream_id() const override { return stream_id_; }
+  bool open(std::string* error_message = nullptr) override {
+    close();
 
-  bool start(std::string* error_message = nullptr) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (running_) {
-      return true;
-    }
-    if (!validate_config(error_message)) {
-      return false;
-    }
-    if (!initialize_encoder_locked(error_message)) {
-      return false;
-    }
-    failed_ = false;
-    last_error_.clear();
-    running_ = true;
-    return true;
-  }
-
-  bool push_frame(const VideoFrameView& frame, std::string* error_message = nullptr) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_) {
-      set_error_value(error_message, failed_ && !last_error_.empty() ? last_error_ : "pipeline is not running");
-      return false;
-    }
-    if (failed_) {
-      set_error_value(error_message, last_error_);
-      return false;
-    }
-    if (!validate_frame(frame, error_message)) {
-      return false;
-    }
-    if (should_drop_frame_locked(frame.timestamp_ns)) {
-      return true;
-    }
-    if (!encode_frame_locked(frame, error_message)) {
-      fail_pipeline_locked();
-      return false;
-    }
-    return true;
-  }
-
-  void stop() override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_ && !codec_context_ && !bitstream_filter_) {
-      return;
-    }
-    if (!failed_ && codec_context_) {
-      std::string ignored_error;
-      if (!flush_encoder_locked(&ignored_error)) {
-        fail_pipeline_locked();
-      }
-    }
-    release_encoder_locked();
-    running_ = false;
-  }
-
- private:
-  bool validate_config(std::string* error_message) {
-    if (stream_id_.empty()) {
-      set_error_locked("stream_id is required", error_message);
-      return false;
-    }
-    if (!sink_) {
-      set_error_locked("encoded access-unit sink is required", error_message);
-      return false;
-    }
-    if (config_.input_width == 0 || config_.input_height == 0 || config_.input_fps <= 0.0) {
-      set_error_locked("input dimensions and fps must be valid", error_message);
-      return false;
-    }
-    if (pixel_format_to_av(config_.input_pixel_format) == AV_PIX_FMT_NONE) {
-      set_error_locked("unsupported libav input pixel format", error_message);
-      return false;
-    }
-    if (config_.scale_mode == RawPipelineScaleMode::Resize) {
-      if (!config_.output_width.has_value() || !config_.output_height.has_value() ||
-          *config_.output_width == 0 || *config_.output_height == 0) {
-        set_error_locked("resize mode requires output width and height", error_message);
-        return false;
-      }
-    }
-    if (config_.output_fps.has_value() && *config_.output_fps <= 0.0) {
-      set_error_locked("output_fps must be > 0 when provided", error_message);
-      return false;
-    }
-    return true;
-  }
-
-  bool validate_frame(const VideoFrameView& frame, std::string* error_message) const {
-    if (frame.data == nullptr || frame.width != config_.input_width || frame.height != config_.input_height ||
-        frame.pixel_format != config_.input_pixel_format) {
-      set_error_value(error_message, "frame does not match pipeline input contract");
-      return false;
-    }
-    if (!is_planar_pixel_format(frame.pixel_format)) {
-      const uint32_t min_stride = config_.input_width * bytes_per_pixel(frame.pixel_format);
-      if (frame.stride_bytes < min_stride) {
-        set_error_value(error_message, "frame stride is too small");
-        return false;
-      }
-      if (frame.stride_bytes != min_stride) {
-        set_error_value(error_message, "pipeline currently requires tightly packed raw frames");
-        return false;
-      }
-      return true;
-    }
-    if (frame.stride_bytes != 0) {
-      set_error_value(error_message, "planar frame views must use tightly packed default layout (stride_bytes=0)");
-      return false;
-    }
-    return true;
-  }
-
-  bool initialize_encoder_locked(std::string* error_message) {
-    const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
+    const AVCodec* codec = find_libav_h264_encoder(config_.encoder);
     if (codec == nullptr) {
-      codec = avcodec_find_encoder_by_name("libopenh264");
-    }
-    if (codec == nullptr) {
-      codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    }
-    if (codec == nullptr) {
-      set_error_locked("failed to locate a libav H264 encoder (tried libx264, libopenh264, then AV_CODEC_ID_H264)", error_message);
+      set_error_value(error_message,
+                      "failed to locate requested libav H264 encoder for mode '" + std::string(to_string(config_.encoder)) +
+                          "'");
       return false;
     }
 
     std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context(avcodec_alloc_context3(codec));
     if (!codec_context) {
-      set_error_locked("failed to allocate libav codec context", error_message);
+      set_error_value(error_message, "failed to allocate libav codec context");
       return false;
     }
 
@@ -357,52 +236,54 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     codec_context->max_b_frames = 0;
     codec_context->thread_count = 1;
 
-    const std::string codec_name = codec->name != nullptr ? codec->name : "";
-    const bool is_x264_family = codec_name.find("x264") != std::string::npos;
-    av_opt_set(codec_context->priv_data, "preset", config_.encoder_preset.c_str(), 0);
-    av_opt_set(codec_context->priv_data, "tune", config_.encoder_tune.c_str(), 0);
-    if (is_x264_family) {
-      av_opt_set(codec_context->priv_data, "profile", config_.encoder_profile.c_str(), 0);
-      av_opt_set(codec_context->priv_data, "scenecut", "0", 0);
+    selected_encoder_name_ = codec->name != nullptr ? codec->name : "unknown";
+    encoder_options_ = build_libav_h264_encoder_backend_options(config_, selected_encoder_name_);
+    if (encoder_options_.family == RawH264EncoderFamily::OpenH264) {
+      codec_context->profile = AV_PROFILE_H264_MAIN;
     }
-    av_opt_set(codec_context->priv_data, "repeat-headers", config_.repeat_headers ? "1" : "0", 0);
-    av_opt_set(codec_context->priv_data, "aud", config_.emit_access_unit_delimiters ? "1" : "0", 0);
+    if (encoder_options_.set_constrained_baseline_profile) {
+      codec_context->profile = AV_PROFILE_H264_CONSTRAINED_BASELINE;
+    }
+    for (const auto& option : encoder_options_.private_options) {
+      av_opt_set(codec_context->priv_data, option.key.c_str(), option.value.c_str(), 0);
+    }
 
     int rc = avcodec_open2(codec_context.get(), codec, nullptr);
     if (rc < 0) {
-      set_error_locked("failed to initialize libav H264 encoder: " + av_error_string(rc), error_message);
+      set_error_value(error_message, "failed to initialize libav H264 encoder '" + selected_encoder_name_ +
+                                         "': " + av_error_string(rc));
       return false;
     }
 
     const AVBitStreamFilter* filter = av_bsf_get_by_name("h264_mp4toannexb");
     if (filter == nullptr) {
-      set_error_locked("failed to locate libav h264_mp4toannexb bitstream filter", error_message);
+      set_error_value(error_message, "failed to locate libav h264_mp4toannexb bitstream filter");
       return false;
     }
     std::unique_ptr<AVBSFContext, AvBsfContextDeleter> bitstream_filter;
     AVBSFContext* raw_bsf = nullptr;
     rc = av_bsf_alloc(filter, &raw_bsf);
     if (rc < 0 || raw_bsf == nullptr) {
-      set_error_locked("failed to allocate libav bitstream filter context: " + av_error_string(rc), error_message);
+      set_error_value(error_message, "failed to allocate libav bitstream filter context: " + av_error_string(rc));
       return false;
     }
     bitstream_filter.reset(raw_bsf);
     rc = avcodec_parameters_from_context(bitstream_filter->par_in, codec_context.get());
     if (rc < 0) {
-      set_error_locked("failed to seed bitstream filter codec parameters: " + av_error_string(rc), error_message);
+      set_error_value(error_message, "failed to seed bitstream filter codec parameters: " + av_error_string(rc));
       return false;
     }
     bitstream_filter->time_base_in = codec_context->time_base;
     rc = av_bsf_init(bitstream_filter.get());
     if (rc < 0) {
-      set_error_locked("failed to initialize libav h264_mp4toannexb filter: " + av_error_string(rc), error_message);
+      set_error_value(error_message, "failed to initialize libav h264_mp4toannexb filter: " + av_error_string(rc));
       return false;
     }
 
     std::unique_ptr<AVFrame, AvFrameDeleter> input_frame(av_frame_alloc());
     std::unique_ptr<AVFrame, AvFrameDeleter> encoder_frame(av_frame_alloc());
     if (!input_frame || !encoder_frame) {
-      set_error_locked("failed to allocate libav frames", error_message);
+      set_error_value(error_message, "failed to allocate libav frames");
       return false;
     }
 
@@ -415,7 +296,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     encoder_frame->height = codec_context->height;
     rc = av_frame_get_buffer(encoder_frame.get(), 32);
     if (rc < 0) {
-      set_error_locked("failed to allocate encoder frame buffer: " + av_error_string(rc), error_message);
+      set_error_value(error_message, "failed to allocate encoder frame buffer: " + av_error_string(rc));
       return false;
     }
 
@@ -424,23 +305,17 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
         pixel_format_to_av(config_.input_pixel_format), codec_context->width, codec_context->height,
         codec_context->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr));
     if (!sws_context) {
-      set_error_locked("failed to initialize libswscale conversion context", error_message);
+      set_error_value(error_message, "failed to initialize libswscale conversion context");
       return false;
     }
 
     std::unique_ptr<AVPacket, AvPacketDeleter> packet(av_packet_alloc());
     std::unique_ptr<AVPacket, AvPacketDeleter> filtered_packet(av_packet_alloc());
     if (!packet || !filtered_packet) {
-      set_error_locked("failed to allocate libav packets", error_message);
+      set_error_value(error_message, "failed to allocate libav packets");
       return false;
     }
 
-    output_width_ = output_width;
-    output_height_ = output_height;
-    fps_filter_interval_ns_ = config_.output_fps.has_value()
-                                  ? static_cast<uint64_t>(std::llround(1000000000.0 / *config_.output_fps))
-                                  : 0;
-    next_allowed_timestamp_ns_ = 0;
     next_frame_index_ = 0;
     codec_context_ = std::move(codec_context);
     bitstream_filter_ = std::move(bitstream_filter);
@@ -452,7 +327,35 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     return true;
   }
 
-  void release_encoder_locked() {
+  bool encode_frame(const VideoFrameView& frame, std::string* error_message = nullptr) override {
+    if (!is_open()) {
+      set_error_value(error_message, "encoder backend is not open");
+      return false;
+    }
+    if (!populate_input_frame(frame, error_message)) {
+      return false;
+    }
+    const int rc = avcodec_send_frame(codec_context_.get(), encoder_frame_.get());
+    if (rc < 0) {
+      set_error_value(error_message, "libav encoder send_frame failed: " + av_error_string(rc));
+      return false;
+    }
+    return drain_encoder(error_message);
+  }
+
+  bool flush(std::string* error_message = nullptr) override {
+    if (!is_open()) {
+      return true;
+    }
+    const int rc = avcodec_send_frame(codec_context_.get(), nullptr);
+    if (rc < 0 && rc != AVERROR_EOF) {
+      set_error_value(error_message, "libav encoder flush send_frame failed: " + av_error_string(rc));
+      return false;
+    }
+    return drain_encoder(error_message);
+  }
+
+  void close() override {
     filtered_packet_.reset();
     packet_.reset();
     sws_context_.reset();
@@ -460,20 +363,17 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     input_frame_.reset();
     bitstream_filter_.reset();
     codec_context_.reset();
+    selected_encoder_name_.clear();
+    encoder_options_ = {};
   }
 
-  bool should_drop_frame_locked(uint64_t timestamp_ns) {
-    if (fps_filter_interval_ns_ == 0) {
-      return false;
-    }
-    if (next_allowed_timestamp_ns_ == 0 || timestamp_ns >= next_allowed_timestamp_ns_) {
-      next_allowed_timestamp_ns_ = timestamp_ns + fps_filter_interval_ns_;
-      return false;
-    }
-    return true;
-  }
+  bool is_open() const override { return codec_context_ != nullptr; }
+  const char* backend_name() const override { return "libav_h264"; }
+  const char* encoder_name() const override { return selected_encoder_name_.c_str(); }
+  RawH264EncoderFamily encoder_family() const override { return encoder_options_.family; }
 
-  bool populate_input_frame_locked(const VideoFrameView& frame, std::string* error_message) {
+ private:
+  bool populate_input_frame(const VideoFrameView& frame, std::string* error_message) {
     input_frame_->pts = static_cast<int64_t>(next_frame_index_);
     const uint8_t* data = static_cast<const uint8_t*>(frame.data);
     const int width = static_cast<int>(frame.width);
@@ -512,13 +412,13 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     }
     int rc = av_frame_make_writable(encoder_frame_.get());
     if (rc < 0) {
-      set_error_locked("failed to prepare encoder frame buffer: " + av_error_string(rc), error_message);
+      set_error_value(error_message, "failed to prepare encoder frame buffer: " + av_error_string(rc));
       return false;
     }
-    rc = sws_scale(sws_context_.get(), input_frame_->data, input_frame_->linesize, 0, height,
-                   encoder_frame_->data, encoder_frame_->linesize);
+    rc = sws_scale(sws_context_.get(), input_frame_->data, input_frame_->linesize, 0, height, encoder_frame_->data,
+                   encoder_frame_->linesize);
     if (rc <= 0) {
-      set_error_locked("libswscale failed to convert raw frame into encoder format", error_message);
+      set_error_value(error_message, "libswscale failed to convert raw frame into encoder format");
       return false;
     }
     encoder_frame_->pts = rescale_timestamp_ns_to_pts(frame.timestamp_ns, codec_context_->time_base);
@@ -529,38 +429,17 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     return true;
   }
 
-  bool encode_frame_locked(const VideoFrameView& frame, std::string* error_message) {
-    if (!populate_input_frame_locked(frame, error_message)) {
-      return false;
-    }
-    int rc = avcodec_send_frame(codec_context_.get(), encoder_frame_.get());
-    if (rc < 0) {
-      set_error_locked("libav encoder send_frame failed: " + av_error_string(rc), error_message);
-      return false;
-    }
-    return drain_encoder_locked(error_message);
-  }
-
-  bool flush_encoder_locked(std::string* error_message) {
-    const int rc = avcodec_send_frame(codec_context_.get(), nullptr);
-    if (rc < 0 && rc != AVERROR_EOF) {
-      set_error_locked("libav encoder flush send_frame failed: " + av_error_string(rc), error_message);
-      return false;
-    }
-    return drain_encoder_locked(error_message, true);
-  }
-
-  bool drain_encoder_locked(std::string* error_message, bool flushing = false) {
+  bool drain_encoder(std::string* error_message) {
     while (true) {
       int rc = avcodec_receive_packet(codec_context_.get(), packet_.get());
       if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
         return true;
       }
       if (rc < 0) {
-        set_error_locked("libav encoder receive_packet failed: " + av_error_string(rc), error_message);
+        set_error_value(error_message, "libav encoder receive_packet failed: " + av_error_string(rc));
         return false;
       }
-      const bool ok = submit_packet_locked(packet_.get(), error_message, flushing);
+      const bool ok = submit_packet(packet_.get(), error_message);
       av_packet_unref(packet_.get());
       if (!ok) {
         return false;
@@ -568,27 +447,23 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     }
   }
 
-  bool submit_packet_locked(AVPacket* packet, std::string* error_message, bool flushing) {
+  bool submit_packet(AVPacket* packet, std::string* error_message) {
     int rc = av_bsf_send_packet(bitstream_filter_.get(), packet);
     if (rc < 0) {
-      set_error_locked("failed to push H264 packet through Annex-B bitstream filter: " + av_error_string(rc),
-                       error_message);
+      set_error_value(error_message,
+                      "failed to push H264 packet through Annex-B bitstream filter: " + av_error_string(rc));
       return false;
     }
     while (true) {
       rc = av_bsf_receive_packet(bitstream_filter_.get(), filtered_packet_.get());
       if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
-        if (flushing) {
-          return true;
-        }
         return true;
       }
       if (rc < 0) {
-        set_error_locked("failed to read Annex-B packet from bitstream filter: " + av_error_string(rc),
-                         error_message);
+        set_error_value(error_message, "failed to read Annex-B packet from bitstream filter: " + av_error_string(rc));
         return false;
       }
-      if (!emit_access_unit_locked(filtered_packet_.get(), error_message)) {
+      if (!emit_access_unit(filtered_packet_.get(), error_message)) {
         av_packet_unref(filtered_packet_.get());
         return false;
       }
@@ -596,7 +471,7 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     }
   }
 
-  bool emit_access_unit_locked(const AVPacket* packet, std::string* error_message) {
+  bool emit_access_unit(const AVPacket* packet, std::string* error_message) {
     EncodedAccessUnitView view{};
     view.data = packet->data;
     view.size_bytes = static_cast<size_t>(packet->size);
@@ -607,47 +482,21 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
     view.codec_config = contains_nal_type(packet->data, view.size_bytes, kNalTypeSps) &&
                         contains_nal_type(packet->data, view.size_bytes, kNalTypePps) && !view.keyframe;
     if (!sink_(view)) {
-      set_error_locked(
-          "encoded access-unit sink rejected H264 access unit for stream '" + stream_id_ +
-              "'; pipeline will stop and reject later push_frame() calls",
-          error_message);
+      set_error_value(error_message,
+                      "encoded access-unit sink rejected H264 access unit for stream '" + stream_id_ +
+                          "'; pipeline will stop and reject later push_frame() calls");
       return false;
     }
     return true;
-  }
-
-  void fail_pipeline_locked() {
-    failed_ = true;
-    running_ = false;
-    release_encoder_locked();
-  }
-
-  void set_error_locked(const std::string& value, std::string* error_message) {
-    last_error_ = value;
-    set_error_value(error_message, value);
-  }
-
-  static void set_error_value(std::string* error_message, const std::string& value) {
-    if (error_message != nullptr) {
-      *error_message = value;
-    }
   }
 
   const std::string stream_id_;
   const RawVideoPipelineConfig config_;
   EncodedAccessUnitSink sink_;
 
-  mutable std::mutex mutex_;
-  bool running_{false};
-  bool failed_{false};
-  std::string last_error_;
-
-  uint32_t output_width_{0};
-  uint32_t output_height_{0};
-  uint64_t fps_filter_interval_ns_{0};
-  uint64_t next_allowed_timestamp_ns_{0};
   uint64_t next_frame_index_{0};
-
+  std::string selected_encoder_name_;
+  RawH264EncoderBackendOptions encoder_options_;
   std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context_;
   std::unique_ptr<AVBSFContext, AvBsfContextDeleter> bitstream_filter_;
   std::unique_ptr<AVFrame, AvFrameDeleter> input_frame_;
@@ -657,7 +506,202 @@ class RawToH264Pipeline final : public IRawVideoPipeline {
   std::unique_ptr<AVPacket, AvPacketDeleter> filtered_packet_;
 };
 
+class RawToH264Pipeline final : public IRawVideoPipeline {
+ public:
+  RawToH264Pipeline(std::string stream_id, RawVideoPipelineConfig config, EncodedAccessUnitSink sink)
+      : stream_id_(std::move(stream_id)),
+        config_(std::move(config)),
+        sink_(std::move(sink)),
+        encoder_backend_(make_raw_h264_encoder_backend(stream_id_, config_, sink_)) {}
+
+  ~RawToH264Pipeline() override { stop(); }
+
+  const std::string& stream_id() const override { return stream_id_; }
+
+  bool start(std::string* error_message = nullptr) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (running_) {
+      return true;
+    }
+    if (!validate_config(error_message)) {
+      return false;
+    }
+    if (!encoder_backend_->open(error_message)) {
+      set_error_locked(error_message != nullptr ? *error_message : std::string("failed to open encoder backend"), error_message);
+      return false;
+    }
+    failed_ = false;
+    last_error_.clear();
+    fps_filter_interval_ns_ = config_.output_fps.has_value()
+                                  ? static_cast<uint64_t>(std::llround(1000000000.0 / *config_.output_fps))
+                                  : 0;
+    next_allowed_timestamp_ns_ = 0;
+    running_ = true;
+    return true;
+  }
+
+  bool push_frame(const VideoFrameView& frame, std::string* error_message = nullptr) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_) {
+      set_error_value(error_message, failed_ && !last_error_.empty() ? last_error_ : "pipeline is not running");
+      return false;
+    }
+    if (failed_) {
+      set_error_value(error_message, last_error_);
+      return false;
+    }
+    if (!validate_frame(frame, error_message)) {
+      return false;
+    }
+    if (should_drop_frame_locked(frame.timestamp_ns)) {
+      return true;
+    }
+    if (!encoder_backend_->encode_frame(frame, error_message)) {
+      set_error_locked(error_message != nullptr ? *error_message : std::string("encoder backend failed"), error_message);
+      fail_pipeline_locked();
+      return false;
+    }
+    return true;
+  }
+
+  void stop() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_ && !encoder_backend_->is_open()) {
+      return;
+    }
+    if (!failed_ && encoder_backend_->is_open()) {
+      std::string ignored_error;
+      if (!encoder_backend_->flush(&ignored_error)) {
+        set_error_locked(ignored_error, nullptr);
+        fail_pipeline_locked();
+      }
+    }
+    encoder_backend_->close();
+    running_ = false;
+  }
+
+ private:
+  bool validate_config(std::string* error_message) {
+    if (stream_id_.empty()) {
+      set_error_locked("stream_id is required", error_message);
+      return false;
+    }
+    if (!sink_) {
+      set_error_locked("encoded access-unit sink is required", error_message);
+      return false;
+    }
+    if (config_.input_width == 0 || config_.input_height == 0 || config_.input_fps <= 0.0) {
+      set_error_locked("input dimensions and fps must be valid", error_message);
+      return false;
+    }
+    if (pixel_format_to_av(config_.input_pixel_format) == AV_PIX_FMT_NONE) {
+      set_error_locked("unsupported libav input pixel format", error_message);
+      return false;
+    }
+    if (config_.scale_mode == RawPipelineScaleMode::Resize) {
+      if (!config_.output_width.has_value() || !config_.output_height.has_value() || *config_.output_width == 0 ||
+          *config_.output_height == 0) {
+        set_error_locked("resize mode requires output width and height", error_message);
+        return false;
+      }
+    }
+    if (config_.output_fps.has_value() && *config_.output_fps <= 0.0) {
+      set_error_locked("output_fps must be > 0 when provided", error_message);
+      return false;
+    }
+    return true;
+  }
+
+  bool validate_frame(const VideoFrameView& frame, std::string* error_message) const {
+    if (frame.data == nullptr || frame.width != config_.input_width || frame.height != config_.input_height ||
+        frame.pixel_format != config_.input_pixel_format) {
+      set_error_value(error_message, "frame does not match pipeline input contract");
+      return false;
+    }
+    if (!is_planar_pixel_format(frame.pixel_format)) {
+      const uint32_t min_stride = config_.input_width * bytes_per_pixel(frame.pixel_format);
+      if (frame.stride_bytes < min_stride) {
+        set_error_value(error_message, "frame stride is too small");
+        return false;
+      }
+      if (frame.stride_bytes != min_stride) {
+        set_error_value(error_message, "pipeline currently requires tightly packed raw frames");
+        return false;
+      }
+      return true;
+    }
+    if (frame.stride_bytes != 0) {
+      set_error_value(error_message, "planar frame views must use tightly packed default layout (stride_bytes=0)");
+      return false;
+    }
+    return true;
+  }
+
+  bool should_drop_frame_locked(uint64_t timestamp_ns) {
+    if (fps_filter_interval_ns_ == 0) {
+      return false;
+    }
+    if (next_allowed_timestamp_ns_ == 0 || timestamp_ns >= next_allowed_timestamp_ns_) {
+      next_allowed_timestamp_ns_ = timestamp_ns + fps_filter_interval_ns_;
+      return false;
+    }
+    return true;
+  }
+
+  void fail_pipeline_locked() {
+    failed_ = true;
+    running_ = false;
+    encoder_backend_->close();
+  }
+
+  void set_error_locked(const std::string& value, std::string* error_message) {
+    last_error_ = value;
+    set_error_value(error_message, value);
+  }
+
+  const std::string stream_id_;
+  const RawVideoPipelineConfig config_;
+  EncodedAccessUnitSink sink_;
+  std::unique_ptr<IRawH264EncoderBackend> encoder_backend_;
+
+  mutable std::mutex mutex_;
+  bool running_{false};
+  bool failed_{false};
+  std::string last_error_;
+  uint64_t fps_filter_interval_ns_{0};
+  uint64_t next_allowed_timestamp_ns_{0};
+};
+
 }  // namespace
+
+RawH264EncoderBackendOptions build_libav_h264_encoder_backend_options(const RawVideoPipelineConfig& config,
+                                                                      const std::string& codec_name) {
+  RawH264EncoderBackendOptions options;
+  if (codec_name.find("x264") != std::string::npos) {
+    options.family = RawH264EncoderFamily::X264;
+    options.profile_name = config.encoder_profile;
+    options.private_options.push_back({"preset", config.encoder_preset});
+    options.private_options.push_back({"tune", config.encoder_tune});
+    options.private_options.push_back({"profile", config.encoder_profile});
+    options.private_options.push_back({"scenecut", "0"});
+    options.private_options.push_back({"repeat-headers", config.repeat_headers ? "1" : "0"});
+    options.private_options.push_back({"aud", config.emit_access_unit_delimiters ? "1" : "0"});
+    return options;
+  }
+  if (codec_name.find("openh264") != std::string::npos) {
+    options.family = RawH264EncoderFamily::OpenH264;
+    options.private_options.push_back({"allow_skip_frames", "1"});
+    return options;
+  }
+  options.family = RawH264EncoderFamily::Generic;
+  return options;
+}
+
+std::unique_ptr<IRawH264EncoderBackend> make_raw_h264_encoder_backend(std::string stream_id,
+                                                                      RawVideoPipelineConfig config,
+                                                                      EncodedAccessUnitSink sink) {
+  return std::make_unique<LibavH264EncoderBackend>(std::move(stream_id), std::move(config), std::move(sink));
+}
 
 std::unique_ptr<IRawVideoPipeline> make_raw_to_h264_pipeline(std::string stream_id,
                                                              RawVideoPipelineConfig config,
@@ -682,6 +726,30 @@ const char* to_string(RawPipelineScaleMode scale_mode) {
       return "Passthrough";
     case RawPipelineScaleMode::Resize:
       return "Resize";
+  }
+  return "Unknown";
+}
+
+const char* to_string(RawH264Encoder encoder) {
+  switch (encoder) {
+    case RawH264Encoder::Automatic:
+      return "Automatic";
+    case RawH264Encoder::LibX264:
+      return "LibX264";
+    case RawH264Encoder::LibOpenH264:
+      return "LibOpenH264";
+  }
+  return "Unknown";
+}
+
+const char* to_string(RawH264EncoderFamily family) {
+  switch (family) {
+    case RawH264EncoderFamily::X264:
+      return "X264";
+    case RawH264EncoderFamily::OpenH264:
+      return "OpenH264";
+    case RawH264EncoderFamily::Generic:
+      return "Generic";
   }
   return "Unknown";
 }
