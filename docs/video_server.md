@@ -86,8 +86,8 @@ Current first-pass flow:
 1. a raw producer generates `VideoFrameView` input
 2. an `IRawVideoPipeline` instance is explicitly bound to a `stream_id`
 3. the pipeline optionally applies in-process resize / fps filtering and any required pixel-format conversion
-4. the libav encoder backend produces H264 packets that are normalized to Annex-B
-5. the pipeline re-assembles Annex-B output into encoded access units
+4. the pipeline delegates raw-frame encoding to an internal `IRawH264EncoderBackend` seam
+5. the current `LibavH264EncoderBackend` implementation produces H264 packets and normalizes them to Annex-B access units
 6. the pipeline forwards each encoded access unit into the existing `push_access_unit(...)` path (or a sink that ultimately lands there)
 7. the already-existing encoded/WebRTC path delivers H264 onward to browser sessions
 
@@ -95,14 +95,14 @@ Current first-pass flow:
 
 The new public pipeline surface is intentionally separate from `IVideoServer`:
 
-- `RawVideoPipelineConfig`: tightly-packed raw input contract, optional resize, optional output fps, encoder knobs, plus a legacy no-op ffmpeg_path compatibility field
+- `RawVideoPipelineConfig`: tightly-packed raw input contract, optional resize, optional output fps, explicit H264 encoder selection, and a small set of encoder knobs that are applied only when supported by the active encoder family
 - `IRawVideoPipeline`: `start()`, `push_frame()`, `stop()`, and explicit `stream_id()` binding
 - `make_raw_to_h264_pipeline(...)`: build a pipeline with an arbitrary encoded-unit sink
 - `make_raw_to_h264_pipeline_for_server(...)`: bind encoded output directly into an `IVideoServer` stream through `push_access_unit(...)`
 
 ### First backend choice
 
-The first functional backend now uses in-process libavcodec/libswscale primitives. That keeps the architecture intact while removing the shell-out bridge from the primary path:
+The first functional backend now uses in-process libavcodec/libswscale primitives behind `IRawH264EncoderBackend`. That keeps the architecture intact while removing the shell-out bridge from the primary path:
 
 - practical to implement quickly
 - already aligned with the repo's smoke tooling
@@ -116,15 +116,16 @@ The first functional backend now uses in-process libavcodec/libswscale primitive
 - resize via libswscale
 - output frame-rate control via pipeline-side admission throttling based on frame timestamps
 - pixel-format conversion to encoder output `yuv420p`
+- explicit encoder-family-specific option handling: libx264-family encoders receive preset/tune/profile/AUD knobs, while OpenH264 is opened with a main-profile + skip-frame-compatible configuration that it accepts without startup warnings
 
-This is intentionally minimal and designed for extension rather than a large initial filter framework. `emit_access_unit_delimiters` is now a best-effort encoder knob: when the encoder supports AUDs they are requested, but Annex-B access-unit handoff no longer depends on AUD-delimited splitting.
+This is intentionally minimal and designed for extension rather than a large initial filter framework. `emit_access_unit_delimiters` remains a best-effort encoder knob for encoder families that support AUD emission, but Annex-B access-unit handoff no longer depends on AUD-delimited splitting.
 
 ### Lifecycle behavior
 
 The pipeline owns the in-process encoder lifecycle:
 
-- `start()` validates config, initializes libavcodec/libswscale state, and prepares an Annex-B bitstream filter
-- `push_frame()` validates the raw frame contract, performs pixel-format conversion/scaling, optionally drops frames to honor `output_fps`, and submits the frame directly to the encoder
+- `start()` validates config, opens the selected encoder backend, and prepares its libavcodec/libswscale state plus Annex-B normalization
+- `push_frame()` validates the raw frame contract, performs pipeline-side frame dropping to honor `output_fps`, and then submits the frame through the encoder backend seam
 - each encoded packet is converted to Annex-B, treated as a complete H264 access unit, and forwarded to the encoded sink
 - if the encoded sink rejects an access unit, the pipeline records a failure, tears down the encoder state for that stream, and surfaces the failure on later `push_frame()` calls
 - `stop()` flushes pending packets when possible and tears down the in-process encoder/bitstream-filter state cleanly
@@ -136,7 +137,7 @@ The NiceGUI smoke server now exercises the shared pipeline with synthetic raw fr
 ### What remains for future hardening
 
 - broaden stride normalization and richer raw preprocess filter support
-- improve encoder-specific option/capability reporting when libx264-style knobs are unavailable
+- improve encoder-specific option/capability reporting for additional future backends
 - extend long-run timestamp and buffering validation under heavier load
 - evaluate additional encoder backends (for example hardware encoders) behind the same abstraction
 

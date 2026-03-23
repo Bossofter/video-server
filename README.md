@@ -8,7 +8,7 @@ Portable C++17 video streaming subsystem focused on a stable producer-facing API
 - Core in-memory stream state management, latest-frame snapshots, latest encoded H264 access-unit snapshots, and stats updates.
 - Modular output/display transform stage with runtime display mode configuration and rotation/mirroring support.
 - WebRTC backend shell (`WebRtcVideoServer`) with lightweight HTTP/signaling control surface, a real encoded-media bridge path for H264 access units, and a first session-side H264 sender architecture.
-- New raw-to-H264 bridge pipeline layer (`IRawVideoPipeline` / `RawVideoPipelineConfig`) that feeds encoded Annex-B access units into the existing `push_access_unit(...)` server path through an in-process libav encoder backend.
+- New raw-to-H264 bridge pipeline layer (`IRawVideoPipeline` / `RawVideoPipelineConfig`) that feeds encoded Annex-B access units into the existing `push_access_unit(...)` server path through an explicit in-process H264 encoder backend seam with the current libav implementation behind it.
 - Internal synthetic frame generator for server-side validation without external producers.
 - CMake + vcpkg manifest + tests.
 
@@ -96,7 +96,7 @@ The repo now includes a first-pass `IRawVideoPipeline` abstraction in `include/v
 
 - raw frame ingestion (`push_frame`)
 - optional raw filter/transform policy (`RawVideoPipelineConfig`)
-- raw-to-H264 encoding (in-process libav backend)
+- raw-to-H264 encoding (current libav H264 backend behind an internal encoder seam)
 - existing encoded access-unit ingestion (`push_access_unit`)
 - existing WebRTC/browser delivery
 
@@ -107,7 +107,8 @@ Current first-pass pipeline capabilities:
 - optional output FPS throttling inside the libav-backed pipeline
 - automatic pixel-format conversion and scaling to encoder-friendly `yuv420p` using libswscale
 - H264 Annex-B access-unit emission per encoded packet and forwarding through the existing encoded path
-- optional AUD/repeat-header encoder knobs, with Annex-B access units normalized through a libav bitstream filter before handoff
+- explicit H264 encoder selection (`Automatic`, `LibX264`, or `LibOpenH264`)
+- optional AUD/repeat-header encoder knobs for libx264-family encoders, with Annex-B access units normalized through a libav bitstream filter before handoff
 - explicit stream binding via `make_raw_to_h264_pipeline_for_server(stream_id, ..., server)`
 
 The NiceGUI smoke server now uses this shared in-process libav pipeline, so synthetic raw frames exercise the full path from raw production to browser-facing H264 delivery.
@@ -121,6 +122,6 @@ Current first-pass backend limits to keep in mind:
 What still remains for future hardening:
 
 - broader stride support for non-tightly-packed raw frame inputs and more advanced filters
-- richer encoder capability negotiation and observability for non-libx264 H264 encoders
+- richer encoder capability negotiation and observability for additional future encoder backends
 - stronger long-run timestamp/latency characterization under heavy buffering
-- alternative encoder backends beyond the initial libav implementation
+- alternative encoder backends beyond the current libav implementation

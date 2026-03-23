@@ -17,10 +17,13 @@ enum class RawPipelineScaleMode {
   Resize
 };
 
+enum class RawH264Encoder {
+  Automatic,
+  LibX264,
+  LibOpenH264
+};
+
 struct RawVideoPipelineConfig {
-  // Legacy compatibility field retained for callers that previously named an ffmpeg binary.
-  // The primary raw->H264 backend is now in-process libav-based, so this field is ignored.
-  std::string ffmpeg_path{"ffmpeg"};
   uint32_t input_width{0};
   uint32_t input_height{0};
   VideoPixelFormat input_pixel_format{VideoPixelFormat::RGB24};
@@ -29,6 +32,7 @@ struct RawVideoPipelineConfig {
   std::optional<uint32_t> output_width;
   std::optional<uint32_t> output_height;
   std::optional<double> output_fps;
+  RawH264Encoder encoder{RawH264Encoder::Automatic};
   std::string encoder_preset{"ultrafast"};
   std::string encoder_tune{"zerolatency"};
   std::string encoder_profile{"baseline"};
@@ -61,5 +65,6 @@ std::unique_ptr<IRawVideoPipeline> make_raw_to_h264_pipeline_for_server(std::str
                                                                         IVideoServer& server);
 
 const char* to_string(RawPipelineScaleMode scale_mode);
+const char* to_string(RawH264Encoder encoder);
 
 }  // namespace video_server

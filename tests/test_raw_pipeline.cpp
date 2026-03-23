@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "video_server/raw_video_pipeline.h"
+#include "raw_h264_encoder_backend.h"
 #include "video_server/stream_config.h"
 #include "video_server/video_frame_view.h"
 #include "video_server/video_types.h"
@@ -80,6 +81,58 @@ video_server::RawVideoPipelineConfig make_default_config(uint32_t width = 64, ui
   config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
   config.input_fps = fps;
   return config;
+}
+
+
+TEST(RawToH264PipelineTest, BuildsLibavBackendOptionsPerEncoderFamily) {
+  auto config = make_default_config();
+
+  const auto x264_options = video_server::build_libav_h264_encoder_backend_options(config, "libx264");
+  EXPECT_EQ(x264_options.family, video_server::RawH264EncoderFamily::X264);
+  EXPECT_FALSE(x264_options.set_constrained_baseline_profile);
+  EXPECT_TRUE(std::any_of(x264_options.private_options.begin(), x264_options.private_options.end(),
+                          [](const video_server::RawH264EncoderOption& option) { return option.key == "preset"; }));
+  EXPECT_TRUE(std::any_of(x264_options.private_options.begin(), x264_options.private_options.end(),
+                          [](const video_server::RawH264EncoderOption& option) { return option.key == "aud"; }));
+
+  const auto openh264_options = video_server::build_libav_h264_encoder_backend_options(config, "libopenh264");
+  EXPECT_EQ(openh264_options.family, video_server::RawH264EncoderFamily::OpenH264);
+  EXPECT_FALSE(openh264_options.set_constrained_baseline_profile);
+  EXPECT_TRUE(std::any_of(openh264_options.private_options.begin(), openh264_options.private_options.end(),
+                          [](const video_server::RawH264EncoderOption& option) {
+                            return option.key == "allow_skip_frames" && option.value == "1";
+                          }));
+  EXPECT_FALSE(std::any_of(openh264_options.private_options.begin(), openh264_options.private_options.end(),
+                           [](const video_server::RawH264EncoderOption& option) { return option.key == "preset"; }));
+  EXPECT_FALSE(std::any_of(openh264_options.private_options.begin(), openh264_options.private_options.end(),
+                           [](const video_server::RawH264EncoderOption& option) { return option.key == "aud"; }));
+}
+
+TEST(RawToH264PipelineTest, UsesEncoderBackendFactorySeamToProduceOutput) {
+  std::vector<std::vector<uint8_t>> access_units;
+  auto config = make_default_config();
+  auto backend = video_server::make_raw_h264_encoder_backend(
+      "backend-seam", config,
+      [&access_units](const video_server::EncodedAccessUnitView& access_unit) {
+        access_units.emplace_back(static_cast<const uint8_t*>(access_unit.data),
+                                  static_cast<const uint8_t*>(access_unit.data) + access_unit.size_bytes);
+        return true;
+      });
+
+  std::string error;
+  ASSERT_TRUE(backend->open(&error)) << error;
+  EXPECT_STREQ(backend->backend_name(), "libav_h264");
+  for (uint64_t i = 0; i < 12; ++i) {
+    auto frame = make_rgb_frame(config.input_width, config.input_height, i + 101);
+    ASSERT_TRUE(backend->encode_frame(
+        make_rgb_view(frame, config.input_width, config.input_height, 4000000000ull + i * 33333333ull, i + 1), &error))
+        << error;
+  }
+  ASSERT_TRUE(backend->flush(&error)) << error;
+  backend->close();
+
+  ASSERT_FALSE(access_units.empty());
+  EXPECT_TRUE(contains_start_code(access_units.front()));
 }
 
 TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromRawFrames) {
