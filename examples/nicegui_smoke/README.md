@@ -34,7 +34,7 @@ http://127.0.0.1:8090/
 
 By default, the smoke harness now launches a three-stream demo unless you explicitly pass single-stream sizing/id flags. `--multi-stream-demo` selects the same default set explicitly:
 
-- `alpha`: `640x360 @ 30 fps` with the sweep-style synthetic pattern
+- `alpha`: `640x360 @ 30 fps` with the sweep-style synthetic pattern generated as `GRAY8` so grayscale/palette config changes have a known-good demo stream
 - `bravo`: `1280x720 @ 30 fps` with the orbit-style synthetic pattern
 - `charlie`: `320x240 @ 30 fps` with the checker-style synthetic pattern
 

@@ -29,6 +29,7 @@ struct StreamSpec {
   uint32_t width{0};
   uint32_t height{0};
   double fps{0.0};
+  video_server::VideoPixelFormat pixel_format{video_server::VideoPixelFormat::RGB24};
 };
 
 struct Options {
@@ -100,9 +101,9 @@ std::optional<StreamSpec> parse_stream_spec(const std::string& value) {
 
 std::vector<StreamSpec> default_demo_streams() {
   return {
-      StreamSpec{"alpha", "Synthetic demo alpha sweep", 640, 360, 30.0},
-      StreamSpec{"bravo", "Synthetic demo bravo orbit", 1280, 720, 30.0},
-      StreamSpec{"charlie", "Synthetic demo charlie checker", 320, 240, 30.0},
+      StreamSpec{"alpha", "Synthetic demo alpha sweep grayscale", 640, 360, 30.0, video_server::VideoPixelFormat::GRAY8},
+      StreamSpec{"bravo", "Synthetic demo bravo orbit", 1280, 720, 30.0, video_server::VideoPixelFormat::RGB24},
+      StreamSpec{"charlie", "Synthetic demo charlie checker", 320, 240, 30.0, video_server::VideoPixelFormat::RGB24},
   };
 }
 
@@ -205,7 +206,7 @@ struct RunningStream {
   std::string pipeline_error;
 
   explicit RunningStream(const StreamSpec& spec)
-      : config{spec.stream_id, spec.label, spec.width, spec.height, spec.fps, video_server::VideoPixelFormat::RGB24},
+      : config{spec.stream_id, spec.label, spec.width, spec.height, spec.fps, spec.pixel_format},
         generator(config) {}
 };
 
@@ -243,7 +244,7 @@ int main(int argc, char** argv) {
   for (auto& stream : streams) {
     stream->pipeline_config.input_width = stream->config.width;
     stream->pipeline_config.input_height = stream->config.height;
-    stream->pipeline_config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
+    stream->pipeline_config.input_pixel_format = stream->config.input_pixel_format;
     stream->pipeline_config.input_fps = stream->config.nominal_fps;
     stream->pipeline = video_server::make_raw_to_h264_pipeline_for_server(stream->config.stream_id, stream->pipeline_config, server);
 
@@ -270,8 +271,9 @@ int main(int argc, char** argv) {
       }
     });
 
-    spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps", stream->config.stream_id, stream->config.label,
-                 stream->config.width, stream->config.height, stream->config.nominal_fps);
+    spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps input={}", stream->config.stream_id,
+                 stream->config.label, stream->config.width, stream->config.height, stream->config.nominal_fps,
+                 video_server::to_string(stream->config.input_pixel_format));
   }
 
   spdlog::info("[smoke-server] started HTTP/WebRTC server on http://{}:{} with {} stream(s)", options->host,

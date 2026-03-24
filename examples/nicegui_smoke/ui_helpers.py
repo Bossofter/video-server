@@ -21,7 +21,7 @@ def parse_stream_spec(value: str) -> dict[str, Any]:
 
 def default_demo_streams() -> list[dict[str, Any]]:
     return [
-        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha Sweep 640x360'},
+        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha Sweep Grayscale 640x360'},
         {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo Orbit 1280x720'},
         {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 30.0, 'label': 'Charlie Checker 320x240'},
     ]

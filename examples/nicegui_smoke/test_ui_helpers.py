@@ -48,6 +48,7 @@ class UiHelpersTest(unittest.TestCase):
 
     def test_selected_stream_spec_prefers_requested_stream(self) -> None:
         catalog = default_demo_streams()
+        self.assertEqual(catalog[0]['label'], 'Alpha Sweep Grayscale 640x360')
         self.assertEqual(selected_stream_spec(catalog, 'bravo'), catalog[1])
         self.assertEqual(selected_stream_spec(catalog, 'missing'), catalog[0])
         self.assertIsNone(selected_stream_spec([], 'missing'))

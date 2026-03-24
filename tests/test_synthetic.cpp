@@ -35,3 +35,17 @@ TEST(SyntheticFrameGeneratorTest, DifferentStreamsProduceDistinctPatternFamilies
   EXPECT_NE(std::memcmp(alpha_frame.data, charlie_frame.data, byte_count), 0);
   EXPECT_NE(std::memcmp(bravo_frame.data, charlie_frame.data, byte_count), 0);
 }
+
+TEST(SyntheticFrameGeneratorTest, SupportsGray8StreamsForPaletteFriendlySmokeInputs) {
+  video_server::StreamConfig cfg{"alpha", "Synthetic demo alpha sweep grayscale", 32, 24, 30.0,
+                                 video_server::VideoPixelFormat::GRAY8};
+  video_server::SyntheticFrameGenerator generator(cfg);
+
+  const auto frame = generator.next_frame();
+
+  ASSERT_NE(frame.data, nullptr);
+  EXPECT_EQ(frame.pixel_format, video_server::VideoPixelFormat::GRAY8);
+  EXPECT_EQ(frame.stride_bytes, cfg.width);
+  const auto* bytes = static_cast<const uint8_t*>(frame.data);
+  EXPECT_NE(bytes[0], bytes[1]);
+}

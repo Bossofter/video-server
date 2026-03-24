@@ -8,6 +8,8 @@
 #include <string>
 #include <unordered_map>
 
+#include <spdlog/spdlog.h>
+
 #include "../core/video_server_core.h"
 #include "frame_http_encoder.h"
 #include "http_api_server.h"
@@ -521,23 +523,35 @@ class WebRtcVideoServer::Impl {
         if (request.method == "GET") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
+            spdlog::debug("[api] config-get stream={} result=not-found", stream_id);
             return finalize(json_error(404, "stream not found"));
           }
+          const auto info = core_.get_stream_info(stream_id);
+          spdlog::debug("[api] config-get stream={} input_format={} current={}", stream_id,
+                        info.has_value() ? to_string(info->config.input_pixel_format) : "unknown",
+                        output_config_json(*cfg));
           return finalize(HttpResponse{200, output_config_json(*cfg), "application/json"});
         }
 
         if (request.method == "PUT") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
+            spdlog::debug("[api] config-put stream={} result=not-found body={}", stream_id, request.body);
             return finalize(json_error(404, "stream not found"));
           }
+          const auto info = core_.get_stream_info(stream_id);
+          spdlog::debug("[api] config-put stream={} input_format={} body={} current={}", stream_id,
+                        info.has_value() ? to_string(info->config.input_pixel_format) : "unknown", request.body,
+                        output_config_json(*cfg));
 
           if (request.body.empty()) {
+            spdlog::debug("[api] config-put stream={} result=invalid-empty-body", stream_id);
             return finalize(json_error(400, "invalid request body"));
           }
 
           std::unordered_map<std::string, JsonValue> body_values;
           if (!parse_flat_json_object(request.body, body_values)) {
+            spdlog::debug("[api] config-put stream={} result=invalid-json body={}", stream_id, request.body);
             return finalize(json_error(400, "invalid request body"));
           }
 
@@ -596,13 +610,18 @@ class WebRtcVideoServer::Impl {
           }
 
           if (!core_.set_stream_output_config(stream_id, updated)) {
+            spdlog::debug("[api] config-put stream={} result=invalid-output-config candidate={}", stream_id,
+                          output_config_json(updated));
             return finalize(json_error(400, "invalid output config; expected known filter and width/height 16..3840 and fps 1..120"));
           }
 
           auto persisted = core_.get_stream_output_config(stream_id);
           if (!persisted.has_value()) {
+            spdlog::debug("[api] config-put stream={} result=missing-after-update", stream_id);
             return finalize(json_error(404, "stream not found"));
           }
+          spdlog::debug("[api] config-put stream={} result=applied persisted={} note=updates-core-transform-state", stream_id,
+                        output_config_json(*persisted));
           return finalize(HttpResponse{200, output_config_json(*persisted), "application/json"});
         }
       }
