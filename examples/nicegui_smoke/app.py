@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nicegui import app, ui
+from ui_helpers import default_demo_streams, parse_stream_spec
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SMOKE_BINARY = ROOT / 'build' / 'video_server_nicegui_smoke_server'
@@ -50,30 +51,6 @@ def parse_args() -> argparse.Namespace:
 ARGS = parse_args()
 SMOKE_PROCESS: Optional[subprocess.Popen[str]] = None
 
-
-def parse_stream_spec(value: str) -> dict[str, Any]:
-    parts = value.split(':')
-    if len(parts) not in (4, 5):
-        raise ValueError(f'Invalid stream spec {value!r}; expected id:width:height:fps[:label]')
-    stream_id, width, height, fps = parts[:4]
-    label = parts[4] if len(parts) == 5 else stream_id
-    return {
-        'streamId': stream_id,
-        'width': int(width),
-        'height': int(height),
-        'fps': float(fps),
-        'label': label,
-    }
-
-
-def default_demo_streams() -> list[dict[str, Any]]:
-    return [
-        {'streamId': 'alpha', 'width': 640, 'height': 360, 'fps': 30.0, 'label': 'Alpha Sweep 640x360'},
-        {'streamId': 'bravo', 'width': 1280, 'height': 720, 'fps': 30.0, 'label': 'Bravo Orbit 1280x720'},
-        {'streamId': 'charlie', 'width': 320, 'height': 240, 'fps': 30.0, 'label': 'Charlie Checker 320x240'},
-    ]
-
-
 def requested_streams() -> list[dict[str, Any]]:
     explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
     if ARGS.multi_stream_demo:
@@ -83,24 +60,12 @@ def requested_streams() -> list[dict[str, Any]]:
     if explicit_single_stream:
         return [{'streamId': ARGS.stream_id, 'width': ARGS.width, 'height': ARGS.height, 'fps': ARGS.fps, 'label': ARGS.stream_id}]
     return default_demo_streams()
-
-
-
-
 def has_cli_flag(*names: str) -> bool:
     return any(name in sys.argv[1:] for name in names)
 
 
 STREAM_SPECS = requested_streams()
 DEFAULT_STREAM_ID = STREAM_SPECS[0]['streamId']
-
-
-def widget_url(spec: dict[str, Any]) -> str:
-    return (
-        f"/?widget=1&stream_id={spec['streamId']}&fps={spec['fps']}&width={spec['width']}&height={spec['height']}"
-        f"&label={spec['label'].replace(' ', '%20')}"
-    )
-
 
 def start_smoke_server() -> subprocess.Popen[str]:
     smoke_binary = Path(ARGS.smoke_binary)
@@ -312,6 +277,24 @@ window.videoSmokeHarness = (() => {{
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;');
   const shortJson = (value) => escapeHtml(JSON.stringify(value ?? {{}}, null, 2));
+  const formatNumber = (value, fallback='n/a') => {{
+    if (value === null || value === undefined || value === '') return fallback;
+    if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\\.00$/, '');
+    return String(value);
+  }};
+  const formatGeometry = (width, height, fallback='native') => {{
+    if (!width && !height) return fallback;
+    return `${{formatNumber(width, '?')}}x${{formatNumber(height, '?')}}`;
+  }};
+  const configUrl = (serverBase, streamId) => `${{serverBase}}/api/video/streams/${{encodeURIComponent(streamId)}}/config`;
+  const selectedStreamSpec = (streamId) => {{
+    const catalog = Array.isArray(state.config?.streamCatalog) ? state.config.streamCatalog : [];
+    return catalog.find((spec) => spec.streamId === streamId) || catalog[0] || null;
+  }};
+  const selectedObservabilityStream = (streamId) => {{
+    const streams = Array.isArray(state.observabilitySummary?.streams) ? state.observabilitySummary.streams : [];
+    return streams.find((stream) => stream.stream_id === streamId) || null;
+  }};
 
   function loadConfig() {{
     let saved = {{}};
@@ -362,6 +345,55 @@ window.videoSmokeHarness = (() => {{
   function saveConfig() {{
     if (!state.config) return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.config));
+  }}
+
+  function updateConfigStreamIdentity(streamId) {{
+    const spec = selectedStreamSpec(streamId);
+    const label = spec?.label || streamId || 'unknown stream';
+    const geometry = spec ? `${{spec.width}}x${{spec.height}} @ ${{spec.fps}} fps` : 'custom stream';
+    setText('widget-stream-id', streamId || 'no stream');
+    setText('widget-stream-label', label);
+    setText('widget-stream-meta', geometry);
+    setText('config-stream-name', streamId ? `${{streamId}} · ${{label}}` : 'No stream selected');
+    setText('config-stream-meta', geometry);
+  }}
+
+  function setConfigStatus(message, kind='info') {{
+    const box = byId('config-feedback');
+    if (!box) return;
+    box.textContent = message || 'Waiting for config action.';
+    box.className = `config-feedback ${{kind}}`;
+  }}
+
+  function applyConfigDataToUi(streamId, data, sourceLabel='loaded') {{
+    setValue('config-filter-mode', data.display_mode || 'Passthrough');
+    setValue('config-output-width', String(data.output_width || 0));
+    setValue('config-output-height', String(data.output_height || 0));
+    setValue('config-output-fps', String(data.output_fps || 0));
+    setText('config-generation', String(data.config_generation || 0));
+    setText('config-current-summary', `${{data.display_mode || 'Passthrough'}} • ${{formatGeometry(data.output_width, data.output_height)}} • ${{formatNumber(data.output_fps, 'source')}} fps`);
+    setHtml('config-response-json', '<pre>' + shortJson(data) + '</pre>');
+    setText('widget-active-config', `${{data.display_mode || 'Passthrough'}} • ${{formatGeometry(data.output_width, data.output_height)}} • ${{formatNumber(data.output_fps, 'source')}} fps`);
+    appendLog('ui', `${{sourceLabel}} stream config for ${{streamId}}`);
+  }}
+
+  function refreshActiveConfigSummary() {{
+    const cfg = state.config || loadConfig();
+    const streamId = cfg.streamId || '';
+    updateConfigStreamIdentity(streamId);
+    const obsStream = selectedObservabilityStream(streamId);
+    if (obsStream) {{
+      setText('config-observed-summary', `${{obsStream.active_filter_mode || 'unknown'}} • ${{formatGeometry(obsStream.active_output_width, obsStream.active_output_height)}} • ${{formatNumber(obsStream.active_output_fps, 'source')}} fps`);
+    }} else {{
+      setText('config-observed-summary', 'Waiting for observability data');
+    }}
+  }}
+
+  function showConfigDialog(open) {{
+    const dialog = byId('config-dialog');
+    if (!dialog) return;
+    dialog.style.display = open ? 'flex' : 'none';
+    if (open) refreshActiveConfigSummary();
   }}
 
   function nowStamp() {{
@@ -532,6 +564,7 @@ window.videoSmokeHarness = (() => {{
     setText('widget-session-sender', session.encoded_sender_state || 'n/a');
     setText('widget-expected-fps', (cfg.widgetFps || 'n/a').toString());
     setText('widget-target-geometry', `${{cfg.widgetWidth || '?'}}x${{cfg.widgetHeight || '?'}}`);
+    refreshActiveConfigSummary();
   }}
 
   function renderMultiStreamDashboard() {{
@@ -599,8 +632,11 @@ window.videoSmokeHarness = (() => {{
     const menu = byId('widget-context-menu');
     if (!menu) return;
     menu.style.display = 'block';
-    menu.style.left = `${{x}}px`;
-    menu.style.top = `${{y}}px`;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(16, Math.min(x, window.innerWidth - rect.width - 16));
+    const top = Math.max(16, Math.min(y, window.innerHeight - rect.height - 16));
+    menu.style.left = `${{left}}px`;
+    menu.style.top = `${{top}}px`;
   }}
 
   function hideContextMenu() {{
@@ -1049,18 +1085,17 @@ window.videoSmokeHarness = (() => {{
 
 
 
-  async function loadStreamConfig() {{
+  async function loadStreamConfig(openDialog=false) {{
     const cfg = state.config || loadConfig();
     if (!cfg.serverBase || !cfg.streamId) return;
-    const response = await fetch(`${{cfg.serverBase}}/api/video/streams/${{cfg.streamId}}/config`);
-    if (!response.ok) throw new Error(`config load failed: ${{response.status}}`);
+    updateConfigStreamIdentity(cfg.streamId);
+    setConfigStatus(`Loading config for ${{cfg.streamId}}...`);
+    const response = await fetch(configUrl(cfg.serverBase, cfg.streamId));
+    if (!response.ok) throw new Error(await response.text() || `config load failed: ${{response.status}}`);
     const data = await response.json();
-    setValue('config-filter-mode', data.display_mode || 'Passthrough');
-    setValue('config-output-width', String(data.output_width || 0));
-    setValue('config-output-height', String(data.output_height || 0));
-    setValue('config-output-fps', String(data.output_fps || 0));
-    setText('config-generation', String(data.config_generation || 0));
-    appendLog('ui', `loaded stream config for ${{cfg.streamId}}`);
+    applyConfigDataToUi(cfg.streamId, data);
+    setConfigStatus(`Loaded current config for ${{cfg.streamId}}.`, 'info');
+    if (openDialog) showConfigDialog(true);
   }}
 
   async function applyStreamConfig() {{
@@ -1072,16 +1107,25 @@ window.videoSmokeHarness = (() => {{
       output_height: Number(byId('config-output-height')?.value || 0),
       output_fps: Number(byId('config-output-fps')?.value || 0),
     }};
-    const response = await fetch(`${{cfg.serverBase}}/api/video/streams/${{cfg.streamId}}/config`, {{
+    setConfigStatus(`Applying config to ${{cfg.streamId}}...`);
+    const response = await fetch(configUrl(cfg.serverBase, cfg.streamId), {{
       method: 'PUT',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify(payload),
     }});
     const bodyText = await response.text();
-    if (!response.ok) throw new Error(bodyText || `config apply failed: ${{response.status}}`);
-    appendLog('ui', `applied stream config for ${{cfg.streamId}}`);
-    await loadStreamConfig();
+    if (!response.ok) {{
+      setConfigStatus(bodyText || `config apply failed: ${{response.status}}`, 'error');
+      setHtml('config-response-json', '<pre>' + escapeHtml(bodyText || '') + '</pre>');
+      throw new Error(bodyText || `config apply failed: ${{response.status}}`);
+    }}
+    const data = bodyText ? JSON.parse(bodyText) : null;
+    if (data) {{
+      applyConfigDataToUi(cfg.streamId, data, 'applied');
+    }}
+    setConfigStatus(`Applied config to ${{cfg.streamId}}.`, 'success');
     await refreshStats();
+    await refreshSession(cfg.streamId);
   }}
 
   async function copyLogs() {{
@@ -1125,6 +1169,7 @@ window.videoSmokeHarness = (() => {{
 
     byId('load-config-button')?.addEventListener('click', () => loadStreamConfig().catch((error) => appendLog('error', `load config failed: ${{error}}`)));
     byId('apply-config-button')?.addEventListener('click', () => applyStreamConfig().catch((error) => appendLog('error', `apply config failed: ${{error}}`)));
+    byId('close-config-dialog')?.addEventListener('click', () => showConfigDialog(false));
 
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
@@ -1132,6 +1177,14 @@ window.videoSmokeHarness = (() => {{
     byId('context-reconnect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context reconnect'); }});
     byId('context-disconnect')?.addEventListener('click', () => {{ hideContextMenu(); disconnect('context disconnect'); }});
     byId('context-refresh')?.addEventListener('click', async () => {{ hideContextMenu(); await refreshSession(); await refreshStats(); }});
+    byId('context-edit-config')?.addEventListener('click', () => {{
+      hideContextMenu();
+      loadStreamConfig(true).catch((error) => {{
+        setConfigStatus(String(error), 'error');
+        showConfigDialog(true);
+        appendLog('error', `load config failed: ${{error}}`);
+      }});
+    }});
     byId('context-open-settings')?.addEventListener('click', () => {{ hideContextMenu(); showSettings(true); }});
     byId('context-toggle-widget-debug')?.addEventListener('click', () => {{
       const input = byId('config-widget-show-debug');
@@ -1141,6 +1194,7 @@ window.videoSmokeHarness = (() => {{
     }});
     document.addEventListener('keydown', (event) => {{
       if (event.key === 'Escape') showSettings(false);
+      if (event.key === 'Escape') showConfigDialog(false);
     }});
     document.addEventListener('click', () => hideContextMenu());
     const widgetWrap = byId('widget-shell');
@@ -1268,27 +1322,6 @@ PAGE_HTML = """
           </div>
           <pre id="smoke-log" class="log-area"></pre>
         </div>
-
-
-
-        <div class="panel-card">
-          <div class="panel-title">Per-stream config</div>
-          <div class="panel-subtitle">Dev controls for filter + output geometry/fps.</div>
-          <label>Filter
-            <select id="config-filter-mode">
-              <option>Passthrough</option><option>Grayscale</option><option>WhiteHot</option><option>BlackHot</option><option>Ironbow</option><option>Arctic</option><option>Rainbow</option>
-            </select>
-          </label>
-          <label>Output width <input id="config-output-width" type="number" min="0" step="1" value="0"></label>
-          <label>Output height <input id="config-output-height" type="number" min="0" step="1" value="0"></label>
-          <label>Output fps <input id="config-output-fps" type="number" min="0" step="0.1" value="0"></label>
-          <div class="panel-subtitle">Generation: <strong id="config-generation">0</strong></div>
-          <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
-            <button id="load-config-button" class="toolbar-button small">Load</button>
-            <button id="apply-config-button" class="toolbar-button small">Apply</button>
-          </div>
-        </div>
-
         <details id="debug-panel" class="panel-card" open>
           <summary class="panel-title">Debug telemetry</summary>
           <div class="debug-grid">
@@ -1348,7 +1381,12 @@ PAGE_HTML = """
         <div class="widget-header">
           <div>
             <div class="panel-title">Widget preview</div>
-            <div class="panel-subtitle">Single box preview for future dynamic placement. Right-click for grouped actions/settings.</div>
+            <div class="panel-subtitle">Right-click the widget to connect, refresh, or edit backend stream output config.</div>
+            <div class="widget-stream-chip">
+              <strong id="widget-stream-id">no stream</strong>
+              <span id="widget-stream-label">No stream selected</span>
+              <span id="widget-stream-meta">custom stream</span>
+            </div>
           </div>
         </div>
         <div class="widget-video-wrap">
@@ -1363,6 +1401,7 @@ PAGE_HTML = """
           </div>
           <div class="widget-status-chip combined">Expected <strong id="widget-expected-fps">n/a</strong> fps</div>
           <div class="widget-status-chip combined">Geometry <strong id="widget-target-geometry">n/a</strong></div>
+          <div class="widget-status-chip combined">Active config <strong id="widget-active-config">Waiting for config</strong></div>
         </div>
         <div id="widget-debug-sections" class="widget-debug-sections" style="display:none;">
           <div id="widget-connection-section" class="widget-debug-card">
@@ -1406,15 +1445,62 @@ PAGE_HTML = """
           <button id="context-refresh" class="context-button">Refresh status</button>
         </div>
         <div class="context-group">
+          <div class="context-title">Stream config</div>
+          <button id="context-edit-config" class="context-button">Edit stream config</button>
+          <div class="context-note">Loads current backend config for the selected stream and applies changes through the existing API.</div>
+        </div>
+        <div class="context-group">
           <div class="context-title">Local widget settings</div>
           <button id="context-open-settings" class="context-button">Open settings panel</button>
           <button id="context-toggle-widget-debug" class="context-button">Toggle in-box debug</button>
         </div>
-        <div class="context-group">
-          <div class="context-title">Server request group</div>
-          <div class="context-note">Placeholder for future server-side stream/display requests.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="config-dialog" class="settings-backdrop" style="display:none;">
+    <div class="settings-card config-dialog-card">
+      <div class="panel-header compact">
+        <div>
+          <div class="panel-title">Widget stream config</div>
+          <div class="panel-subtitle">Right-click entry point for per-stream output config edits.</div>
+        </div>
+        <button id="close-config-dialog" class="toolbar-button small">Close</button>
+      </div>
+      <div class="config-stream-identity">
+        <strong id="config-stream-name">No stream selected</strong>
+        <span id="config-stream-meta">custom stream</span>
+      </div>
+      <div class="config-summary-grid">
+        <div class="summary-card compact-card">
+          <div class="summary-label">Current backend config</div>
+          <div id="config-current-summary" class="summary-value">Load a stream config to inspect it.</div>
+        </div>
+        <div class="summary-card compact-card">
+          <div class="summary-label">Observed active config</div>
+          <div id="config-observed-summary" class="summary-value">Waiting for observability data</div>
+        </div>
+        <div class="summary-card compact-card">
+          <div class="summary-label">Config generation</div>
+          <div id="config-generation" class="summary-value">0</div>
         </div>
       </div>
+      <div id="config-feedback" class="config-feedback info">Waiting for config action.</div>
+      <label>Palette / filter mode
+        <select id="config-filter-mode">
+          <option>Passthrough</option><option>Grayscale</option><option>WhiteHot</option><option>BlackHot</option><option>Ironbow</option><option>Arctic</option><option>Rainbow</option>
+        </select>
+      </label>
+      <div class="config-edit-grid">
+        <label>Output width <input id="config-output-width" type="number" min="0" step="1" value="0"></label>
+        <label>Output height <input id="config-output-height" type="number" min="0" step="1" value="0"></label>
+        <label>Output fps <input id="config-output-fps" type="number" min="0" step="0.1" value="0"></label>
+      </div>
+      <div class="settings-actions split-actions">
+        <button id="load-config-button" class="toolbar-button">Reload from backend</button>
+        <button id="apply-config-button" class="toolbar-button primary">Apply to stream</button>
+      </div>
+      <div id="config-response-json" class="json-box"><pre>{}</pre></div>
     </div>
   </div>
 
@@ -1483,7 +1569,7 @@ PAGE_HTML = """
 PAGE_CSS = """
 <style>
 body { background: #111827; }
-.harness-shell { color: #e5eefc; width: min(1400px, 100%); margin: 0 auto; }
+.harness-shell { color: #e5eefc; width: min(1800px, 100%); margin: 0 auto; }
 .toolbar-row, .panel-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
 .toolbar-row { flex-wrap: wrap; margin-bottom: 1rem; }
 .tab-row { display: flex; gap: 0.75rem; margin-bottom: 1rem; }
@@ -1519,16 +1605,18 @@ body { background: #111827; }
 .subpanel-title { margin-top: 1rem; font-weight: 700; }
 .json-box pre { margin: 0.75rem 0 0; max-height: 220px; overflow: auto; background: #020617; color: #cbd5e1; padding: 0.9rem; border-radius: 0.75rem; }
 .widget-layout { position: relative; }
-.multi-stream-dashboard { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; margin-top:12px; }
-  .multi-card { border:1px solid #d0d7de; border-radius:12px; background:#fff; padding:12px; }
-  .multi-card-header { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; font-size:13px; color:#4b5563; }
-  .multi-widget-frame { width:100%; min-height:420px; border:0; border-radius:10px; background:#f8fafc; }
-  .widget-dashboard-wrapper { margin-bottom:16px; }
-  .widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; max-width: 760px; }
+.multi-stream-dashboard { display:grid; grid-template-columns:repeat(auto-fit,minmax(560px,1fr)); gap:20px; margin-top:12px; }
+.multi-card { border:1px solid #1e293b; border-radius:16px; background:#0f172a; padding:16px; }
+.multi-card-header { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:14px; color:#9fb0ca; }
+.multi-widget-frame { width:100%; min-height:680px; border:0; border-radius:14px; background:#020617; }
+.widget-dashboard-wrapper { margin-bottom:16px; }
+.widget-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 1rem; padding: 1rem; width: min(100%, 980px); min-height: 680px; }
 .widget-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 0.75rem; }
-.widget-video-wrap { background: #020617; border: 1px solid #334155; border-radius: 1rem; padding: 0.75rem; }
-#widget-video { width: 100%; min-height: 260px; background: #000; border-radius: 0.75rem; }
-.widget-status-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-top: 0.9rem; }
+.widget-stream-chip { display: grid; gap: 0.2rem; margin-top: 0.65rem; padding: 0.75rem 0.9rem; background: #111827; border: 1px solid #1f2937; border-radius: 0.85rem; max-width: 420px; }
+.widget-stream-chip span { color: #94a3b8; font-size: 0.88rem; }
+.widget-video-wrap { background: #020617; border: 1px solid #334155; border-radius: 1rem; padding: 0.75rem; min-height: 420px; }
+#widget-video { width: 100%; min-height: 420px; background: #000; border-radius: 0.75rem; }
+.widget-status-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; margin-top: 0.9rem; }
 .widget-status-bar.compact { grid-template-columns: minmax(0, 1fr); }
 .widget-status-chip, .widget-debug-card { background: #111827; border: 1px solid #1f2937; border-radius: 0.75rem; padding: 0.75rem; }
 .widget-status-chip.combined { padding: 0.9rem 1rem; }
@@ -1549,12 +1637,22 @@ body { background: #111827; }
 .context-note { color: #94a3b8; font-size: 0.9rem; }
 .settings-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.75); align-items: center; justify-content: center; z-index: 50; }
 .settings-card { width: min(560px, calc(100vw - 2rem)); background: #0f172a; border: 1px solid #334155; border-radius: 1rem; padding: 1rem; display: grid; gap: 0.8rem; }
+.config-dialog-card { width: min(720px, calc(100vw - 2rem)); }
 .settings-card label { display: grid; gap: 0.35rem; color: #cbd5e1; }
 .settings-card input, .settings-card select { width: 100%; background: #020617; color: #e5eefc; border: 1px solid #334155; border-radius: 0.7rem; padding: 0.65rem 0.8rem; }
+.config-stream-identity { display: grid; gap: 0.2rem; padding: 0.8rem 0.9rem; background: #111827; border: 1px solid #1f2937; border-radius: 0.85rem; }
+.config-stream-identity span { color: #94a3b8; }
+.config-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; }
+.compact-card { padding: 0.85rem; }
+.config-edit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; }
+.config-feedback { border-radius: 0.85rem; padding: 0.8rem 0.9rem; border: 1px solid #334155; background: #111827; color: #dbeafe; }
+.config-feedback.success { border-color: #14532d; background: #052e16; color: #dcfce7; }
+.config-feedback.error { border-color: #7f1d1d; background: #450a0a; color: #fee2e2; }
+.split-actions { justify-content: space-between; gap: 0.75rem; }
 .checkbox-row { display: flex !important; align-items: center; gap: 0.6rem; }
 .checkbox-row input { width: auto; }
 .settings-actions { display: flex; justify-content: end; }
-@media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } .multi-stream-dashboard { grid-template-columns: 1fr; } .multi-widget-frame, .widget-box, #widget-video, .widget-video-wrap { min-height: 520px; } }
 </style>
 """
 
