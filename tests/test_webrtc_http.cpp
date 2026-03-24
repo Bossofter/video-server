@@ -997,6 +997,50 @@ TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) {
 
 
 
+TEST(WebRtcHttpTest, PerStreamConfigApiSupportsIsolationValidationAndObservability) {
+  const uint16_t port = static_cast<uint16_t>(21000 + (::getpid() % 10000));
+  const std::string host = "127.0.0.1";
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+  video_server::StreamConfig alpha{"alpha", "alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
+  video_server::StreamConfig bravo{"bravo", "bravo", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
+  ASSERT_TRUE(server.register_stream(alpha));
+  ASSERT_TRUE(server.register_stream(bravo));
+  ASSERT_TRUE(server.start());
+
+  const std::string alpha_update = send_raw_request(
+      host, port,
+      http_request("PUT", "/api/video/streams/alpha/config",
+                   "{\"display_mode\":\"ironbow\",\"output_width\":32,\"output_height\":24,\"output_fps\":12}"));
+  ASSERT_NE(alpha_update.find("200 OK"), std::string::npos);
+  ASSERT_NE(alpha_update.find("\"config_generation\":2"), std::string::npos);
+
+  const std::string bravo_update = send_raw_request(
+      host, port,
+      http_request("PUT", "/api/video/streams/bravo/config",
+                   "{\"display_mode\":\"black_hot\",\"output_width\":48,\"output_height\":48}"));
+  ASSERT_NE(bravo_update.find("200 OK"), std::string::npos);
+
+  const std::string invalid = send_raw_request(
+      host, port,
+      http_request("PUT", "/api/video/streams/alpha/config", "{\"output_width\":4,\"output_height\":4,\"output_fps\":500}"));
+  ASSERT_NE(invalid.find("400 Bad Request"), std::string::npos);
+
+  const std::string alpha_cfg = send_raw_request(host, port, http_request("GET", "/api/video/streams/alpha/config"));
+  const std::string bravo_cfg = send_raw_request(host, port, http_request("GET", "/api/video/streams/bravo/config"));
+  ASSERT_NE(alpha_cfg.find("\"display_mode\":\"Ironbow\""), std::string::npos);
+  ASSERT_NE(bravo_cfg.find("\"display_mode\":\"BlackHot\""), std::string::npos);
+  ASSERT_NE(alpha_cfg.find("\"output_width\":32"), std::string::npos);
+  ASSERT_NE(bravo_cfg.find("\"output_width\":48"), std::string::npos);
+
+  const std::string stats = send_raw_request(host, port, http_request("GET", "/api/video/debug/stats"));
+  ASSERT_NE(stats.find("\"active_filter_mode\":\"Ironbow\""), std::string::npos);
+  ASSERT_NE(stats.find("\"active_filter_mode\":\"BlackHot\""), std::string::npos);
+  ASSERT_NE(stats.find("\"config_generation\":2"), std::string::npos);
+
+  server.stop();
+}
+
+
 #else
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) { GTEST_SKIP() << "WebRTC backend disabled"; }

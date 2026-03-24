@@ -16,8 +16,12 @@ const char* to_string(VideoDisplayMode mode) {
       return "WhiteHot";
     case VideoDisplayMode::BlackHot:
       return "BlackHot";
+    case VideoDisplayMode::Ironbow:
+      return "Ironbow";
     case VideoDisplayMode::Rainbow:
       return "Rainbow";
+    case VideoDisplayMode::Arctic:
+      return "Arctic";
   }
   return "Passthrough";
 }
@@ -60,20 +64,26 @@ std::optional<VideoDisplayMode> video_display_mode_from_string(const char* value
                                   [](unsigned char c) { return std::isspace(c) != 0; }),
                    normalized.end());
 
-  if (normalized == "Passthrough") {
+  if (normalized == "Passthrough" || normalized == "passthrough") {
     return VideoDisplayMode::Passthrough;
   }
-  if (normalized == "Grayscale") {
+  if (normalized == "Grayscale" || normalized == "grayscale") {
     return VideoDisplayMode::Grayscale;
   }
-  if (normalized == "WhiteHot") {
+  if (normalized == "WhiteHot" || normalized == "white_hot" || normalized == "whitehot") {
     return VideoDisplayMode::WhiteHot;
   }
-  if (normalized == "BlackHot") {
+  if (normalized == "BlackHot" || normalized == "black_hot" || normalized == "blackhot") {
     return VideoDisplayMode::BlackHot;
   }
-  if (normalized == "Rainbow") {
+  if (normalized == "Ironbow" || normalized == "ironbow") {
+    return VideoDisplayMode::Ironbow;
+  }
+  if (normalized == "Rainbow" || normalized == "rainbow") {
     return VideoDisplayMode::Rainbow;
+  }
+  if (normalized == "Arctic" || normalized == "arctic") {
+    return VideoDisplayMode::Arctic;
   }
 
   return std::nullopt;

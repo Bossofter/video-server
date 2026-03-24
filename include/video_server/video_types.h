@@ -24,7 +24,9 @@ enum class VideoDisplayMode {
   Grayscale,
   WhiteHot,
   BlackHot,
-  Rainbow
+  Ironbow,
+  Rainbow,
+  Arctic
 };
 
 const char* to_string(VideoDisplayMode mode);

@@ -1047,6 +1047,43 @@ window.videoSmokeHarness = (() => {{
     }}
   }}
 
+
+
+  async function loadStreamConfig() {{
+    const cfg = state.config || loadConfig();
+    if (!cfg.serverBase || !cfg.streamId) return;
+    const response = await fetch(`${{cfg.serverBase}}/api/video/streams/${{cfg.streamId}}/config`);
+    if (!response.ok) throw new Error(`config load failed: ${{response.status}}`);
+    const data = await response.json();
+    setValue('config-filter-mode', data.display_mode || 'Passthrough');
+    setValue('config-output-width', String(data.output_width || 0));
+    setValue('config-output-height', String(data.output_height || 0));
+    setValue('config-output-fps', String(data.output_fps || 0));
+    setText('config-generation', String(data.config_generation || 0));
+    appendLog('ui', `loaded stream config for ${{cfg.streamId}}`);
+  }}
+
+  async function applyStreamConfig() {{
+    const cfg = state.config || loadConfig();
+    if (!cfg.serverBase || !cfg.streamId) return;
+    const payload = {{
+      display_mode: byId('config-filter-mode')?.value || 'Passthrough',
+      output_width: Number(byId('config-output-width')?.value || 0),
+      output_height: Number(byId('config-output-height')?.value || 0),
+      output_fps: Number(byId('config-output-fps')?.value || 0),
+    }};
+    const response = await fetch(`${{cfg.serverBase}}/api/video/streams/${{cfg.streamId}}/config`, {{
+      method: 'PUT',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(payload),
+    }});
+    const bodyText = await response.text();
+    if (!response.ok) throw new Error(bodyText || `config apply failed: ${{response.status}}`);
+    appendLog('ui', `applied stream config for ${{cfg.streamId}}`);
+    await loadStreamConfig();
+    await refreshStats();
+  }}
+
   async function copyLogs() {{
     const logText = byId('smoke-log')?.textContent || '';
     await navigator.clipboard.writeText(logText);
@@ -1085,6 +1122,10 @@ window.videoSmokeHarness = (() => {{
         connect('stream selector changed').catch((error) => appendLog('error', `stream switch failed: ${{error}}`));
       }}
     }});
+
+    byId('load-config-button')?.addEventListener('click', () => loadStreamConfig().catch((error) => appendLog('error', `load config failed: ${{error}}`)));
+    byId('apply-config-button')?.addEventListener('click', () => applyStreamConfig().catch((error) => appendLog('error', `apply config failed: ${{error}}`)));
+
     byId('copy-logs')?.addEventListener('click', () => copyLogs().catch((error) => appendLog('error', `copy failed: ${{error}}`)));
     byId('config-log-filter')?.addEventListener('change', () => {{ readConfigForm(); appendLog('ui', 'log filter updated'); }});
     byId('context-connect')?.addEventListener('click', () => {{ hideContextMenu(); connect('context connect'); }});
@@ -1226,6 +1267,26 @@ PAGE_HTML = """
             <button id="copy-logs" class="toolbar-button small">Copy</button>
           </div>
           <pre id="smoke-log" class="log-area"></pre>
+        </div>
+
+
+
+        <div class="panel-card">
+          <div class="panel-title">Per-stream config</div>
+          <div class="panel-subtitle">Dev controls for filter + output geometry/fps.</div>
+          <label>Filter
+            <select id="config-filter-mode">
+              <option>Passthrough</option><option>Grayscale</option><option>WhiteHot</option><option>BlackHot</option><option>Ironbow</option><option>Arctic</option><option>Rainbow</option>
+            </select>
+          </label>
+          <label>Output width <input id="config-output-width" type="number" min="0" step="1" value="0"></label>
+          <label>Output height <input id="config-output-height" type="number" min="0" step="1" value="0"></label>
+          <label>Output fps <input id="config-output-fps" type="number" min="0" step="0.1" value="0"></label>
+          <div class="panel-subtitle">Generation: <strong id="config-generation">0</strong></div>
+          <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+            <button id="load-config-button" class="toolbar-button small">Load</button>
+            <button id="apply-config-button" class="toolbar-button small">Apply</button>
+          </div>
         </div>
 
         <details id="debug-panel" class="panel-card" open>

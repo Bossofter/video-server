@@ -239,7 +239,13 @@ std::string output_config_json(const StreamOutputConfig& cfg) {
       << "\"mirrored\":" << bool_to_json(cfg.mirrored) << ","
       << "\"rotation_degrees\":" << cfg.rotation_degrees << ","
       << "\"palette_min\":" << cfg.palette_min << ","
-      << "\"palette_max\":" << cfg.palette_max << "}";
+      << "\"palette_max\":" << cfg.palette_max << ","
+      << "\"output_width\":" << cfg.output_width << ","
+      << "\"output_height\":" << cfg.output_height << ","
+      << "\"output_fps\":" << cfg.output_fps << ","
+      << "\"config_generation\":" << cfg.config_generation << ","
+      << "\"apply_status\":\"active\","
+      << "\"raw_pipeline_reconfigure\":\"stream-local-restart\"}";
   return out.str();
 }
 
@@ -292,6 +298,12 @@ std::string stream_debug_snapshot_json(const StreamDebugSnapshot& stream) {
       << "\"configured_width\":" << stream.configured_width << ","
       << "\"configured_height\":" << stream.configured_height << ","
       << "\"configured_fps\":" << stream.configured_fps << ","
+      << "\"active_filter_mode\":\"" << json_escape(stream.active_filter_mode) << "\","
+      << "\"active_output_width\":" << stream.active_output_width << ","
+      << "\"active_output_height\":" << stream.active_output_height << ","
+      << "\"active_output_fps\":" << stream.active_output_fps << ","
+      << "\"config_generation\":" << stream.config_generation << ","
+      << "\"config_state\":\"" << json_escape(stream.config_state) << "\","
       << "\"latest_raw_frame_available\":" << bool_to_json(stream.latest_raw_frame_available) << ","
       << "\"latest_raw_frame_id\":" << stream.latest_raw_frame_id << ","
       << "\"latest_raw_timestamp_ns\":" << stream.latest_raw_timestamp_ns << ","
@@ -439,9 +451,10 @@ class WebRtcVideoServer::Impl {
     if (request.path.find("/api/video/streams/") == 0) {
       const std::string tail = request.path.substr(std::string("/api/video/streams/").size());
       const auto output_pos = tail.find("/output");
+      const auto config_pos = tail.find("/config");
       const auto frame_pos = tail.find("/frame");
       const bool is_frame_request = frame_pos != std::string::npos && (frame_pos + 6) == tail.size();
-      if (request.method == "GET" && output_pos == std::string::npos && !is_frame_request) {
+      if (request.method == "GET" && output_pos == std::string::npos && config_pos == std::string::npos && !is_frame_request) {
         auto info = core_.get_stream_info(tail);
         if (!info.has_value()) {
           return finalize(json_error(404, "stream not found"));
@@ -477,7 +490,8 @@ class WebRtcVideoServer::Impl {
             << bool_to_json(latest_encoded ? latest_encoded->keyframe : false) << ','
             << "\"latest_encoded_codec_config\":"
             << bool_to_json(latest_encoded ? latest_encoded->codec_config : false) << ','
-            << "\"active\":" << bool_to_json(info->active) << '}';
+            << "\"active\":" << bool_to_json(info->active) << ","
+            << "\"output_config\":" << output_config_json(info->output_config) << '}';
         return finalize(HttpResponse{200, out.str(), "application/json"});
       }
 
@@ -501,8 +515,9 @@ class WebRtcVideoServer::Impl {
         return finalize(HttpResponse{200, std::move(encoded->body), encoded->content_type});
       }
 
-      if (output_pos != std::string::npos) {
-        const std::string stream_id = tail.substr(0, output_pos);
+      const auto config_segment_pos = output_pos != std::string::npos ? output_pos : config_pos;
+      if (config_segment_pos != std::string::npos) {
+        const std::string stream_id = tail.substr(0, config_segment_pos);
         if (request.method == "GET") {
           auto cfg = core_.get_stream_output_config(stream_id);
           if (!cfg.has_value()) {
@@ -526,40 +541,62 @@ class WebRtcVideoServer::Impl {
             return finalize(json_error(400, "invalid request body"));
           }
 
-          const auto mode_it = body_values.find("display_mode");
-          const auto mirrored_it = body_values.find("mirrored");
-          const auto rotation_it = body_values.find("rotation_degrees");
-          const auto min_it = body_values.find("palette_min");
-          const auto max_it = body_values.find("palette_max");
-
-          if (mode_it == body_values.end() || mirrored_it == body_values.end() ||
-              rotation_it == body_values.end() || min_it == body_values.end() ||
-              max_it == body_values.end()) {
-            return finalize(json_error(400, "invalid request body"));
-          }
-
-          if (mode_it->second.type != JsonValue::Type::String ||
-              mirrored_it->second.type != JsonValue::Type::Bool ||
-              rotation_it->second.type != JsonValue::Type::Number ||
-              min_it->second.type != JsonValue::Type::Number ||
-              max_it->second.type != JsonValue::Type::Number) {
-            return finalize(json_error(400, "invalid request body"));
-          }
-
-          const auto parsed_mode = video_display_mode_from_string(mode_it->second.string_value.c_str());
-          if (!parsed_mode.has_value()) {
-            return finalize(json_error(400, "invalid display_mode"));
-          }
-
           StreamOutputConfig updated = *cfg;
-          updated.display_mode = *parsed_mode;
-          updated.mirrored = mirrored_it->second.bool_value;
-          updated.rotation_degrees = static_cast<int>(rotation_it->second.number_value);
-          updated.palette_min = static_cast<float>(min_it->second.number_value);
-          updated.palette_max = static_cast<float>(max_it->second.number_value);
+          if (const auto mode_it = body_values.find("display_mode"); mode_it != body_values.end()) {
+            if (mode_it->second.type != JsonValue::Type::String) {
+              return finalize(json_error(400, "display_mode must be a string"));
+            }
+            const auto parsed_mode = video_display_mode_from_string(mode_it->second.string_value.c_str());
+            if (!parsed_mode.has_value()) {
+              return finalize(json_error(400, "invalid display_mode"));
+            }
+            updated.display_mode = *parsed_mode;
+          }
+          if (const auto mirrored_it = body_values.find("mirrored"); mirrored_it != body_values.end()) {
+            if (mirrored_it->second.type != JsonValue::Type::Bool) {
+              return finalize(json_error(400, "mirrored must be a boolean"));
+            }
+            updated.mirrored = mirrored_it->second.bool_value;
+          }
+          if (const auto rotation_it = body_values.find("rotation_degrees"); rotation_it != body_values.end()) {
+            if (rotation_it->second.type != JsonValue::Type::Number) {
+              return finalize(json_error(400, "rotation_degrees must be numeric"));
+            }
+            updated.rotation_degrees = static_cast<int>(rotation_it->second.number_value);
+          }
+          if (const auto min_it = body_values.find("palette_min"); min_it != body_values.end()) {
+            if (min_it->second.type != JsonValue::Type::Number) {
+              return finalize(json_error(400, "palette_min must be numeric"));
+            }
+            updated.palette_min = static_cast<float>(min_it->second.number_value);
+          }
+          if (const auto max_it = body_values.find("palette_max"); max_it != body_values.end()) {
+            if (max_it->second.type != JsonValue::Type::Number) {
+              return finalize(json_error(400, "palette_max must be numeric"));
+            }
+            updated.palette_max = static_cast<float>(max_it->second.number_value);
+          }
+          if (const auto width_it = body_values.find("output_width"); width_it != body_values.end()) {
+            if (width_it->second.type != JsonValue::Type::Number) {
+              return finalize(json_error(400, "output_width must be numeric"));
+            }
+            updated.output_width = static_cast<uint32_t>(width_it->second.number_value);
+          }
+          if (const auto height_it = body_values.find("output_height"); height_it != body_values.end()) {
+            if (height_it->second.type != JsonValue::Type::Number) {
+              return finalize(json_error(400, "output_height must be numeric"));
+            }
+            updated.output_height = static_cast<uint32_t>(height_it->second.number_value);
+          }
+          if (const auto fps_it = body_values.find("output_fps"); fps_it != body_values.end()) {
+            if (fps_it->second.type != JsonValue::Type::Number) {
+              return finalize(json_error(400, "output_fps must be numeric"));
+            }
+            updated.output_fps = fps_it->second.number_value;
+          }
 
           if (!core_.set_stream_output_config(stream_id, updated)) {
-            return finalize(json_error(400, "invalid output config"));
+            return finalize(json_error(400, "invalid output config; expected known filter and width/height 16..3840 and fps 1..120"));
           }
 
           return finalize(HttpResponse{200, output_config_json(updated), "application/json"});
