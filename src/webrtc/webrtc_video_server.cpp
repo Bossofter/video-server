@@ -599,7 +599,11 @@ class WebRtcVideoServer::Impl {
             return finalize(json_error(400, "invalid output config; expected known filter and width/height 16..3840 and fps 1..120"));
           }
 
-          return finalize(HttpResponse{200, output_config_json(updated), "application/json"});
+          auto persisted = core_.get_stream_output_config(stream_id);
+          if (!persisted.has_value()) {
+            return finalize(json_error(404, "stream not found"));
+          }
+          return finalize(HttpResponse{200, output_config_json(*persisted), "application/json"});
         }
       }
     }

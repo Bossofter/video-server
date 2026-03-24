@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -170,6 +171,7 @@ class WebRtcStreamSession {
   std::string last_local_candidate_;
   std::string peer_state_{"new"};
   uint32_t video_ssrc_{0};
+  std::shared_ptr<std::atomic_bool> callbacks_enabled_;
 };
 
 H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit);
