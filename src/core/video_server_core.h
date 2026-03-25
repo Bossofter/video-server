@@ -49,14 +49,18 @@ class VideoServerCore : public IVideoServer {
   std::optional<StreamDebugSnapshot> get_stream_debug_snapshot(const std::string& stream_id) const;
   std::vector<StreamDebugSnapshot> list_stream_debug_snapshots() const;
 
- private:
+ public:
   struct StreamState {
     VideoStreamInfo info;
     std::shared_ptr<const LatestFrame> latest_frame;
     std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit;
+    uint64_t next_allowed_output_timestamp_ns{0};
   };
 
+ private:
   static bool is_valid_rotation(int degrees);
+  static bool is_valid_output_dimensions(uint32_t width, uint32_t height);
+  static bool is_valid_output_fps(double fps);
   static bool is_supported_input_pixel_format(VideoPixelFormat pixel_format);
   static uint32_t bytes_per_pixel(VideoPixelFormat pixel_format);
 

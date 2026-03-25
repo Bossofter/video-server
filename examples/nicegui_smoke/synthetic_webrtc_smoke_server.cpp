@@ -16,6 +16,7 @@
 
 #include "video_server/raw_video_pipeline.h"
 #include "video_server/webrtc_video_server.h"
+#include "../../src/transforms/display_transform.h"
 #include "../../src/webrtc/logging_utils.h"
 #include "../../src/testing/synthetic_frame_generator.h"
 
@@ -29,6 +30,7 @@ struct StreamSpec {
   uint32_t width{0};
   uint32_t height{0};
   double fps{0.0};
+  video_server::VideoPixelFormat pixel_format{video_server::VideoPixelFormat::RGB24};
 };
 
 struct Options {
@@ -100,9 +102,9 @@ std::optional<StreamSpec> parse_stream_spec(const std::string& value) {
 
 std::vector<StreamSpec> default_demo_streams() {
   return {
-      StreamSpec{"alpha", "Synthetic demo alpha sweep", 640, 360, 30.0},
-      StreamSpec{"bravo", "Synthetic demo bravo orbit", 1280, 720, 30.0},
-      StreamSpec{"charlie", "Synthetic demo charlie checker", 320, 240, 30.0},
+      StreamSpec{"alpha", "Synthetic demo alpha sweep grayscale", 640, 360, 30.0, video_server::VideoPixelFormat::GRAY8},
+      StreamSpec{"bravo", "Synthetic demo bravo orbit", 1280, 720, 30.0, video_server::VideoPixelFormat::RGB24},
+      StreamSpec{"charlie", "Synthetic demo charlie checker", 320, 240, 30.0, video_server::VideoPixelFormat::RGB24},
   };
 }
 
@@ -203,11 +205,27 @@ struct RunningStream {
   std::unique_ptr<video_server::IRawVideoPipeline> pipeline;
   std::thread frame_thread;
   std::string pipeline_error;
+  uint64_t pipeline_config_generation{0};
 
   explicit RunningStream(const StreamSpec& spec)
-      : config{spec.stream_id, spec.label, spec.width, spec.height, spec.fps, video_server::VideoPixelFormat::RGB24},
+      : config{spec.stream_id, spec.label, spec.width, spec.height, spec.fps, spec.pixel_format},
         generator(config) {}
 };
+
+video_server::RawVideoPipelineConfig make_pipeline_config(const RunningStream& stream,
+                                                          const video_server::StreamOutputConfig& output_config,
+                                                          uint32_t width,
+                                                          uint32_t height) {
+  video_server::RawVideoPipelineConfig config;
+  config.input_width = width;
+  config.input_height = height;
+  config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
+  config.input_fps = stream.config.nominal_fps;
+  if (output_config.output_fps > 0.0) {
+    config.output_fps = output_config.output_fps;
+  }
+  return config;
+}
 
 }  // namespace
 
@@ -241,37 +259,66 @@ int main(int argc, char** argv) {
   const auto run_started_at = Clock::now();
 
   for (auto& stream : streams) {
-    stream->pipeline_config.input_width = stream->config.width;
-    stream->pipeline_config.input_height = stream->config.height;
-    stream->pipeline_config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
-    stream->pipeline_config.input_fps = stream->config.nominal_fps;
-    stream->pipeline = video_server::make_raw_to_h264_pipeline_for_server(stream->config.stream_id, stream->pipeline_config, server);
-
-    if (!stream->pipeline->start(&stream->pipeline_error)) {
-      spdlog::error("Failed to start raw-to-H264 pipeline for {}: {}", stream->config.stream_id, stream->pipeline_error);
-      stop_requested = true;
-      break;
-    }
-
     stream->frame_thread = std::thread([&server, &stop_requested, stream = stream.get()]() {
       const auto frame_interval = std::chrono::duration<double>(1.0 / stream->config.nominal_fps);
       while (!stop_requested.load()) {
-        const auto frame = stream->generator.next_frame();
-        if (!server.push_frame(stream->config.stream_id, frame)) {
+        const auto raw_frame = stream->generator.next_frame();
+        if (!server.push_frame(stream->config.stream_id, raw_frame)) {
           spdlog::warn("Failed to push synthetic frame for {}", stream->config.stream_id);
         }
-        if (!stream->pipeline->push_frame(frame, &stream->pipeline_error)) {
-          spdlog::error("Failed to push raw frame into H264 pipeline for {}: {}", stream->config.stream_id,
-                        stream->pipeline_error);
+
+        const auto output_config = server.get_stream_output_config(stream->config.stream_id);
+        if (!output_config.has_value()) {
+          spdlog::error("Failed to load stream output config for {}", stream->config.stream_id);
           stop_requested = true;
           break;
         }
+
+        video_server::RgbImage transformed;
+        if (!video_server::apply_display_transform(raw_frame, *output_config, transformed)) {
+          spdlog::error("Failed to apply display transform for {} generation={}", stream->config.stream_id,
+                        output_config->config_generation);
+          stop_requested = true;
+          break;
+        }
+
+        if (!stream->pipeline || stream->pipeline_config_generation != output_config->config_generation) {
+          if (stream->pipeline) {
+            stream->pipeline->stop();
+            stream->pipeline.reset();
+          }
+          stream->pipeline_config = make_pipeline_config(*stream, *output_config, transformed.width, transformed.height);
+          stream->pipeline = video_server::make_raw_to_h264_pipeline_for_server(stream->config.stream_id, stream->pipeline_config, server);
+          if (!stream->pipeline->start(&stream->pipeline_error)) {
+            spdlog::error("Failed to start raw-to-H264 pipeline for {} generation={}: {}", stream->config.stream_id,
+                          output_config->config_generation, stream->pipeline_error);
+            stop_requested = true;
+            break;
+          }
+          stream->pipeline_config_generation = output_config->config_generation;
+          spdlog::info(
+              "[smoke-server] restarted encoded pipeline stream={} generation={} transformed={}x{} output_fps={}",
+              stream->config.stream_id, stream->pipeline_config_generation, transformed.width, transformed.height,
+              output_config->output_fps);
+        }
+
+        const video_server::VideoFrameView transformed_frame{
+            transformed.rgb.data(), transformed.width, transformed.height, transformed.width * 3u,
+            video_server::VideoPixelFormat::RGB24, raw_frame.timestamp_ns, raw_frame.frame_id};
+        if (!stream->pipeline->push_frame(transformed_frame, &stream->pipeline_error)) {
+          spdlog::error("Failed to push transformed frame into H264 pipeline for {} generation={}: {}",
+                        stream->config.stream_id, stream->pipeline_config_generation, stream->pipeline_error);
+          stop_requested = true;
+          break;
+        }
+
         std::this_thread::sleep_for(frame_interval);
       }
     });
 
-    spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps", stream->config.stream_id, stream->config.label,
-                 stream->config.width, stream->config.height, stream->config.nominal_fps);
+    spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps input={}", stream->config.stream_id,
+                 stream->config.label, stream->config.width, stream->config.height, stream->config.nominal_fps,
+                 video_server::to_string(stream->config.input_pixel_format));
   }
 
   spdlog::info("[smoke-server] started HTTP/WebRTC server on http://{}:{} with {} stream(s)", options->host,
@@ -309,13 +356,13 @@ int main(int argc, char** argv) {
   }
 
   for (auto& stream : streams) {
-    if (stream->pipeline) {
-      stream->pipeline->stop();
+    if (stream->frame_thread.joinable()) {
+      stream->frame_thread.join();
     }
   }
   for (auto& stream : streams) {
-    if (stream->frame_thread.joinable()) {
-      stream->frame_thread.join();
+    if (stream->pipeline) {
+      stream->pipeline->stop();
     }
   }
 

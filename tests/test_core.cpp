@@ -261,3 +261,95 @@ TEST(VideoServerCoreTest, StreamDebugSnapshotsRemainPerStreamAndStableUnderRepea
 }
 
 }  // namespace
+
+
+TEST(VideoServerCoreTest, AppliesPerStreamOutputConfigIsolationAndGeneration) {
+  video_server::VideoServerCore server;
+  video_server::StreamConfig alpha{"alpha-cfg", "Alpha", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  video_server::StreamConfig bravo{"bravo-cfg", "Bravo", 4, 4, 30.0, video_server::VideoPixelFormat::GRAY8};
+  ASSERT_TRUE(server.register_stream(alpha));
+  ASSERT_TRUE(server.register_stream(bravo));
+
+  video_server::StreamOutputConfig alpha_cfg;
+  alpha_cfg.display_mode = video_server::VideoDisplayMode::Ironbow;
+  alpha_cfg.output_width = 32;
+  alpha_cfg.output_height = 24;
+  alpha_cfg.output_fps = 10.0;
+  ASSERT_TRUE(server.set_stream_output_config(alpha.stream_id, alpha_cfg));
+
+  video_server::StreamOutputConfig bravo_cfg;
+  bravo_cfg.display_mode = video_server::VideoDisplayMode::BlackHot;
+  bravo_cfg.output_width = 64;
+  bravo_cfg.output_height = 48;
+  bravo_cfg.output_fps = 0.0;
+  ASSERT_TRUE(server.set_stream_output_config(bravo.stream_id, bravo_cfg));
+
+  const auto alpha_info = server.get_stream_info(alpha.stream_id);
+  const auto bravo_info = server.get_stream_info(bravo.stream_id);
+  ASSERT_TRUE(alpha_info.has_value());
+  ASSERT_TRUE(bravo_info.has_value());
+  EXPECT_EQ(alpha_info->output_config.display_mode, video_server::VideoDisplayMode::Ironbow);
+  EXPECT_EQ(alpha_info->output_config.output_width, 32u);
+  EXPECT_EQ(alpha_info->output_config.output_height, 24u);
+  EXPECT_DOUBLE_EQ(alpha_info->output_config.output_fps, 10.0);
+  EXPECT_EQ(bravo_info->output_config.display_mode, video_server::VideoDisplayMode::BlackHot);
+  EXPECT_EQ(bravo_info->output_config.output_width, 64u);
+  EXPECT_EQ(bravo_info->output_config.output_height, 48u);
+  EXPECT_EQ(alpha_info->output_config.config_generation, 2u);
+  EXPECT_EQ(bravo_info->output_config.config_generation, 2u);
+
+  const auto alpha_snapshot = server.get_stream_debug_snapshot(alpha.stream_id);
+  ASSERT_TRUE(alpha_snapshot.has_value());
+  EXPECT_EQ(alpha_snapshot->active_filter_mode, "Ironbow");
+  EXPECT_EQ(alpha_snapshot->active_output_width, 32u);
+  EXPECT_EQ(alpha_snapshot->active_output_height, 24u);
+  EXPECT_DOUBLE_EQ(alpha_snapshot->active_output_fps, 10.0);
+  EXPECT_EQ(alpha_snapshot->config_generation, 2u);
+}
+
+TEST(VideoServerCoreTest, ReconfigureResetsOutputAndFpsThrottlePerStreamOnly) {
+  video_server::VideoServerCore server;
+  video_server::StreamConfig cfg{"throttle", "Throttle", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8};
+  video_server::StreamConfig other{"other", "Other", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8};
+  ASSERT_TRUE(server.register_stream(cfg));
+  ASSERT_TRUE(server.register_stream(other));
+
+  video_server::StreamOutputConfig throttled;
+  throttled.output_fps = 5.0;
+  ASSERT_TRUE(server.set_stream_output_config(cfg.stream_id, throttled));
+
+  std::vector<uint8_t> pixels = {10, 20, 30, 40};
+  auto frame0 = make_gray_frame(pixels, 2, 2, 0, 1);
+  auto frame1 = make_gray_frame(pixels, 2, 2, 10000000, 2);
+  auto frame2 = make_gray_frame(pixels, 2, 2, 300000000, 3);
+  EXPECT_TRUE(server.push_frame(cfg.stream_id, frame0));
+  EXPECT_TRUE(server.push_frame(cfg.stream_id, frame1));
+  EXPECT_TRUE(server.push_frame(cfg.stream_id, frame2));
+
+  auto info = server.get_stream_info(cfg.stream_id);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->frames_received, 3u);
+  EXPECT_EQ(info->frames_transformed, 2u);
+  EXPECT_EQ(info->frames_dropped, 1u);
+
+  video_server::StreamOutputConfig reconfigured = throttled;
+  reconfigured.output_fps = 0.0;
+  reconfigured.output_width = 16;
+  reconfigured.output_height = 16;
+  ASSERT_TRUE(server.set_stream_output_config(cfg.stream_id, reconfigured));
+
+  auto latest_after_reconfigure = server.get_latest_frame_for_stream(cfg.stream_id);
+  EXPECT_EQ(latest_after_reconfigure, nullptr);
+
+  EXPECT_TRUE(server.push_frame(cfg.stream_id, make_gray_frame(pixels, 2, 2, 301000000, 4)));
+  info = server.get_stream_info(cfg.stream_id);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->output_config.config_generation, 3u);
+  EXPECT_EQ(info->frames_transformed, 3u);
+
+  EXPECT_TRUE(server.push_frame(other.stream_id, make_gray_frame(pixels, 2, 2, 1, 1)));
+  const auto other_info = server.get_stream_info(other.stream_id);
+  ASSERT_TRUE(other_info.has_value());
+  EXPECT_EQ(other_info->frames_transformed, 1u);
+  EXPECT_EQ(other_info->output_config.config_generation, 1u);
+}

@@ -49,6 +49,12 @@ struct StreamDebugSnapshot {
   uint32_t configured_width{0};
   uint32_t configured_height{0};
   double configured_fps{0.0};
+  std::string active_filter_mode;
+  uint32_t active_output_width{0};
+  uint32_t active_output_height{0};
+  double active_output_fps{0.0};
+  uint64_t config_generation{0};
+  std::string config_state;
   bool latest_raw_frame_available{false};
   uint64_t latest_raw_frame_id{0};
   uint64_t latest_raw_timestamp_ns{0};

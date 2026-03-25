@@ -35,3 +35,32 @@ TEST(SyntheticFrameGeneratorTest, DifferentStreamsProduceDistinctPatternFamilies
   EXPECT_NE(std::memcmp(alpha_frame.data, charlie_frame.data, byte_count), 0);
   EXPECT_NE(std::memcmp(bravo_frame.data, charlie_frame.data, byte_count), 0);
 }
+
+TEST(SyntheticFrameGeneratorTest, SupportsGray8StreamsForPaletteFriendlySmokeInputs) {
+  video_server::StreamConfig cfg{"alpha", "Synthetic demo alpha sweep grayscale", 32, 24, 30.0,
+                                 video_server::VideoPixelFormat::GRAY8};
+  video_server::SyntheticFrameGenerator generator(cfg);
+
+  const auto frame = generator.next_frame();
+  const auto next_frame = generator.next_frame();
+
+  ASSERT_NE(frame.data, nullptr);
+  ASSERT_NE(next_frame.data, nullptr);
+  EXPECT_EQ(frame.pixel_format, video_server::VideoPixelFormat::GRAY8);
+  EXPECT_EQ(frame.stride_bytes, cfg.width);
+  const size_t byte_count = static_cast<size_t>(cfg.width) * cfg.height;
+  const auto* bytes = static_cast<const uint8_t*>(frame.data);
+
+  EXPECT_EQ(next_frame.pixel_format, video_server::VideoPixelFormat::GRAY8);
+  EXPECT_EQ(next_frame.stride_bytes, cfg.width);
+  EXPECT_EQ(next_frame.frame_id, frame.frame_id + 1);
+
+  bool has_variation = false;
+  for (size_t i = 1; i < byte_count; ++i) {
+    if (bytes[i] != bytes[0]) {
+      has_variation = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(has_variation);
+}

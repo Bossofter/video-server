@@ -2,9 +2,14 @@
 set -euo pipefail
 
 if [[ -z "${VCPKG_ROOT:-}" ]]; then
-  echo "error: VCPKG_ROOT is not set"
-  echo "set it to your vcpkg checkout, e.g. export VCPKG_ROOT=/opt/vcpkg"
-  exit 1
+  if [[ -d "/opt/vcpkg" ]]; then
+    export VCPKG_ROOT="/opt/vcpkg"
+    echo "info: VCPKG_ROOT was unset; defaulting to ${VCPKG_ROOT}"
+  else
+    echo "error: VCPKG_ROOT is not set"
+    echo "set it to your vcpkg checkout, e.g. export VCPKG_ROOT=/opt/vcpkg"
+    exit 1
+  fi
 fi
 
 TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"

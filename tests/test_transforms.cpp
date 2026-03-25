@@ -40,10 +40,15 @@ TEST(DisplayTransformTest, AppliesModesRotationAndMirroring) {
   ASSERT_TRUE(video_server::apply_display_transform(frame, cfg, out));
   EXPECT_GE(out.rgb[0], out.rgb[9]);
 
-  cfg.display_mode = video_server::VideoDisplayMode::Rainbow;
+  cfg.display_mode = video_server::VideoDisplayMode::Ironbow;
   ASSERT_TRUE(video_server::apply_display_transform(frame, cfg, out));
-  const auto rainbow_mid = at_rgb(out, 1, 0);
-  EXPECT_FALSE(rainbow_mid[0] == rainbow_mid[1] && rainbow_mid[1] == rainbow_mid[2]);
+  const auto ironbow_mid = at_rgb(out, 1, 0);
+  EXPECT_FALSE(ironbow_mid[0] == ironbow_mid[1] && ironbow_mid[1] == ironbow_mid[2]);
+
+  cfg.display_mode = video_server::VideoDisplayMode::Arctic;
+  ASSERT_TRUE(video_server::apply_display_transform(frame, cfg, out));
+  const auto arctic_mid = at_rgb(out, 1, 0);
+  EXPECT_FALSE(arctic_mid[0] == arctic_mid[1] && arctic_mid[1] == arctic_mid[2]);
 
   cfg.display_mode = video_server::VideoDisplayMode::Passthrough;
   cfg.rotation_degrees = 90;
@@ -68,6 +73,13 @@ TEST(DisplayTransformTest, AppliesModesRotationAndMirroring) {
 
   cfg.rotation_degrees = 45;
   EXPECT_FALSE(video_server::apply_display_transform(frame, cfg, out));
+
+  cfg.rotation_degrees = 0;
+  cfg.output_width = 4;
+  cfg.output_height = 4;
+  ASSERT_TRUE(video_server::apply_display_transform(frame, cfg, out));
+  EXPECT_EQ(out.width, 4u);
+  EXPECT_EQ(out.height, 4u);
 }
 
 }  // namespace

@@ -59,6 +59,42 @@ void rainbow_map(float x, uint8_t& r, uint8_t& g, uint8_t& b) {
   b = static_cast<uint8_t>(bf * 255.0F);
 }
 
+void ironbow_map(float x, uint8_t& r, uint8_t& g, uint8_t& b) {
+  const float t = clamp01(x);
+  if (t < 0.25F) {
+    const float k = t / 0.25F;
+    r = static_cast<uint8_t>(30.0F * k);
+    g = 0;
+    b = static_cast<uint8_t>(80.0F + 60.0F * k);
+    return;
+  }
+  if (t < 0.5F) {
+    const float k = (t - 0.25F) / 0.25F;
+    r = static_cast<uint8_t>(30.0F + 90.0F * k);
+    g = static_cast<uint8_t>(10.0F + 30.0F * k);
+    b = static_cast<uint8_t>(140.0F - 80.0F * k);
+    return;
+  }
+  if (t < 0.75F) {
+    const float k = (t - 0.5F) / 0.25F;
+    r = static_cast<uint8_t>(120.0F + 90.0F * k);
+    g = static_cast<uint8_t>(40.0F + 80.0F * k);
+    b = static_cast<uint8_t>(60.0F - 40.0F * k);
+    return;
+  }
+  const float k = (t - 0.75F) / 0.25F;
+  r = static_cast<uint8_t>(210.0F + 45.0F * k);
+  g = static_cast<uint8_t>(120.0F + 110.0F * k);
+  b = static_cast<uint8_t>(20.0F + 35.0F * k);
+}
+
+void arctic_map(float x, uint8_t& r, uint8_t& g, uint8_t& b) {
+  const float t = clamp01(x);
+  r = static_cast<uint8_t>(40.0F + 170.0F * t);
+  g = static_cast<uint8_t>(70.0F + 140.0F * t);
+  b = static_cast<uint8_t>(120.0F + 135.0F * t);
+}
+
 void map_output_to_source(uint32_t out_x, uint32_t out_y, uint32_t width, uint32_t height, int rotation,
                           uint32_t& src_x, uint32_t& src_y) {
   switch (rotation) {
@@ -98,14 +134,20 @@ bool apply_display_transform(const VideoFrameView& frame, const StreamOutputConf
     return false;
   }
 
-  out.width = (config.rotation_degrees == 90 || config.rotation_degrees == 270) ? frame.height : frame.width;
-  out.height = (config.rotation_degrees == 90 || config.rotation_degrees == 270) ? frame.width : frame.height;
-  out.rgb.resize(static_cast<size_t>(out.width) * out.height * 3);
+  const uint32_t rotated_width =
+      (config.rotation_degrees == 90 || config.rotation_degrees == 270) ? frame.height : frame.width;
+  const uint32_t rotated_height =
+      (config.rotation_degrees == 90 || config.rotation_degrees == 270) ? frame.width : frame.height;
+
+  RgbImage rotated;
+  rotated.width = rotated_width;
+  rotated.height = rotated_height;
+  rotated.rgb.resize(static_cast<size_t>(rotated.width) * rotated.height * 3);
 
   const auto* input = static_cast<const uint8_t*>(frame.data);
-  for (uint32_t y = 0; y < out.height; ++y) {
-    for (uint32_t x = 0; x < out.width; ++x) {
-      const size_t out_idx = (static_cast<size_t>(y) * out.width + x) * 3;
+  for (uint32_t y = 0; y < rotated.height; ++y) {
+    for (uint32_t x = 0; x < rotated.width; ++x) {
+      const size_t out_idx = (static_cast<size_t>(y) * rotated.width + x) * 3;
 
       uint32_t src_x = 0;
       uint32_t src_y = 0;
@@ -152,14 +194,43 @@ bool apply_display_transform(const VideoFrameView& frame, const StreamOutputConf
           r = g = b = v;
           break;
         }
+        case VideoDisplayMode::Ironbow:
+          ironbow_map(n, r, g, b);
+          break;
         case VideoDisplayMode::Rainbow:
           rainbow_map(n, r, g, b);
           break;
+        case VideoDisplayMode::Arctic:
+          arctic_map(n, r, g, b);
+          break;
       }
 
-      out.rgb[out_idx + 0] = r;
-      out.rgb[out_idx + 1] = g;
-      out.rgb[out_idx + 2] = b;
+      rotated.rgb[out_idx + 0] = r;
+      rotated.rgb[out_idx + 1] = g;
+      rotated.rgb[out_idx + 2] = b;
+    }
+  }
+
+  const uint32_t target_width = config.output_width > 0 ? config.output_width : rotated.width;
+  const uint32_t target_height = config.output_height > 0 ? config.output_height : rotated.height;
+  if (target_width == rotated.width && target_height == rotated.height) {
+    out = std::move(rotated);
+    return true;
+  }
+
+  out.width = target_width;
+  out.height = target_height;
+  out.rgb.resize(static_cast<size_t>(out.width) * out.height * 3);
+
+  for (uint32_t y = 0; y < out.height; ++y) {
+    const uint32_t src_y = std::min(rotated.height - 1U, (y * rotated.height) / out.height);
+    for (uint32_t x = 0; x < out.width; ++x) {
+      const uint32_t src_x = std::min(rotated.width - 1U, (x * rotated.width) / out.width);
+      const size_t src_idx = (static_cast<size_t>(src_y) * rotated.width + src_x) * 3;
+      const size_t dst_idx = (static_cast<size_t>(y) * out.width + x) * 3;
+      out.rgb[dst_idx + 0] = rotated.rgb[src_idx + 0];
+      out.rgb[dst_idx + 1] = rotated.rgb[src_idx + 1];
+      out.rgb[dst_idx + 2] = rotated.rgb[src_idx + 2];
     }
   }
 

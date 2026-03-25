@@ -827,7 +827,7 @@ std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_
 
 WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
                                          LatestEncodedUnitGetter latest_encoded_unit_getter)
-    : stream_id_(std::move(stream_id)) {
+    : stream_id_(std::move(stream_id)), callbacks_enabled_(std::make_shared<std::atomic_bool>(true)) {
   ensure_default_logging_config();
   rtc::Configuration config;
   config.disableAutoNegotiation = false;
@@ -950,7 +950,9 @@ void WebRtcStreamSession::stop() {
   std::shared_ptr<rtc::PeerConnection> peer_connection;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    callbacks_enabled_->store(false, std::memory_order_release);
     peer_connection = peer_connection_;
+    peer_connection_.reset();
   }
 
   if (peer_connection) {
@@ -980,7 +982,12 @@ std::string WebRtcStreamSession::peer_state_to_string(rtc::PeerConnection::State
 void WebRtcStreamSession::configure_callbacks() {
   // These callbacks may run synchronously while PeerConnection API calls are still on the stack.
   // They only touch session-local state under mutex_ and therefore must stay independent.
-  peer_connection_->onTrack([this](std::shared_ptr<rtc::Track> track) {
+  auto callbacks_enabled = callbacks_enabled_;
+
+  peer_connection_->onTrack([this, callbacks_enabled](std::shared_ptr<rtc::Track> track) {
+    if (!callbacks_enabled->load(std::memory_order_acquire)) {
+      return;
+    }
     if (!track) {
       spdlog::warn("[signaling] track callback stream={} with null track", stream_id_);
       return;
@@ -1026,7 +1033,10 @@ void WebRtcStreamSession::configure_callbacks() {
     spdlog::info("[signaling] bound negotiated video track stream={} reused_mid={}", stream_id_, track->mid());
   });
 
-  peer_connection_->onLocalDescription([this](rtc::Description description) {
+  peer_connection_->onLocalDescription([this, callbacks_enabled](rtc::Description description) {
+    if (!callbacks_enabled->load(std::memory_order_acquire)) {
+      return;
+    }
     std::string answer = std::string(description);
     answer = sanitize_answer_setup_role(std::move(answer));
     const auto answer_mids = extract_sdp_mids(answer);
@@ -1038,14 +1048,20 @@ void WebRtcStreamSession::configure_callbacks() {
     answer_sdp_ = answer;
   });
 
-  peer_connection_->onLocalCandidate([this](rtc::Candidate candidate) {
+  peer_connection_->onLocalCandidate([this, callbacks_enabled](rtc::Candidate candidate) {
+    if (!callbacks_enabled->load(std::memory_order_acquire)) {
+      return;
+    }
     const std::string local_candidate = std::string(candidate);
     spdlog::debug("[signaling] local candidate generated stream={} size={}", stream_id_, local_candidate.size());
     std::lock_guard<std::mutex> lock(mutex_);
     last_local_candidate_ = local_candidate;
   });
 
-  peer_connection_->onStateChange([this](rtc::PeerConnection::State state) {
+  peer_connection_->onStateChange([this, callbacks_enabled](rtc::PeerConnection::State state) {
+    if (!callbacks_enabled->load(std::memory_order_acquire)) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     peer_state_ = peer_state_to_string(state);
   });
