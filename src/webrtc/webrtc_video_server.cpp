@@ -279,8 +279,13 @@ std::string session_debug_snapshot_json(const StreamSessionDebugSnapshot& sessio
       << "\"session_generation\":" << session.session_generation << ","
       << "\"stream_id\":\"" << json_escape(session.stream_id) << "\","
       << "\"peer_state\":\"" << json_escape(session.peer_state) << "\","
+      << "\"active\":" << bool_to_json(session.active) << ","
+      << "\"sending_active\":" << bool_to_json(session.sending_active) << ","
       << "\"sender_state\":\"" << json_escape(session.sender_state) << "\","
       << "\"last_packetization_status\":\"" << json_escape(session.last_packetization_status) << "\","
+      << "\"teardown_reason\":\"" << json_escape(session.teardown_reason) << "\","
+      << "\"last_transition_reason\":\"" << json_escape(session.last_transition_reason) << "\","
+      << "\"disconnect_count\":" << session.disconnect_count << ","
       << "\"track_exists\":" << bool_to_json(session.track_exists) << ","
       << "\"track_open\":" << bool_to_json(session.track_open) << ","
       << "\"startup_sequence_sent\":" << bool_to_json(session.startup_sequence_sent) << ","
@@ -364,7 +369,9 @@ class WebRtcVideoServer::Impl {
 
     const auto sessions = signaling_.list_sessions();
     snapshot.stream_count = snapshot.streams.size();
-    snapshot.active_session_count = sessions.size();
+    for (const auto& session : sessions) {
+      snapshot.active_session_count += session.active ? 1u : 0u;
+    }
 
     std::unordered_map<std::string, StreamSessionDebugSnapshot> sessions_by_stream;
     for (const auto& session : sessions) {
@@ -372,8 +379,13 @@ class WebRtcVideoServer::Impl {
       session_snapshot.session_generation = session.session_generation;
       session_snapshot.stream_id = session.stream_id;
       session_snapshot.peer_state = session.peer_state;
+      session_snapshot.active = session.active;
+      session_snapshot.sending_active = session.sending_active;
       session_snapshot.sender_state = session.media_source.encoded_sender.sender_state;
       session_snapshot.last_packetization_status = session.media_source.encoded_sender.last_packetization_status;
+      session_snapshot.teardown_reason = session.teardown_reason;
+      session_snapshot.last_transition_reason = session.last_transition_reason;
+      session_snapshot.disconnect_count = session.disconnect_count;
       session_snapshot.track_exists = session.media_source.encoded_sender.video_track_exists;
       session_snapshot.track_open = session.media_source.encoded_sender.video_track_open;
       session_snapshot.startup_sequence_sent = session.media_source.encoded_sender.startup_sequence_sent;
@@ -667,6 +679,11 @@ class WebRtcVideoServer::Impl {
             << "\"last_remote_candidate\":\"" << json_escape(session->last_remote_candidate) << "\","
             << "\"last_local_candidate\":\"" << json_escape(session->last_local_candidate) << "\","
             << "\"peer_state\":\"" << json_escape(session->peer_state) << "\","
+            << "\"active\":" << bool_to_json(session->active) << ','
+            << "\"sending_active\":" << bool_to_json(session->sending_active) << ','
+            << "\"teardown_reason\":\"" << json_escape(session->teardown_reason) << "\","
+            << "\"last_transition_reason\":\"" << json_escape(session->last_transition_reason) << "\","
+            << "\"disconnect_count\":" << session->disconnect_count << ','
             << "\"media_bridge_state\":\"" << json_escape(session->media_source.bridge_state) << "\","
             << "\"preferred_media_path\":\"" << json_escape(session->media_source.preferred_media_path) << "\","
             << "\"latest_snapshot_available\":" << bool_to_json(session->media_source.latest_snapshot_available)
@@ -686,6 +703,12 @@ class WebRtcVideoServer::Impl {
             << bool_to_json(session->media_source.latest_encoded_codec_config) << ','
             << "\"encoded_sender_state\":\"" << json_escape(session->media_source.encoded_sender.sender_state)
             << "\","
+            << "\"encoded_sender_session_active\":"
+            << bool_to_json(session->media_source.encoded_sender.session_active) << ','
+            << "\"encoded_sender_session_teardown_reason\":\""
+            << json_escape(session->media_source.encoded_sender.session_teardown_reason) << "\","
+            << "\"encoded_sender_last_lifecycle_event\":\""
+            << json_escape(session->media_source.encoded_sender.last_lifecycle_event) << "\","
             << "\"encoded_sender_codec\":\"" << json_escape(session->media_source.encoded_sender.codec) << "\","
             << "\"encoded_sender_has_pending_encoded_unit\":"
             << bool_to_json(session->media_source.encoded_sender.has_pending_encoded_unit) << ','

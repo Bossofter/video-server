@@ -324,6 +324,13 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (!session_active_) {
+        h264_delivery_active_ = false;
+        sender_state_ = "session-inactive";
+        last_packetization_status_ = "session-inactive";
+        last_lifecycle_event_ = session_teardown_reason_;
+        return;
+      }
       has_pending_encoded_unit_ = true;
       codec_ = codec_to_string(latest_encoded_unit->codec);
       video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
@@ -561,15 +568,31 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     }
   }
 
+  void deactivate(std::string reason) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_active_ = false;
+    session_teardown_reason_ = std::move(reason);
+    last_lifecycle_event_ = session_teardown_reason_;
+    video_track_exists_ = false;
+    video_track_open_ = false;
+    ready_for_video_track_ = false;
+    h264_delivery_active_ = false;
+    sender_state_ = "session-inactive";
+    last_packetization_status_ = "session-inactive";
+  }
+
   EncodedVideoSenderSnapshot snapshot() const override {
     std::lock_guard<std::mutex> lock(mutex_);
     EncodedVideoSenderSnapshot snapshot;
     snapshot.sender_state = sender_state_;
     snapshot.codec = codec_;
+    snapshot.session_active = session_active_;
+    snapshot.session_teardown_reason = session_teardown_reason_;
+    snapshot.last_lifecycle_event = last_lifecycle_event_;
     snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
     snapshot.codec_config_seen = codec_config_seen_;
-    snapshot.video_track_exists = video_track_sink_ && video_track_sink_->exists();
-    snapshot.video_track_open = video_track_sink_ && video_track_sink_->is_open();
+    snapshot.video_track_exists = session_active_ && video_track_sink_ && video_track_sink_->exists();
+    snapshot.video_track_open = session_active_ && video_track_sink_ && video_track_sink_->is_open();
     snapshot.ready_for_video_track = snapshot.video_track_exists && codec_config_seen_ && cached_idr_available_;
     snapshot.h264_delivery_active = h264_delivery_active_;
     snapshot.keyframe_seen = keyframe_seen_;
@@ -605,8 +628,13 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
     snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
     snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
     snapshot.last_packetization_status = last_packetization_status_;
-    snapshot.video_mid = video_track_sink_ ? video_track_sink_->mid() : "";
-    if (snapshot.sender_state == "video-track-missing" && snapshot.video_track_exists) {
+    snapshot.video_mid = (session_active_ && video_track_sink_) ? video_track_sink_->mid() : "";
+    if (!snapshot.session_active) {
+      snapshot.sender_state = "session-inactive";
+      snapshot.video_track_exists = false;
+      snapshot.video_track_open = false;
+      snapshot.ready_for_video_track = false;
+    } else if (snapshot.sender_state == "video-track-missing" && snapshot.video_track_exists) {
       if (!snapshot.codec_config_seen) {
         snapshot.sender_state = "waiting-for-h264-codec-config";
       } else if (!snapshot.cached_idr_available) {
@@ -623,6 +651,12 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
  private:
   void mark_track_not_sendable(std::string sender_state, std::string packetization_status) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!session_active_) {
+      sender_state_ = "session-inactive";
+      last_packetization_status_ = "session-inactive";
+      h264_delivery_active_ = false;
+      return;
+    }
     video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
     video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
     ready_for_video_track_ = video_track_exists_ && codec_config_seen_ && cached_idr_available_;
@@ -643,6 +677,9 @@ class H264EncodedVideoSender : public IEncodedVideoSender {
   std::shared_ptr<const LatestEncodedUnit> cached_startup_idr_;
   std::string sender_state_{"waiting-for-encoded-input"};
   std::string codec_;
+  bool session_active_{true};
+  std::string session_teardown_reason_{"not-terminated"};
+  std::string last_lifecycle_event_{"session-created"};
   uint32_t ssrc_{0};
   uint16_t sequence_number_{0};
   int negotiated_h264_payload_type_{kH264PayloadType};
@@ -735,6 +772,11 @@ class AttachableRtcTrackSink : public IEncodedVideoTrackSink {
   void bind(std::shared_ptr<rtc::Track> track) {
     std::lock_guard<std::mutex> lock(mutex_);
     track_ = std::move(track);
+  }
+
+  void unbind() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    track_.reset();
   }
 
  private:
@@ -928,6 +970,9 @@ void WebRtcStreamSession::on_latest_frame(std::shared_ptr<const LatestFrame> lat
 void WebRtcStreamSession::on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) {
   std::unique_lock<std::mutex> lock(mutex_);
   media_source_->on_latest_encoded_unit(latest_encoded_unit);
+  if (!active_) {
+    return;
+  }
   auto sender = encoded_sender_.get();
   lock.unlock();
   sender->on_encoded_access_unit(std::move(latest_encoded_unit));
@@ -943,22 +988,41 @@ WebRtcSessionSnapshot WebRtcStreamSession::snapshot() const {
                                last_remote_candidate_,
                                last_local_candidate_,
                                peer_state_,
+                               active_,
+                               sending_active_,
+                               teardown_reason_,
+                               last_transition_reason_,
+                               disconnect_count_,
                                std::move(media_snapshot)};
 }
 
 void WebRtcStreamSession::stop() {
   std::shared_ptr<rtc::PeerConnection> peer_connection;
+  std::shared_ptr<AttachableRtcTrackSink> attachable_sink;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (active_) {
+      transition_to_inactive_locked("server-stop-requested", "closed");
+    }
     callbacks_enabled_->store(false, std::memory_order_release);
     peer_connection = peer_connection_;
     peer_connection_.reset();
+    attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
+  }
+
+  if (attachable_sink) {
+    attachable_sink->unbind();
   }
 
   if (peer_connection) {
     // close() may also trigger state callbacks, so do not hold the session mutex here.
     peer_connection->close();
   }
+}
+
+bool WebRtcStreamSession::is_active() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return active_;
 }
 
 std::string WebRtcStreamSession::peer_state_to_string(rtc::PeerConnection::State state) {
@@ -1030,6 +1094,15 @@ void WebRtcStreamSession::configure_callbacks() {
     }
 
     attachable_sink->bind(track);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_) {
+        attachable_sink->unbind();
+        return;
+      }
+      sending_active_ = true;
+      last_transition_reason_ = "video-track-bound";
+    }
     spdlog::info("[signaling] bound negotiated video track stream={} reused_mid={}", stream_id_, track->mid());
   });
 
@@ -1064,7 +1137,34 @@ void WebRtcStreamSession::configure_callbacks() {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     peer_state_ = peer_state_to_string(state);
+    if (state == rtc::PeerConnection::State::Disconnected) {
+      transition_to_inactive_locked("peer-disconnected");
+    } else if (state == rtc::PeerConnection::State::Failed) {
+      transition_to_inactive_locked("peer-failed");
+    } else if (state == rtc::PeerConnection::State::Closed) {
+      transition_to_inactive_locked("peer-closed");
+    }
   });
+}
+
+void WebRtcStreamSession::transition_to_inactive_locked(std::string reason, std::string peer_state_override) {
+  if (!active_) {
+    return;
+  }
+
+  auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
+  active_ = false;
+  sending_active_ = false;
+  teardown_reason_ = std::move(reason);
+  last_transition_reason_ = teardown_reason_;
+  ++disconnect_count_;
+  if (!peer_state_override.empty()) {
+    peer_state_ = std::move(peer_state_override);
+  }
+  encoded_sender_->deactivate(teardown_reason_);
+  if (attachable_sink) {
+    attachable_sink->unbind();
+  }
 }
 
 }  // namespace video_server

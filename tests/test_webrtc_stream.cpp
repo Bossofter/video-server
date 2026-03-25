@@ -350,6 +350,70 @@ TEST(WebRtcStreamSessionTest, ClosedTrackRaceDuringSendIsCaughtAndLaterRecoveryS
   EXPECT_FALSE(track_sink->sent_packets.empty());
 }
 
+TEST(WebRtcStreamSessionTest, SenderDeactivationStopsFurtherPacketizationAttempts) {
+  auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>(true, "video", true);
+  auto sender = video_server::make_h264_encoded_video_sender(track_sink, 1357);
+  sender->set_negotiated_h264_parameters(110, "packetization-mode=1;profile-level-id=42e01f");
+
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+
+  const auto before_teardown = sender->snapshot();
+  ASSERT_GT(before_teardown.packets_attempted, 0u);
+  const auto packets_before_teardown = before_teardown.packets_attempted;
+  const auto packets_sent_before_teardown = before_teardown.packets_sent_after_track_open;
+
+  sender->deactivate("peer-disconnected");
+  sender->on_encoded_access_unit(make_large_idr_unit(3000, 2500));
+
+  const auto after_teardown = sender->snapshot();
+  EXPECT_FALSE(after_teardown.session_active);
+  EXPECT_EQ(after_teardown.session_teardown_reason, "peer-disconnected");
+  EXPECT_EQ(after_teardown.last_lifecycle_event, "peer-disconnected");
+  EXPECT_EQ(after_teardown.sender_state, "session-inactive");
+  EXPECT_EQ(after_teardown.last_packetization_status, "session-inactive");
+  EXPECT_FALSE(after_teardown.video_track_exists);
+  EXPECT_FALSE(after_teardown.video_track_open);
+  EXPECT_EQ(after_teardown.packets_attempted, packets_before_teardown);
+  EXPECT_EQ(after_teardown.packets_sent_after_track_open, packets_sent_before_teardown);
+
+  std::lock_guard<std::mutex> lock(track_sink->mutex);
+  EXPECT_EQ(track_sink->sent_packets.size(), packets_before_teardown);
+}
+
+TEST(WebRtcStreamSessionTest, SessionStopMarksInactiveAndIgnoresFutureSenderWork) {
+  video_server::WebRtcStreamSession session(
+      "stream-stop", [](const std::string&) { return std::shared_ptr<const video_server::LatestFrame>{}; },
+      [](const std::string&) { return std::shared_ptr<const video_server::LatestEncodedUnit>{}; });
+
+  session.on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                    0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2},
+                                                   1000, false, true));
+  session.on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
+  const auto before_stop = session.snapshot();
+  ASSERT_TRUE(before_stop.active);
+  ASSERT_EQ(before_stop.media_source.encoded_sender.delivered_units, 2u);
+
+  session.stop();
+  session.on_encoded_access_unit(make_non_idr_unit(3000));
+
+  const auto after_stop = session.snapshot();
+  EXPECT_FALSE(after_stop.active);
+  EXPECT_FALSE(after_stop.sending_active);
+  EXPECT_EQ(after_stop.peer_state, "closed");
+  EXPECT_EQ(after_stop.teardown_reason, "server-stop-requested");
+  EXPECT_EQ(after_stop.last_transition_reason, "server-stop-requested");
+  EXPECT_EQ(after_stop.disconnect_count, 1u);
+  EXPECT_FALSE(after_stop.media_source.encoded_sender.session_active);
+  EXPECT_EQ(after_stop.media_source.encoded_sender.session_teardown_reason, "server-stop-requested");
+  EXPECT_EQ(after_stop.media_source.encoded_sender.sender_state, "session-inactive");
+  EXPECT_EQ(after_stop.media_source.encoded_sender.last_packetization_status, "session-inactive");
+  EXPECT_EQ(after_stop.media_source.encoded_sender.delivered_units, before_stop.media_source.encoded_sender.delivered_units);
+  EXPECT_EQ(after_stop.media_source.encoded_sender.packets_attempted, before_stop.media_source.encoded_sender.packets_attempted);
+}
+
 TEST(WebRtcStreamSessionTest, DoesNotStartFromNonIdrOnlyUnits) {
   auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>();
   auto sender = video_server::make_h264_encoded_video_sender(track_sink, 8765);

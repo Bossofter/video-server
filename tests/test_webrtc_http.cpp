@@ -218,6 +218,16 @@ bool wait_until(Predicate predicate, int timeout_ms = 5000, int sleep_ms = 25) {
   return predicate();
 }
 
+const video_server::StreamDebugSnapshot* find_stream_snapshot(const video_server::ServerDebugSnapshot& snapshot,
+                                                              const std::string& stream_id) {
+  for (const auto& stream : snapshot.streams) {
+    if (stream.stream_id == stream_id) {
+      return &stream;
+    }
+  }
+  return nullptr;
+}
+
 struct ClientPeerOffer {
   std::shared_ptr<rtc::PeerConnection> peer_connection;
   std::mutex mutex;
@@ -1005,37 +1015,178 @@ TEST(WebRtcHttpTest, PerStreamConfigApiSupportsIsolationValidationAndObservabili
   video_server::StreamConfig bravo{"bravo", "bravo", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
   ASSERT_TRUE(server.register_stream(alpha));
   ASSERT_TRUE(server.register_stream(bravo));
-  ASSERT_TRUE(server.start());
 
-  const std::string alpha_update = send_raw_request(
-      host, port,
-      http_request("PUT", "/api/video/streams/alpha/config",
-                   "{\"display_mode\":\"ironbow\",\"output_width\":32,\"output_height\":24,\"output_fps\":12}"));
-  ASSERT_NE(alpha_update.find("200 OK"), std::string::npos);
-  ASSERT_NE(alpha_update.find("\"config_generation\":2"), std::string::npos);
+  const auto alpha_update =
+      server.handle_http_request_for_test("PUT", "/api/video/streams/alpha/config",
+                                          "{\"display_mode\":\"ironbow\",\"output_width\":32,\"output_height\":24,\"output_fps\":12}");
+  ASSERT_EQ(alpha_update.status, 200);
+  ASSERT_NE(alpha_update.body.find("\"config_generation\":2"), std::string::npos);
 
-  const std::string bravo_update = send_raw_request(
-      host, port,
-      http_request("PUT", "/api/video/streams/bravo/config",
-                   "{\"display_mode\":\"black_hot\",\"output_width\":48,\"output_height\":48}"));
-  ASSERT_NE(bravo_update.find("200 OK"), std::string::npos);
+  const auto bravo_update =
+      server.handle_http_request_for_test("PUT", "/api/video/streams/bravo/config",
+                                          "{\"display_mode\":\"black_hot\",\"output_width\":48,\"output_height\":48}");
+  ASSERT_EQ(bravo_update.status, 200);
 
-  const std::string invalid = send_raw_request(
-      host, port,
-      http_request("PUT", "/api/video/streams/alpha/config", "{\"output_width\":4,\"output_height\":4,\"output_fps\":500}"));
-  ASSERT_NE(invalid.find("400 Bad Request"), std::string::npos);
+  const auto invalid =
+      server.handle_http_request_for_test("PUT", "/api/video/streams/alpha/config",
+                                          "{\"output_width\":4,\"output_height\":4,\"output_fps\":500}");
+  ASSERT_EQ(invalid.status, 400);
 
-  const std::string alpha_cfg = send_raw_request(host, port, http_request("GET", "/api/video/streams/alpha/config"));
-  const std::string bravo_cfg = send_raw_request(host, port, http_request("GET", "/api/video/streams/bravo/config"));
-  ASSERT_NE(alpha_cfg.find("\"display_mode\":\"Ironbow\""), std::string::npos);
-  ASSERT_NE(bravo_cfg.find("\"display_mode\":\"BlackHot\""), std::string::npos);
-  ASSERT_NE(alpha_cfg.find("\"output_width\":32"), std::string::npos);
-  ASSERT_NE(bravo_cfg.find("\"output_width\":48"), std::string::npos);
+  const auto alpha_cfg = server.handle_http_request_for_test("GET", "/api/video/streams/alpha/config");
+  const auto bravo_cfg = server.handle_http_request_for_test("GET", "/api/video/streams/bravo/config");
+  ASSERT_EQ(alpha_cfg.status, 200);
+  ASSERT_EQ(bravo_cfg.status, 200);
+  ASSERT_NE(alpha_cfg.body.find("\"display_mode\":\"Ironbow\""), std::string::npos);
+  ASSERT_NE(bravo_cfg.body.find("\"display_mode\":\"BlackHot\""), std::string::npos);
+  ASSERT_NE(alpha_cfg.body.find("\"output_width\":32"), std::string::npos);
+  ASSERT_NE(bravo_cfg.body.find("\"output_width\":48"), std::string::npos);
 
-  const std::string stats = send_raw_request(host, port, http_request("GET", "/api/video/debug/stats"));
-  ASSERT_NE(stats.find("\"active_filter_mode\":\"Ironbow\""), std::string::npos);
-  ASSERT_NE(stats.find("\"active_filter_mode\":\"BlackHot\""), std::string::npos);
-  ASSERT_NE(stats.find("\"config_generation\":2"), std::string::npos);
+  const auto stats = server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+  ASSERT_EQ(stats.status, 200);
+  ASSERT_NE(stats.body.find("\"active_filter_mode\":\"Ironbow\""), std::string::npos);
+  ASSERT_NE(stats.body.find("\"active_filter_mode\":\"BlackHot\""), std::string::npos);
+  ASSERT_NE(stats.body.find("\"config_generation\":2"), std::string::npos);
+}
+
+TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCoherent) {
+  const uint16_t port = static_cast<uint16_t>(23000 + (::getpid() % 10000));
+  const std::string host = "127.0.0.1";
+  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+  video_server::StreamConfig alpha{"alpha", "alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
+  video_server::StreamConfig bravo{"bravo", "bravo", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
+  ASSERT_TRUE(server.register_stream(alpha));
+  ASSERT_TRUE(server.register_stream(bravo));
+
+  std::array<uint8_t, 16> codec_config_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                             0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2};
+  std::array<uint8_t, 7> idr_bytes{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84};
+  std::array<uint8_t, 7> non_idr_bytes{0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x22};
+
+  video_server::EncodedAccessUnitView alpha_codec{};
+  alpha_codec.data = codec_config_bytes.data();
+  alpha_codec.size_bytes = codec_config_bytes.size();
+  alpha_codec.codec = video_server::VideoCodec::H264;
+  alpha_codec.timestamp_ns = 1000;
+  alpha_codec.codec_config = true;
+  alpha_codec.keyframe = false;
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_codec));
+
+  video_server::EncodedAccessUnitView alpha_idr{};
+  alpha_idr.data = idr_bytes.data();
+  alpha_idr.size_bytes = idr_bytes.size();
+  alpha_idr.codec = video_server::VideoCodec::H264;
+  alpha_idr.timestamp_ns = 2000;
+  alpha_idr.codec_config = false;
+  alpha_idr.keyframe = true;
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_idr));
+
+  video_server::EncodedAccessUnitView bravo_codec = alpha_codec;
+  bravo_codec.timestamp_ns = 3000;
+  ASSERT_TRUE(server.push_access_unit("bravo", bravo_codec));
+
+  video_server::EncodedAccessUnitView bravo_idr = alpha_idr;
+  bravo_idr.timestamp_ns = 4000;
+  ASSERT_TRUE(server.push_access_unit("bravo", bravo_idr));
+
+  auto alpha_offer = make_client_offer("alpha-lifecycle");
+  auto bravo_offer = make_client_offer("bravo-lifecycle");
+  ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/alpha/offer", alpha_offer->offer_sdp).status, 200);
+  ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/bravo/offer", bravo_offer->offer_sdp).status, 200);
+
+  video_server::WebRtcHttpResponse alpha_session{};
+  video_server::WebRtcHttpResponse bravo_session{};
+  ASSERT_TRUE(wait_until([&]() {
+    alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+    bravo_session = server.handle_http_request_for_test("GET", "/api/video/signaling/bravo/session");
+    return alpha_session.status == 200 && bravo_session.status == 200 &&
+           !json_string_field(alpha_session.body, "answer_sdp").empty() &&
+           !json_string_field(bravo_session.body, "answer_sdp").empty() &&
+           json_bool_field(alpha_session.body, "active") &&
+           json_bool_field(bravo_session.body, "active");
+  }));
+
+  video_server::EncodedAccessUnitView alpha_non_idr{};
+  alpha_non_idr.data = non_idr_bytes.data();
+  alpha_non_idr.size_bytes = non_idr_bytes.size();
+  alpha_non_idr.codec = video_server::VideoCodec::H264;
+  alpha_non_idr.timestamp_ns = 5000;
+  alpha_non_idr.codec_config = false;
+  alpha_non_idr.keyframe = false;
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_non_idr));
+
+  video_server::EncodedAccessUnitView bravo_non_idr = alpha_non_idr;
+  bravo_non_idr.timestamp_ns = 6000;
+  ASSERT_TRUE(server.push_access_unit("bravo", bravo_non_idr));
+
+  alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+  bravo_session = server.handle_http_request_for_test("GET", "/api/video/signaling/bravo/session");
+  ASSERT_EQ(alpha_session.status, 200);
+  ASSERT_EQ(bravo_session.status, 200);
+
+  const uint64_t alpha_generation_before_reconnect = json_uint_field(alpha_session.body, "session_generation");
+  const uint64_t bravo_generation_before_reconnect = json_uint_field(bravo_session.body, "session_generation");
+  const uint64_t bravo_packets_before_reconnect = json_uint_field(bravo_session.body, "encoded_sender_packets_attempted");
+
+  const auto alpha_config_update =
+      server.handle_http_request_for_test("PUT", "/api/video/streams/alpha/config",
+                                          "{\"display_mode\":\"ironbow\",\"output_width\":32,\"output_height\":24,\"output_fps\":12}");
+  ASSERT_EQ(alpha_config_update.status, 200);
+  ASSERT_NE(alpha_config_update.body.find("\"config_generation\":2"), std::string::npos);
+
+  auto replacement_alpha = make_client_offer("alpha-replacement-clean");
+  ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/alpha/offer", replacement_alpha->offer_sdp).status, 200);
+  ASSERT_TRUE(wait_until([&]() {
+    alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+    bravo_session = server.handle_http_request_for_test("GET", "/api/video/signaling/bravo/session");
+    if (alpha_session.status != 200 || bravo_session.status != 200) {
+      return false;
+    }
+    return json_bool_field(alpha_session.body, "active") &&
+           json_uint_field(alpha_session.body, "session_generation") == alpha_generation_before_reconnect + 1 &&
+           json_uint_field(bravo_session.body, "session_generation") == bravo_generation_before_reconnect &&
+           json_uint_field(alpha_session.body, "encoded_sender_packets_attempted") == 0;
+  }));
+
+  EXPECT_FALSE(json_bool_field(alpha_session.body, "encoded_sender_first_decodable_frame_sent"));
+  EXPECT_FALSE(json_bool_field(alpha_session.body, "encoded_sender_startup_sequence_sent"));
+  const auto replacement_sender_state = json_string_field(alpha_session.body, "encoded_sender_state");
+  EXPECT_TRUE(replacement_sender_state == "waiting-for-h264-keyframe" ||
+              replacement_sender_state == "video-track-missing");
+  EXPECT_EQ(json_uint_field(alpha_session.body, "disconnect_count"), 0u);
+  EXPECT_TRUE(json_bool_field(bravo_session.body, "active"));
+  EXPECT_EQ(json_uint_field(bravo_session.body, "encoded_sender_packets_attempted"), bravo_packets_before_reconnect);
+
+  alpha_codec.timestamp_ns = 7000;
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_codec));
+  alpha_idr.timestamp_ns = 8000;
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_idr));
+  alpha_non_idr.timestamp_ns = 9000;
+  ASSERT_TRUE(server.push_access_unit("alpha", alpha_non_idr));
+
+  ASSERT_TRUE(wait_until([&]() {
+    alpha_session = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/session");
+    if (alpha_session.status != 200) {
+      return false;
+    }
+    return json_uint_field(alpha_session.body, "encoded_sender_delivered_units") >= 3 &&
+           json_bool_field(alpha_session.body, "encoded_sender_cached_codec_config_available") &&
+           json_bool_field(alpha_session.body, "encoded_sender_cached_idr_available") &&
+           json_string_field(alpha_session.body, "encoded_sender_state") != "session-inactive";
+  }));
+
+  const auto debug_snapshot = server.get_debug_snapshot();
+  const auto* alpha_debug = find_stream_snapshot(debug_snapshot, "alpha");
+  const auto* bravo_debug = find_stream_snapshot(debug_snapshot, "bravo");
+  ASSERT_NE(alpha_debug, nullptr);
+  ASSERT_NE(bravo_debug, nullptr);
+  ASSERT_TRUE(alpha_debug->current_session.has_value());
+  ASSERT_TRUE(bravo_debug->current_session.has_value());
+  EXPECT_EQ(debug_snapshot.active_session_count, 2u);
+  EXPECT_EQ(alpha_debug->config_generation, 2u);
+  EXPECT_EQ(alpha_debug->current_session->session_generation, alpha_generation_before_reconnect + 1);
+  EXPECT_TRUE(alpha_debug->current_session->active);
+  EXPECT_EQ(bravo_debug->current_session->session_generation, bravo_generation_before_reconnect);
+  EXPECT_TRUE(bravo_debug->current_session->active);
 
   server.stop();
 }
@@ -1044,4 +1195,7 @@ TEST(WebRtcHttpTest, PerStreamConfigApiSupportsIsolationValidationAndObservabili
 #else
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) { GTEST_SKIP() << "WebRTC backend disabled"; }
+TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCoherent) {
+  GTEST_SKIP() << "WebRTC backend disabled";
+}
 #endif
