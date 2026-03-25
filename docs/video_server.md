@@ -260,6 +260,19 @@ Implemented endpoints:
 - `POST /api/video/signaling/{stream_id}/candidate`
 - `GET /api/video/signaling/{stream_id}/session`
 
+## Security hardening
+
+Current first-pass hardening behavior is intentionally lightweight and LAN-oriented:
+
+- Default bind stays `127.0.0.1`.
+- `GET /api/video/debug/stats` is disabled by default and must be enabled explicitly.
+- Sensitive routes (`/api/video/signaling/*`, `/api/video/debug/*`, `/api/video/streams/{stream_id}/frame`, `/api/video/streams/{stream_id}/output`, and `/api/video/streams/{stream_id}/config`) are allowed by default on loopback binds.
+- On non-loopback binds, those same sensitive routes are blocked unless you set `allow_unsafe_public_routes = true` or enable a shared key and/or IP allowlist.
+- Shared-key auth is optional and accepts `Authorization: Bearer <key>` or `X-Video-Server-Key: <key>`.
+- IP allowlists accept exact IPs or CIDR ranges for IPv4/IPv6 and apply to the HTTP API surface.
+- Loopback CORS is allowed automatically for loopback binds. Non-loopback deployments should set `cors_allowed_origins` explicitly instead of relying on wildcard CORS.
+- Runtime config JSON is now validated more strictly, stream IDs are bounded to `[A-Za-z0-9._-]` up to 64 characters, signaling payload sizes are capped, pending ICE candidates per stream are bounded, and light fixed-window rate limits are applied to signaling/config/debug routes.
+
 Current session payload fields include:
 
 - `session_generation`

@@ -36,6 +36,8 @@ struct StreamSpec {
 struct Options {
   std::string host{"127.0.0.1"};
   uint16_t port{8080};
+  bool enable_debug_api{false};
+  std::string shared_key;
   std::vector<StreamSpec> streams;
   double duration_seconds{0.0};
   double stats_interval_seconds{5.0};
@@ -110,7 +112,7 @@ std::vector<StreamSpec> default_demo_streams() {
 
 void print_usage(const char* argv0) {
   spdlog::info(
-      "Usage: {} [--host HOST] [--port PORT] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
+      "Usage: {} [--host HOST] [--port PORT] [--enable-debug-api] [--shared-key TOKEN] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
       argv0);
 }
 
@@ -138,6 +140,12 @@ std::optional<Options> parse_args(int argc, char** argv) {
     } else if (arg == "--port") {
       const char* value = require_value("--port");
       if (!value || !parse_uint16(value, options.port)) return std::nullopt;
+    } else if (arg == "--enable-debug-api") {
+      options.enable_debug_api = true;
+    } else if (arg == "--shared-key") {
+      const char* value = require_value("--shared-key");
+      if (!value) return std::nullopt;
+      options.shared_key = value;
     } else if (arg == "--stream-id") {
       const char* value = require_value("--stream-id");
       if (!value) return std::nullopt;
@@ -237,7 +245,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const video_server::WebRtcVideoServerConfig server_config{options->host, options->port, true};
+  auto server_config = video_server::WebRtcVideoServerConfig{};
+  server_config.http_host = options->host;
+  server_config.http_port = options->port;
+  server_config.enable_http_api = true;
+  server_config.enable_debug_api = options->enable_debug_api;
+  if (!options->shared_key.empty()) {
+    server_config.enable_shared_key_auth = true;
+    server_config.shared_key = options->shared_key;
+  }
   video_server::WebRtcVideoServer server(server_config);
 
   std::vector<std::unique_ptr<RunningStream>> streams;
