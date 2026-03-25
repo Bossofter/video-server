@@ -25,6 +25,11 @@ struct SignalingSession {
   std::string last_remote_candidate;
   std::string last_local_candidate;
   std::string peer_state;
+  bool active{true};
+  bool sending_active{false};
+  std::string teardown_reason;
+  std::string last_transition_reason;
+  uint64_t disconnect_count{0};
   WebRtcMediaSourceSnapshot media_source;
 };
 

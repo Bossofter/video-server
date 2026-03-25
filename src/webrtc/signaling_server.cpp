@@ -65,9 +65,9 @@ bool SignalingServer::set_answer(const std::string& stream_id, const std::string
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = sessions_.find(stream_id);
-    if (it == sessions_.end()) {
+    if (it == sessions_.end() || !it->second.session || !it->second.session->is_active()) {
       if (error_message != nullptr) {
-        *error_message = "session not found";
+        *error_message = "session inactive";
       }
       return false;
     }
@@ -94,6 +94,12 @@ bool SignalingServer::add_ice_candidate(const std::string& stream_id, const std:
       spdlog::debug("[signaling] queued remote candidate before offer stream={} size={}", stream_id,
                     candidate.size());
       return true;
+    }
+    if (!it->second.session || !it->second.session->is_active()) {
+      if (error_message != nullptr) {
+        *error_message = "session inactive";
+      }
+      return false;
     }
     session = it->second.session;
   }
@@ -156,6 +162,11 @@ std::optional<SignalingSession> SignalingServer::get_session(const std::string& 
                           snapshot.last_remote_candidate,
                           snapshot.last_local_candidate,
                           snapshot.peer_state,
+                          snapshot.active,
+                          snapshot.sending_active,
+                          snapshot.teardown_reason,
+                          snapshot.last_transition_reason,
+                          snapshot.disconnect_count,
                           snapshot.media_source};
 }
 
@@ -182,6 +193,11 @@ std::vector<SignalingSession> SignalingServer::list_sessions() const {
                                       snapshot.last_remote_candidate,
                                       snapshot.last_local_candidate,
                                       snapshot.peer_state,
+                                      snapshot.active,
+                                      snapshot.sending_active,
+                                      snapshot.teardown_reason,
+                                      snapshot.last_transition_reason,
+                                      snapshot.disconnect_count,
                                       snapshot.media_source});
   }
   return output;

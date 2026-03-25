@@ -35,6 +35,9 @@ struct H264AccessUnitDescriptor {
 struct EncodedVideoSenderSnapshot {
   std::string sender_state;
   std::string codec;
+  bool session_active{true};
+  std::string session_teardown_reason;
+  std::string last_lifecycle_event;
   bool has_pending_encoded_unit{false};
   bool codec_config_seen{false};
   bool ready_for_video_track{false};
@@ -113,6 +116,11 @@ struct WebRtcSessionSnapshot {
   std::string last_remote_candidate;
   std::string last_local_candidate;
   std::string peer_state;
+  bool active{true};
+  bool sending_active{false};
+  std::string teardown_reason;
+  std::string last_transition_reason;
+  uint64_t disconnect_count{0};
   WebRtcMediaSourceSnapshot media_source;
 };
 
@@ -122,6 +130,7 @@ class IEncodedVideoSender {
   // Session-side delivery/packetization boundary for encoded units feeding the browser-facing track.
   virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
   virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
+  virtual void deactivate(std::string reason) = 0;
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
 
@@ -153,9 +162,11 @@ class WebRtcStreamSession {
   void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit);
   WebRtcSessionSnapshot snapshot() const;
   void stop();
+  bool is_active() const;
 
  private:
   static std::string peer_state_to_string(rtc::PeerConnection::State state);
+  void transition_to_inactive_locked(std::string reason, std::string peer_state_override = "");
   void configure_callbacks();
 
   const std::string stream_id_;
@@ -170,6 +181,11 @@ class WebRtcStreamSession {
   std::string last_remote_candidate_;
   std::string last_local_candidate_;
   std::string peer_state_{"new"};
+  bool active_{true};
+  bool sending_active_{false};
+  std::string teardown_reason_{"not-terminated"};
+  std::string last_transition_reason_{"session-created"};
+  uint64_t disconnect_count_{0};
   uint32_t video_ssrc_{0};
   std::shared_ptr<std::atomic_bool> callbacks_enabled_;
 };

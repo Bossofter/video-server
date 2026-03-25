@@ -496,10 +496,11 @@ window.videoSmokeHarness = (() => {{
     setText('debug-last-stats', state.lastStatsAt || 'never');
 
     const session = state.sessionSummary || {{}};
-    setText('session-peer-state', session.peer_state || 'n/a');
+    const sessionActive = session.active === false ? 'inactive' : (session.active === true ? 'active' : 'n/a');
+    setText('session-peer-state', `${{session.peer_state || 'n/a'}} / ${{sessionActive}}`);
     setText('session-media-bridge', session.media_bridge_state || 'n/a');
     setText('session-sender-state', session.encoded_sender_state || 'n/a');
-    setText('session-preferred-path', session.preferred_media_path || 'n/a');
+    setText('session-preferred-path', `${{session.preferred_media_path || 'n/a'}} / ${{session.last_transition_reason || session.teardown_reason || 'steady-state'}}`);
     setText('session-startup', session.encoded_sender_startup_sequence_sent ? 'yes' : 'no');
     setText('session-first-dec', session.encoded_sender_first_decodable_frame_sent ? 'yes' : 'no');
     setText('session-packets-open', String(session.encoded_sender_packets_sent_after_track_open ?? 'n/a'));
@@ -525,6 +526,8 @@ window.videoSmokeHarness = (() => {{
         <div class="widget-debug-card">
           <span>${{escapeHtml(stream.stream_id || 'unknown stream')}}</span>
           <strong>${{escapeHtml(`${{stream.configured_width || '?'}}x${{stream.configured_height || '?'}} @ ${{stream.configured_fps || '?'}} fps`)}}</strong>
+          <span>session: <strong>${{escapeHtml(session.active === false ? 'inactive' : (session.active === true ? 'active' : 'no-session'))}}</strong></span>
+          <span>generation/teardown: <strong>${{escapeHtml(`${{session.session_generation ?? 0}} / ${{session.teardown_reason || 'none'}}`)}}</strong></span>
           <span>sender: <strong>${{escapeHtml(session.sender_state || 'no-session')}}</strong></span>
           <span>status: <strong>${{escapeHtml(session.last_packetization_status || 'n/a')}}</strong></span>
           <span>AU recv/send: <strong>${{stream.total_access_units_received ?? 0}} / ${{counters.delivered_units ?? 0}}</strong></span>
@@ -560,8 +563,8 @@ window.videoSmokeHarness = (() => {{
     setText('widget-track-state', state.remoteTrackReceived ? 'yes' : 'no');
     setText('widget-video-size', video ? `${{video.videoWidth}}x${{video.videoHeight}}` : 'n/a');
     setText('widget-video-time', video ? video.currentTime.toFixed(2) : 'n/a');
-    setText('widget-session-peer', session.peer_state || 'n/a');
-    setText('widget-session-sender', session.encoded_sender_state || 'n/a');
+    setText('widget-session-peer', `${{session.peer_state || 'n/a'}} / ${{sessionActive}}`);
+    setText('widget-session-sender', `${{session.encoded_sender_state || 'n/a'}} / ${{session.teardown_reason || 'live'}}`);
     setText('widget-expected-fps', (cfg.widgetFps || 'n/a').toString());
     setText('widget-target-geometry', `${{cfg.widgetWidth || '?'}}x${{cfg.widgetHeight || '?'}}`);
     refreshActiveConfigSummary();

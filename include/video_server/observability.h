@@ -31,8 +31,13 @@ struct StreamSessionDebugSnapshot {
   uint64_t session_generation{0};
   std::string stream_id;
   std::string peer_state;
+  bool active{true};
+  bool sending_active{false};
   std::string sender_state;
   std::string last_packetization_status;
+  std::string teardown_reason;
+  std::string last_transition_reason;
+  uint64_t disconnect_count{0};
   bool track_exists{false};
   bool track_open{false};
   bool startup_sequence_sent{false};
