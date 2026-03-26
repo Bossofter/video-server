@@ -1,12 +1,23 @@
 #include "video_server/webrtc_video_server.h"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <cmath>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <arpa/inet.h>
+#include <netdb.h>
 
 #include <spdlog/spdlog.h>
 
@@ -209,29 +220,274 @@ bool parse_flat_json_object(const std::string& body, std::unordered_map<std::str
   return false;
 }
 
-HttpResponse json_error(int status, const char* message) {
+HttpResponse json_error(int status, const std::string& message) {
   std::ostringstream out;
-  out << "{\"error\":\"" << message << "\"}";
+  out << "{\"error\":\"" << json_escape(message) << "\"}";
   return HttpResponse{status, out.str(), "application/json"};
 }
 
-bool is_api_path(const std::string& path) { return path.rfind("/api/", 0) == 0; }
+HttpResponse json_error(int status, const char* message) { return json_error(status, std::string(message)); }
 
-std::string cors_allow_origin(const HttpRequest& request) {
-  const auto it = request.headers.find("origin");
-  if (it != request.headers.end() && !it->second.empty()) {
-    return it->second;
+std::string lowercase_ascii(std::string value) {
+  for (char& c : value) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   }
-  return "*";
+  return value;
 }
 
-void apply_api_cors_headers(const HttpRequest& request, HttpResponse& response) {
+std::string trim_ascii(std::string value) {
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    value.erase(value.begin());
+  }
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+    value.pop_back();
+  }
+  return value;
+}
+
+std::optional<std::string> find_header_value(const HttpRequest& request, const std::string& key) {
+  const std::string lower_key = lowercase_ascii(key);
+  for (const auto& [header_key, header_value] : request.headers) {
+    if (lowercase_ascii(header_key) == lower_key) {
+      return header_value;
+    }
+  }
+  return std::nullopt;
+}
+
+bool is_loopback_host(const std::string& host) {
+  const std::string lower = lowercase_ascii(host);
+  return lower.empty() || lower == "127.0.0.1" || lower == "::1" || lower == "localhost";
+}
+
+std::string extract_origin_host(const std::string& origin) {
+  const auto scheme_pos = origin.find("://");
+  if (scheme_pos == std::string::npos) {
+    return "";
+  }
+  size_t host_start = scheme_pos + 3;
+  size_t host_end = origin.find('/', host_start);
+  std::string authority = origin.substr(host_start, host_end == std::string::npos ? std::string::npos : host_end - host_start);
+  if (authority.empty()) {
+    return "";
+  }
+  if (authority.front() == '[') {
+    const auto bracket_end = authority.find(']');
+    if (bracket_end == std::string::npos) {
+      return "";
+    }
+    return authority.substr(1, bracket_end - 1);
+  }
+  const auto colon = authority.find(':');
+  return colon == std::string::npos ? authority : authority.substr(0, colon);
+}
+
+bool is_loopback_origin(const std::string& origin) {
+  const std::string host = extract_origin_host(origin);
+  return !host.empty() && is_loopback_host(host);
+}
+
+bool is_valid_stream_id(const std::string& stream_id) {
+  if (stream_id.empty() || stream_id.size() > 64) {
+    return false;
+  }
+  return std::all_of(stream_id.begin(), stream_id.end(), [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '-' || c == '_' || c == '.';
+  });
+}
+
+bool is_finite_number(double value) { return std::isfinite(value); }
+
+bool json_number_is_non_negative_integer(const JsonValue& value) {
+  return value.type == JsonValue::Type::Number && is_finite_number(value.number_value) && value.number_value >= 0.0 &&
+         std::floor(value.number_value) == value.number_value;
+}
+
+enum class RouteGroup {
+  None,
+  StreamsList,
+  StreamInfo,
+  StreamFrame,
+  RuntimeConfig,
+  Signaling,
+  Debug,
+};
+
+struct RoutePolicy {
+  RouteGroup group{RouteGroup::None};
+  std::string stream_id;
+  bool valid{false};
+  bool debug_route{false};
+  bool runtime_config_route{false};
+  bool sensitive{false};
+  bool mutating{false};
+  bool rate_limited{false};
+  std::string rate_limit_bucket;
+};
+
+RoutePolicy classify_route(const HttpRequest& request) {
+  RoutePolicy policy;
+
+  if (request.method == "GET" && request.path == "/api/video/streams") {
+    policy.group = RouteGroup::StreamsList;
+    policy.valid = true;
+    return policy;
+  }
+  if (request.method == "GET" && request.path == "/api/video/debug/stats") {
+    policy.group = RouteGroup::Debug;
+    policy.valid = true;
+    policy.debug_route = true;
+    policy.sensitive = true;
+    policy.rate_limited = true;
+    policy.rate_limit_bucket = "debug";
+    return policy;
+  }
+  if (request.path.rfind("/api/video/streams/", 0) == 0) {
+    const std::string tail = request.path.substr(std::string("/api/video/streams/").size());
+    const auto output_pos = tail.find("/output");
+    const auto config_pos = tail.find("/config");
+    const auto frame_pos = tail.find("/frame");
+    const bool is_frame_request = frame_pos != std::string::npos && (frame_pos + 6) == tail.size();
+    const auto config_segment_pos = output_pos != std::string::npos ? output_pos : config_pos;
+    if (request.method == "GET" && config_segment_pos == std::string::npos && !is_frame_request) {
+      policy.group = RouteGroup::StreamInfo;
+      policy.stream_id = tail;
+      policy.valid = true;
+      return policy;
+    }
+    if (request.method == "GET" && is_frame_request) {
+      policy.group = RouteGroup::StreamFrame;
+      policy.stream_id = tail.substr(0, frame_pos);
+      policy.valid = true;
+      policy.sensitive = true;
+      return policy;
+    }
+    if ((request.method == "GET" || request.method == "PUT") && config_segment_pos != std::string::npos) {
+      policy.group = RouteGroup::RuntimeConfig;
+      policy.stream_id = tail.substr(0, config_segment_pos);
+      policy.valid = true;
+      policy.runtime_config_route = true;
+      policy.sensitive = true;
+      policy.mutating = request.method == "PUT";
+      policy.rate_limited = request.method == "PUT";
+      policy.rate_limit_bucket = "config";
+      return policy;
+    }
+  }
+  if (request.path.rfind("/api/video/signaling/", 0) == 0) {
+    const std::string tail = request.path.substr(std::string("/api/video/signaling/").size());
+    const auto slash = tail.find('/');
+    policy.group = RouteGroup::Signaling;
+    policy.stream_id = slash == std::string::npos ? tail : tail.substr(0, slash);
+    policy.valid = true;
+    policy.sensitive = true;
+    policy.rate_limited = request.method == "POST";
+    policy.rate_limit_bucket = "signaling";
+    return policy;
+  }
+
+  return policy;
+}
+
+struct IpSubnet {
+  int family{AF_UNSPEC};
+  std::array<uint8_t, 16> bytes{};
+  uint8_t prefix_length{0};
+};
+
+std::optional<IpSubnet> parse_allowlist_entry(const std::string& entry) {
+  const std::string trimmed = trim_ascii(entry);
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+
+  const auto slash = trimmed.find('/');
+  const std::string address_part = slash == std::string::npos ? trimmed : trimmed.substr(0, slash);
+  const std::string prefix_part = slash == std::string::npos ? "" : trimmed.substr(slash + 1);
+
+  IpSubnet subnet;
+  try {
+    if (::inet_pton(AF_INET, address_part.c_str(), subnet.bytes.data()) == 1) {
+      subnet.family = AF_INET;
+      subnet.prefix_length = prefix_part.empty() ? 32U : static_cast<uint8_t>(std::stoi(prefix_part));
+      if (subnet.prefix_length > 32U) {
+        return std::nullopt;
+      }
+      return subnet;
+    }
+    if (::inet_pton(AF_INET6, address_part.c_str(), subnet.bytes.data()) == 1) {
+      subnet.family = AF_INET6;
+      subnet.prefix_length = prefix_part.empty() ? 128U : static_cast<uint8_t>(std::stoi(prefix_part));
+      if (subnet.prefix_length > 128U) {
+        return std::nullopt;
+      }
+      return subnet;
+    }
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+bool subnet_contains(const IpSubnet& subnet, const std::string& remote_address) {
+  std::array<uint8_t, 16> remote_bytes{};
+  if (::inet_pton(subnet.family, remote_address.c_str(), remote_bytes.data()) != 1) {
+    return false;
+  }
+
+  const size_t total_bytes = subnet.family == AF_INET ? 4U : 16U;
+  const size_t full_bytes = subnet.prefix_length / 8U;
+  const uint8_t remaining_bits = static_cast<uint8_t>(subnet.prefix_length % 8U);
+  for (size_t i = 0; i < full_bytes; ++i) {
+    if (subnet.bytes[i] != remote_bytes[i]) {
+      return false;
+    }
+  }
+  if (remaining_bits > 0U && full_bytes < total_bytes) {
+    const uint8_t mask = static_cast<uint8_t>(0xFFU << (8U - remaining_bits));
+    if ((subnet.bytes[full_bytes] & mask) != (remote_bytes[full_bytes] & mask)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct RateLimitWindow {
+  std::chrono::steady_clock::time_point window_start{};
+  uint32_t count{0};
+};
+
+bool is_api_path(const std::string& path) { return path.rfind("/api/", 0) == 0; }
+
+void apply_api_cors_headers(const HttpRequest& request, const WebRtcVideoServerConfig& config, HttpResponse& response) {
   if (!is_api_path(request.path)) {
     return;
   }
-  response.headers["Access-Control-Allow-Origin"] = cors_allow_origin(request);
+  const auto origin = find_header_value(request, "Origin");
+  if (!origin.has_value() || origin->empty()) {
+    return;
+  }
+
+  bool allow_origin = false;
+  if (!config.cors_allowed_origins.empty()) {
+    for (const auto& allowed_origin : config.cors_allowed_origins) {
+      if (allowed_origin == "*" || allowed_origin == *origin) {
+        allow_origin = true;
+        break;
+      }
+    }
+  } else if (is_loopback_host(config.http_host) && is_loopback_origin(*origin)) {
+    allow_origin = true;
+  }
+
+  if (!allow_origin) {
+    return;
+  }
+
+  response.headers["Access-Control-Allow-Origin"] = *origin;
   response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS";
-  response.headers["Access-Control-Allow-Headers"] = "Content-Type";
+  response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Video-Server-Key";
+  response.headers["Vary"] = "Origin";
 }
 
 std::string output_config_json(const StreamOutputConfig& cfg) {
@@ -346,10 +602,37 @@ class WebRtcVideoServer::Impl {
                    [this](const std::string& stream_id) { return core_.get_latest_frame_for_stream(stream_id); },
                    [this](const std::string& stream_id) {
                      return core_.get_latest_encoded_unit_for_stream(stream_id);
-                   }),
-        http_server_(std::make_unique<HttpApiServer>(config_.http_host, config_.http_port)) {}
+                   },
+                   config_.max_pending_candidates_per_stream),
+        http_server_(std::make_unique<HttpApiServer>(config_.http_host, config_.http_port, config_.max_http_request_bytes)) {
+    for (const auto& entry : config_.ip_allowlist) {
+      auto subnet = parse_allowlist_entry(entry);
+      if (!subnet.has_value()) {
+        allowlist_parse_error_ = "invalid allowlist entry: " + entry;
+        break;
+      }
+      allowlist_.push_back(*subnet);
+    }
+  }
+
+  struct SecurityCounters {
+    uint64_t rejected_unauthorized{0};
+    uint64_t rejected_forbidden{0};
+    uint64_t rejected_disabled{0};
+    uint64_t rejected_invalid{0};
+    uint64_t rejected_rate_limited{0};
+  };
+
+  struct AuthResult {
+    bool allowed{true};
+    HttpResponse response{200, "", "application/json"};
+  };
 
   bool start() {
+    if (!allowlist_parse_error_.empty()) {
+      spdlog::error("[security] {}", allowlist_parse_error_);
+      return false;
+    }
     if (!config_.enable_http_api) {
       return true;
     }
@@ -369,6 +652,19 @@ class WebRtcVideoServer::Impl {
 
     const auto sessions = signaling_.list_sessions();
     snapshot.stream_count = snapshot.streams.size();
+    snapshot.security_access_control_enabled = shared_key_auth_enabled();
+    snapshot.security_allowlist_enabled = allowlist_enabled();
+    snapshot.security_debug_api_enabled = debug_api_effectively_enabled();
+    snapshot.security_runtime_config_api_enabled = runtime_config_api_effectively_enabled();
+    snapshot.security_remote_sensitive_routes_allowed = remote_sensitive_routes_allowed();
+    {
+      std::lock_guard<std::mutex> lock(security_mutex_);
+      snapshot.security_rejected_unauthorized = security_counters_.rejected_unauthorized;
+      snapshot.security_rejected_forbidden = security_counters_.rejected_forbidden;
+      snapshot.security_rejected_disabled = security_counters_.rejected_disabled;
+      snapshot.security_rejected_invalid = security_counters_.rejected_invalid;
+      snapshot.security_rejected_rate_limited = security_counters_.rejected_rate_limited;
+    }
     for (const auto& session : sessions) {
       snapshot.active_session_count += session.active ? 1u : 0u;
     }
@@ -422,17 +718,157 @@ class WebRtcVideoServer::Impl {
     return snapshot;
   }
 
+  bool shared_key_auth_enabled() const { return config_.enable_shared_key_auth && !config_.shared_key.empty(); }
+  bool allowlist_enabled() const { return !allowlist_.empty(); }
+  bool loopback_bind_only() const { return is_loopback_host(config_.http_host); }
+  bool has_any_remote_guard() const { return shared_key_auth_enabled() || allowlist_enabled(); }
+  bool remote_sensitive_routes_allowed() const {
+    return loopback_bind_only() || config_.allow_unsafe_public_routes || has_any_remote_guard();
+  }
+  bool debug_api_effectively_enabled() const { return config_.enable_debug_api; }
+  bool runtime_config_api_effectively_enabled() const { return config_.enable_runtime_config_api; }
+
+  void record_rejected_unauthorized() {
+    std::lock_guard<std::mutex> lock(security_mutex_);
+    ++security_counters_.rejected_unauthorized;
+  }
+  void record_rejected_forbidden() {
+    std::lock_guard<std::mutex> lock(security_mutex_);
+    ++security_counters_.rejected_forbidden;
+  }
+  void record_rejected_disabled() {
+    std::lock_guard<std::mutex> lock(security_mutex_);
+    ++security_counters_.rejected_disabled;
+  }
+  void record_rejected_invalid() {
+    std::lock_guard<std::mutex> lock(security_mutex_);
+    ++security_counters_.rejected_invalid;
+  }
+  void record_rejected_rate_limited() {
+    std::lock_guard<std::mutex> lock(security_mutex_);
+    ++security_counters_.rejected_rate_limited;
+  }
+
+  bool is_remote_allowed(const std::string& remote_address) const {
+    if (!allowlist_enabled()) {
+      return true;
+    }
+    for (const auto& subnet : allowlist_) {
+      if (subnet_contains(subnet, remote_address)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool request_has_valid_shared_key(const HttpRequest& request) const {
+    if (!shared_key_auth_enabled()) {
+      return true;
+    }
+    if (const auto auth = find_header_value(request, "Authorization"); auth.has_value()) {
+      const std::string trimmed = trim_ascii(*auth);
+      static constexpr char kBearerPrefix[] = "Bearer ";
+      if (trimmed.rfind(kBearerPrefix, 0) == 0 && trimmed.substr(sizeof(kBearerPrefix) - 1) == config_.shared_key) {
+        return true;
+      }
+    }
+    if (const auto key = find_header_value(request, "X-Video-Server-Key"); key.has_value()) {
+      return trim_ascii(*key) == config_.shared_key;
+    }
+    return false;
+  }
+
+  bool consume_rate_limit(const HttpRequest& request, const RoutePolicy& policy) {
+    if (!policy.rate_limited) {
+      return true;
+    }
+
+    uint32_t max_requests = 0;
+    uint32_t window_seconds = 0;
+    if (policy.rate_limit_bucket == "signaling") {
+      max_requests = config_.signaling_rate_limit_max_requests;
+      window_seconds = config_.signaling_rate_limit_window_seconds;
+    } else if (policy.rate_limit_bucket == "config") {
+      max_requests = config_.config_rate_limit_max_requests;
+      window_seconds = config_.config_rate_limit_window_seconds;
+    } else if (policy.rate_limit_bucket == "debug") {
+      max_requests = config_.debug_rate_limit_max_requests;
+      window_seconds = config_.debug_rate_limit_window_seconds;
+    }
+    if (max_requests == 0 || window_seconds == 0) {
+      return true;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const std::string bucket_key =
+        policy.rate_limit_bucket + "|" + request.remote_address + "|" + request.path + "|" + request.method;
+    std::lock_guard<std::mutex> lock(security_mutex_);
+    auto& window = rate_limit_windows_[bucket_key];
+    if (window.count == 0 || now - window.window_start >= std::chrono::seconds(window_seconds)) {
+      window.window_start = now;
+      window.count = 1;
+      return true;
+    }
+    if (window.count >= max_requests) {
+      return false;
+    }
+    ++window.count;
+    return true;
+  }
+
+  AuthResult authorize_request(const HttpRequest& request, const RoutePolicy& policy) {
+    if (policy.runtime_config_route && !runtime_config_api_effectively_enabled()) {
+      record_rejected_disabled();
+      return AuthResult{false, json_error(404, "runtime config endpoint disabled")};
+    }
+    if (policy.debug_route && !debug_api_effectively_enabled()) {
+      record_rejected_disabled();
+      return AuthResult{false, json_error(404, "debug endpoint disabled")};
+    }
+    if (!policy.stream_id.empty() && !is_valid_stream_id(policy.stream_id)) {
+      record_rejected_invalid();
+      return AuthResult{false, json_error(400, "invalid stream id")};
+    }
+    if (policy.sensitive && !remote_sensitive_routes_allowed()) {
+      record_rejected_forbidden();
+      return AuthResult{false, json_error(403, "sensitive endpoint requires access control, allowlist, or unsafe opt-in on non-loopback binds")};
+    }
+    if (!is_remote_allowed(request.remote_address)) {
+      record_rejected_forbidden();
+      return AuthResult{false, json_error(403, "remote address not allowed")};
+    }
+    if (policy.sensitive && shared_key_auth_enabled() && !request_has_valid_shared_key(request)) {
+      record_rejected_unauthorized();
+      HttpResponse response = json_error(401, "missing or invalid shared key");
+      response.headers["WWW-Authenticate"] = "Bearer realm=\"video-server\"";
+      return AuthResult{false, std::move(response)};
+    }
+    if (!consume_rate_limit(request, policy)) {
+      record_rejected_rate_limited();
+      return AuthResult{false, json_error(429, "rate limit exceeded")};
+    }
+    return AuthResult{};
+  }
+
   HttpResponse handle_http(const HttpRequest& request) {
+    const RoutePolicy route = classify_route(request);
     if (is_api_path(request.path) && request.method == "OPTIONS") {
       HttpResponse response{204, "", "application/json"};
-      apply_api_cors_headers(request, response);
+      apply_api_cors_headers(request, config_, response);
       return response;
     }
 
     auto finalize = [&](HttpResponse response) {
-      apply_api_cors_headers(request, response);
+      apply_api_cors_headers(request, config_, response);
       return response;
     };
+
+    if (route.valid) {
+      const AuthResult auth = authorize_request(request, route);
+      if (!auth.allowed) {
+        return finalize(auth.response);
+      }
+    }
 
     if (request.method == "GET" && request.path == "/api/video/streams") {
       auto streams = core_.list_streams();
@@ -453,6 +889,18 @@ class WebRtcVideoServer::Impl {
       out << "{"
           << "\"stream_count\":" << snapshot.stream_count << ","
           << "\"active_session_count\":" << snapshot.active_session_count << ","
+          << "\"security\":{"
+          << "\"access_control_enabled\":" << bool_to_json(snapshot.security_access_control_enabled) << ","
+          << "\"allowlist_enabled\":" << bool_to_json(snapshot.security_allowlist_enabled) << ","
+          << "\"debug_api_enabled\":" << bool_to_json(snapshot.security_debug_api_enabled) << ","
+          << "\"runtime_config_api_enabled\":" << bool_to_json(snapshot.security_runtime_config_api_enabled) << ","
+          << "\"remote_sensitive_routes_allowed\":"
+          << bool_to_json(snapshot.security_remote_sensitive_routes_allowed) << ","
+          << "\"rejected_unauthorized\":" << snapshot.security_rejected_unauthorized << ","
+          << "\"rejected_forbidden\":" << snapshot.security_rejected_forbidden << ","
+          << "\"rejected_disabled\":" << snapshot.security_rejected_disabled << ","
+          << "\"rejected_invalid\":" << snapshot.security_rejected_invalid << ","
+          << "\"rejected_rate_limited\":" << snapshot.security_rejected_rate_limited << "},"
           << "\"streams\":[";
       for (size_t i = 0; i < snapshot.streams.size(); ++i) {
         if (i != 0) out << ",";
@@ -557,71 +1005,96 @@ class WebRtcVideoServer::Impl {
                         output_config_json(*cfg));
 
           if (request.body.empty()) {
+            record_rejected_invalid();
             spdlog::debug("[api] config-put stream={} result=invalid-empty-body", stream_id);
             return finalize(json_error(400, "invalid request body"));
+          }
+          if (request.body.size() > config_.max_json_body_bytes) {
+            record_rejected_invalid();
+            return finalize(json_error(413, "config request body too large"));
           }
 
           std::unordered_map<std::string, JsonValue> body_values;
           if (!parse_flat_json_object(request.body, body_values)) {
+            record_rejected_invalid();
             spdlog::debug("[api] config-put stream={} result=invalid-json body={}", stream_id, request.body);
             return finalize(json_error(400, "invalid request body"));
+          }
+          static const std::unordered_set<std::string> kAllowedKeys = {"display_mode", "mirrored", "rotation_degrees",
+                                                                       "palette_min", "palette_max", "output_width",
+                                                                       "output_height", "output_fps"};
+          for (const auto& [key, _] : body_values) {
+            if (kAllowedKeys.find(key) == kAllowedKeys.end()) {
+              record_rejected_invalid();
+              return finalize(json_error(400, "unknown config field: " + key));
+            }
           }
 
           StreamOutputConfig updated = *cfg;
           if (const auto mode_it = body_values.find("display_mode"); mode_it != body_values.end()) {
             if (mode_it->second.type != JsonValue::Type::String) {
+              record_rejected_invalid();
               return finalize(json_error(400, "display_mode must be a string"));
             }
             const auto parsed_mode = video_display_mode_from_string(mode_it->second.string_value.c_str());
             if (!parsed_mode.has_value()) {
+              record_rejected_invalid();
               return finalize(json_error(400, "invalid display_mode"));
             }
             updated.display_mode = *parsed_mode;
           }
           if (const auto mirrored_it = body_values.find("mirrored"); mirrored_it != body_values.end()) {
             if (mirrored_it->second.type != JsonValue::Type::Bool) {
+              record_rejected_invalid();
               return finalize(json_error(400, "mirrored must be a boolean"));
             }
             updated.mirrored = mirrored_it->second.bool_value;
           }
           if (const auto rotation_it = body_values.find("rotation_degrees"); rotation_it != body_values.end()) {
-            if (rotation_it->second.type != JsonValue::Type::Number) {
-              return finalize(json_error(400, "rotation_degrees must be numeric"));
+            if (!json_number_is_non_negative_integer(rotation_it->second)) {
+              record_rejected_invalid();
+              return finalize(json_error(400, "rotation_degrees must be an integer"));
             }
             updated.rotation_degrees = static_cast<int>(rotation_it->second.number_value);
           }
           if (const auto min_it = body_values.find("palette_min"); min_it != body_values.end()) {
-            if (min_it->second.type != JsonValue::Type::Number) {
+            if (min_it->second.type != JsonValue::Type::Number || !is_finite_number(min_it->second.number_value)) {
+              record_rejected_invalid();
               return finalize(json_error(400, "palette_min must be numeric"));
             }
             updated.palette_min = static_cast<float>(min_it->second.number_value);
           }
           if (const auto max_it = body_values.find("palette_max"); max_it != body_values.end()) {
-            if (max_it->second.type != JsonValue::Type::Number) {
+            if (max_it->second.type != JsonValue::Type::Number || !is_finite_number(max_it->second.number_value)) {
+              record_rejected_invalid();
               return finalize(json_error(400, "palette_max must be numeric"));
             }
             updated.palette_max = static_cast<float>(max_it->second.number_value);
           }
           if (const auto width_it = body_values.find("output_width"); width_it != body_values.end()) {
-            if (width_it->second.type != JsonValue::Type::Number) {
-              return finalize(json_error(400, "output_width must be numeric"));
+            if (!json_number_is_non_negative_integer(width_it->second)) {
+              record_rejected_invalid();
+              return finalize(json_error(400, "output_width must be an integer"));
             }
             updated.output_width = static_cast<uint32_t>(width_it->second.number_value);
           }
           if (const auto height_it = body_values.find("output_height"); height_it != body_values.end()) {
-            if (height_it->second.type != JsonValue::Type::Number) {
-              return finalize(json_error(400, "output_height must be numeric"));
+            if (!json_number_is_non_negative_integer(height_it->second)) {
+              record_rejected_invalid();
+              return finalize(json_error(400, "output_height must be an integer"));
             }
             updated.output_height = static_cast<uint32_t>(height_it->second.number_value);
           }
           if (const auto fps_it = body_values.find("output_fps"); fps_it != body_values.end()) {
-            if (fps_it->second.type != JsonValue::Type::Number) {
+            if (fps_it->second.type != JsonValue::Type::Number || !is_finite_number(fps_it->second.number_value)) {
+              record_rejected_invalid();
               return finalize(json_error(400, "output_fps must be numeric"));
             }
             updated.output_fps = fps_it->second.number_value;
           }
 
           if (!core_.set_stream_output_config(stream_id, updated)) {
+            record_rejected_invalid();
             spdlog::debug("[api] config-put stream={} result=invalid-output-config candidate={}", stream_id,
                           output_config_json(updated));
             return finalize(json_error(400, "invalid output config; expected known filter and width/height 16..3840 and fps 1..120"));
@@ -646,22 +1119,55 @@ class WebRtcVideoServer::Impl {
       const std::string action = slash == std::string::npos ? "offer" : tail.substr(slash + 1);
 
       if (request.method == "POST" && action == "offer") {
+        if (request.body.empty()) {
+          record_rejected_invalid();
+          return finalize(json_error(400, "offer body required"));
+        }
+        if (request.body.size() > config_.max_signaling_sdp_bytes) {
+          record_rejected_invalid();
+          return finalize(json_error(413, "offer body too large"));
+        }
         std::string error_message;
         if (!signaling_.set_offer(stream_id, request.body, &error_message)) {
+          if (error_message != "stream not found") {
+            record_rejected_invalid();
+          }
           return finalize(json_error(error_message == "stream not found" ? 404 : 400, error_message.c_str()));
         }
         return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
       }
       if (request.method == "POST" && action == "answer") {
+        if (request.body.empty()) {
+          record_rejected_invalid();
+          return finalize(json_error(400, "answer body required"));
+        }
+        if (request.body.size() > config_.max_signaling_sdp_bytes) {
+          record_rejected_invalid();
+          return finalize(json_error(413, "answer body too large"));
+        }
         std::string error_message;
         if (!signaling_.set_answer(stream_id, request.body, &error_message)) {
+          if (error_message != "session not found") {
+            record_rejected_invalid();
+          }
           return finalize(json_error(error_message == "session not found" ? 404 : 400, error_message.c_str()));
         }
         return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
       }
       if (request.method == "POST" && action == "candidate") {
+        if (request.body.empty()) {
+          record_rejected_invalid();
+          return finalize(json_error(400, "candidate body required"));
+        }
+        if (request.body.size() > config_.max_signaling_candidate_bytes) {
+          record_rejected_invalid();
+          return finalize(json_error(413, "candidate body too large"));
+        }
         std::string error_message;
         if (!signaling_.add_ice_candidate(stream_id, request.body, &error_message)) {
+          if (error_message != "session not found" && error_message != "stream not found") {
+            record_rejected_invalid();
+          }
           return finalize(json_error(error_message == "session not found" ? 404 : 400, error_message.c_str()));
         }
         return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
@@ -798,6 +1304,11 @@ class WebRtcVideoServer::Impl {
   VideoServerCore core_;
   SignalingServer signaling_;
   std::unique_ptr<HttpApiServer> http_server_;
+  std::vector<IpSubnet> allowlist_;
+  std::string allowlist_parse_error_;
+  mutable std::mutex security_mutex_;
+  SecurityCounters security_counters_;
+  std::unordered_map<std::string, RateLimitWindow> rate_limit_windows_;
 };
 
 WebRtcVideoServer::WebRtcVideoServer(WebRtcVideoServerConfig config) : impl_(std::make_unique<Impl>(config)) {}
@@ -851,8 +1362,9 @@ ServerDebugSnapshot WebRtcVideoServer::get_debug_snapshot() const { return impl_
 WebRtcHttpResponse WebRtcVideoServer::handle_http_request_for_test(const std::string& method,
                                                                    const std::string& path,
                                                                    const std::string& body,
-                                                                   std::unordered_map<std::string, std::string> headers) {
-  const HttpResponse response = impl_->handle_http(HttpRequest{method, path, body, std::move(headers)});
+                                                                   std::unordered_map<std::string, std::string> headers,
+                                                                   std::string remote_address) {
+  const HttpResponse response = impl_->handle_http(HttpRequest{method, path, body, std::move(remote_address), std::move(headers)});
   return WebRtcHttpResponse{response.status, response.body, response.headers};
 }
 

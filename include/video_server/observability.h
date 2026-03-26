@@ -81,6 +81,16 @@ struct StreamDebugSnapshot {
 struct ServerDebugSnapshot {
   uint64_t stream_count{0};
   uint64_t active_session_count{0};
+  bool security_access_control_enabled{false};
+  bool security_allowlist_enabled{false};
+  bool security_debug_api_enabled{false};
+  bool security_runtime_config_api_enabled{false};
+  bool security_remote_sensitive_routes_allowed{false};
+  uint64_t security_rejected_unauthorized{0};
+  uint64_t security_rejected_forbidden{0};
+  uint64_t security_rejected_disabled{0};
+  uint64_t security_rejected_invalid{0};
+  uint64_t security_rejected_rate_limited{0};
   std::vector<StreamDebugSnapshot> streams;
 };
 

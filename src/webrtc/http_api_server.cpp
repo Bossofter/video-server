@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include <netdb.h>
+#include <arpa/inet.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -42,8 +43,18 @@ std::string reason_phrase(int status) {
       return "OK";
     case 400:
       return "Bad Request";
+    case 401:
+      return "Unauthorized";
+    case 403:
+      return "Forbidden";
     case 404:
       return "Not Found";
+    case 405:
+      return "Method Not Allowed";
+    case 413:
+      return "Payload Too Large";
+    case 429:
+      return "Too Many Requests";
     case 500:
       return "Internal Server Error";
     default:
@@ -119,7 +130,8 @@ std::string response_to_http(const HttpResponse& response) {
 
 }  // namespace
 
-HttpApiServer::HttpApiServer(std::string host, uint16_t port) : host_(std::move(host)), port_(port) {}
+HttpApiServer::HttpApiServer(std::string host, uint16_t port, size_t max_request_bytes)
+    : host_(std::move(host)), port_(port), max_request_bytes_(max_request_bytes) {}
 HttpApiServer::~HttpApiServer() { stop(); }
 
 bool HttpApiServer::start(Handler handler) {
@@ -218,7 +230,9 @@ void HttpApiServer::run_loop() {
       continue;
     }
 
-    const int client_fd = ::accept(local_listen_fd, nullptr, nullptr);
+    sockaddr_storage client_addr{};
+    socklen_t client_addr_len = sizeof(client_addr);
+    const int client_fd = ::accept(local_listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
     if (client_fd < 0) {
       if (errno == EINTR) {
         continue;
@@ -226,15 +240,23 @@ void HttpApiServer::run_loop() {
       continue;
     }
 
-    handle_client(client_fd);
+    char host_buffer[NI_MAXHOST] = {};
+    std::string remote_address = "unknown";
+    if (::getnameinfo(reinterpret_cast<const sockaddr*>(&client_addr), client_addr_len, host_buffer, sizeof(host_buffer),
+                      nullptr, 0, NI_NUMERICHOST) == 0) {
+      remote_address = host_buffer;
+    }
+
+    handle_client(client_fd, remote_address);
     ::close(client_fd);
   }
 }
 
-void HttpApiServer::handle_client(int client_fd) const {
+void HttpApiServer::handle_client(int client_fd, const std::string& remote_address) const {
   std::string raw;
   raw.reserve(4096);
   std::array<char, 1024> buf{};
+  bool request_too_large = false;
 
   size_t expected_total = 0;
   while (true) {
@@ -243,6 +265,10 @@ void HttpApiServer::handle_client(int client_fd) const {
       break;
     }
     raw.append(buf.data(), static_cast<size_t>(n));
+    if (raw.size() > max_request_bytes_) {
+      request_too_large = true;
+      break;
+    }
 
     const auto header_end = raw.find("\r\n\r\n");
     if (header_end != std::string::npos && expected_total == 0) {
@@ -257,6 +283,10 @@ void HttpApiServer::handle_client(int client_fd) const {
             value.erase(value.begin());
           }
           expected_total += static_cast<size_t>(std::stoul(value));
+          if (expected_total > max_request_bytes_) {
+            request_too_large = true;
+            break;
+          }
         }
       }
     }
@@ -268,12 +298,15 @@ void HttpApiServer::handle_client(int client_fd) const {
 
   HttpRequest request;
   HttpResponse response;
-  if (!parse_request(raw, request)) {
+  if (request_too_large) {
+    response = HttpResponse{413, "{\"error\":\"request too large\"}", "application/json"};
+  } else if (!parse_request(raw, request)) {
     spdlog::warn("[http] failed to parse incoming request");
     response = HttpResponse{400, "{\"error\":\"invalid request\"}", "application/json"};
   } else if (!handler_) {
     response = HttpResponse{500, "{\"error\":\"handler unavailable\"}", "application/json"};
   } else {
+    request.remote_address = remote_address;
     response = handler_(request);
   }
 

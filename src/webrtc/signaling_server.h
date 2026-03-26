@@ -36,7 +36,8 @@ struct SignalingSession {
 class SignalingServer {
  public:
   SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter,
-                  LatestEncodedUnitGetterFn latest_encoded_unit_getter);
+                  LatestEncodedUnitGetterFn latest_encoded_unit_getter,
+                  size_t max_pending_candidates_per_stream = 32);
   ~SignalingServer();
 
   bool set_offer(const std::string& stream_id, const std::string& offer_sdp, std::string* error_message = nullptr);
@@ -61,6 +62,7 @@ class SignalingServer {
   StreamExistsFn stream_exists_;
   LatestFrameGetterFn latest_frame_getter_;
   LatestEncodedUnitGetterFn latest_encoded_unit_getter_;
+  size_t max_pending_candidates_per_stream_;
 
   // Temporary limitation: only one active WebRTC session slot is tracked per stream.
   // TODO: extend this to support multiple simultaneous peer sessions per stream.

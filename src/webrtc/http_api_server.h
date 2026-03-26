@@ -12,6 +12,7 @@ struct HttpRequest {
   std::string method;
   std::string path;
   std::string body;
+  std::string remote_address;
   std::unordered_map<std::string, std::string> headers;
 };
 
@@ -26,7 +27,7 @@ class HttpApiServer {
  public:
   using Handler = std::function<HttpResponse(const HttpRequest&)>;
 
-  HttpApiServer(std::string host, uint16_t port);
+  HttpApiServer(std::string host, uint16_t port, size_t max_request_bytes = 262144);
   ~HttpApiServer();
 
   bool start(Handler handler);
@@ -34,10 +35,11 @@ class HttpApiServer {
 
  private:
   void run_loop();
-  void handle_client(int client_fd) const;
+  void handle_client(int client_fd, const std::string& remote_address) const;
 
   std::string host_;
   uint16_t port_;
+  size_t max_request_bytes_;
   int listen_fd_{-1};
   std::atomic<bool> running_{false};
   Handler handler_;

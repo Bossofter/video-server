@@ -9,10 +9,12 @@
 namespace video_server {
 
 SignalingServer::SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter,
-                                 LatestEncodedUnitGetterFn latest_encoded_unit_getter)
+                                 LatestEncodedUnitGetterFn latest_encoded_unit_getter,
+                                 size_t max_pending_candidates_per_stream)
     : stream_exists_(std::move(stream_exists)),
       latest_frame_getter_(std::move(latest_frame_getter)),
-      latest_encoded_unit_getter_(std::move(latest_encoded_unit_getter)) {
+      latest_encoded_unit_getter_(std::move(latest_encoded_unit_getter)),
+      max_pending_candidates_per_stream_(max_pending_candidates_per_stream) {
   ensure_default_logging_config();
 }
 
@@ -90,6 +92,12 @@ bool SignalingServer::add_ice_candidate(const std::string& stream_id, const std:
         return false;
       }
       auto& slot = sessions_[stream_id];
+      if (slot.pending_remote_candidates.size() >= max_pending_candidates_per_stream_) {
+        if (error_message != nullptr) {
+          *error_message = "too many pending candidates";
+        }
+        return false;
+      }
       slot.pending_remote_candidates.push_back(candidate);
       spdlog::debug("[signaling] queued remote candidate before offer stream={} size={}", stream_id,
                     candidate.size());

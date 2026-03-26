@@ -93,6 +93,16 @@ void assert_json_response_headers(const std::string& response) {
   CHECK_TRUE(response.find("Content-Length:") != std::string::npos);
 }
 
+video_server::WebRtcVideoServerConfig make_http_test_config(const std::string& host = "127.0.0.1",
+                                                            uint16_t port = 0,
+                                                            bool enable_http_api = false) {
+  video_server::WebRtcVideoServerConfig config;
+  config.http_host = host;
+  config.http_port = port;
+  config.enable_http_api = enable_http_api;
+  return config;
+}
+
 std::string json_string_field(const std::string& json, const std::string& key) {
   const std::string needle = "\"" + key + "\":\"";
   const auto start = json.find(needle);
@@ -337,7 +347,8 @@ TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions) {
     CHECK_TRUE(offer_response.status == 200);
     CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Origin") == origin);
     CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Methods") == "GET, POST, PUT, OPTIONS");
-    CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Headers") == "Content-Type");
+    CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Headers") ==
+               "Authorization, Content-Type, X-Video-Server-Key");
   }
 
   const auto session_response =
@@ -351,7 +362,8 @@ TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions) {
   CHECK_TRUE(options_offer.body.empty());
   CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Origin") == origin);
   CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Methods") == "GET, POST, PUT, OPTIONS");
-  CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Headers") == "Content-Type");
+  CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Headers") ==
+             "Authorization, Content-Type, X-Video-Server-Key");
 
   const auto options_candidate =
       server.handle_http_request_for_test("OPTIONS", "/api/video/signaling/signal-cors/candidate", "", headers);
@@ -889,7 +901,9 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) {
 }
 
 TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability) {
-  video_server::WebRtcVideoServer server({"127.0.0.1", 0, false});
+  auto server_config = make_http_test_config();
+  server_config.enable_debug_api = true;
+  video_server::WebRtcVideoServer server(server_config);
   ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
   ASSERT_TRUE(server.register_stream({"bravo", "Bravo", 3, 1, 30.0, video_server::VideoPixelFormat::GRAY8}));
 
@@ -911,8 +925,92 @@ TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability) {
   EXPECT_NE(response.body.find("\"total_access_units_received\":1"), std::string::npos);
 }
 
+TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrectKey) {
+  auto server_config = make_http_test_config();
+  server_config.enable_shared_key_auth = true;
+  server_config.shared_key = "lan-secret";
+  video_server::WebRtcVideoServer server(server_config);
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+
+  const auto missing =
+      server.handle_http_request_for_test("GET", "/api/video/streams/alpha/config");
+  ASSERT_EQ(missing.status, 401);
+
+  const auto wrong = server.handle_http_request_for_test(
+      "GET", "/api/video/streams/alpha/config", "", {{"Authorization", "Bearer wrong-secret"}});
+  ASSERT_EQ(wrong.status, 401);
+
+  const auto ok = server.handle_http_request_for_test(
+      "GET", "/api/video/streams/alpha/config", "", {{"Authorization", "Bearer lan-secret"}});
+  ASSERT_EQ(ok.status, 200);
+  ASSERT_NE(ok.body.find("\"config_generation\":1"), std::string::npos);
+}
+
+TEST(WebRtcHttpTest, AllowlistSupportsCidrsAndRejectsDisallowedRemoteAddresses) {
+  auto server_config = make_http_test_config("0.0.0.0");
+  server_config.ip_allowlist = {"192.168.50.0/24"};
+  video_server::WebRtcVideoServer server(server_config);
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+
+  const auto allowed = server.handle_http_request_for_test(
+      "GET", "/api/video/streams/alpha/config", "", {}, "192.168.50.77");
+  ASSERT_EQ(allowed.status, 200);
+
+  const auto blocked = server.handle_http_request_for_test(
+      "GET", "/api/video/streams/alpha/config", "", {}, "10.1.2.3");
+  ASSERT_EQ(blocked.status, 403);
+}
+
+TEST(WebRtcHttpTest, SaferDefaultsGateDebugAndRemoteSensitiveRoutes) {
+  video_server::WebRtcVideoServer local_server(make_http_test_config());
+  ASSERT_TRUE(local_server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+  EXPECT_EQ(local_server.handle_http_request_for_test("GET", "/api/video/debug/stats").status, 404);
+
+  auto remote_config = make_http_test_config("0.0.0.0");
+  video_server::WebRtcVideoServer remote_server(remote_config);
+  ASSERT_TRUE(remote_server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+  EXPECT_EQ(remote_server.handle_http_request_for_test("GET", "/api/video/streams").status, 200);
+  EXPECT_EQ(remote_server.handle_http_request_for_test("GET", "/api/video/streams/alpha/config", "", {}, "192.168.1.44").status,
+            403);
+}
+
+TEST(WebRtcHttpTest, ValidationRejectsInvalidStreamIdsAndMalformedConfigPayloads) {
+  video_server::WebRtcVideoServer server(make_http_test_config());
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+
+  const auto invalid_stream = server.handle_http_request_for_test("GET", "/api/video/streams/bad/id/config");
+  ASSERT_EQ(invalid_stream.status, 400);
+
+  const auto fractional_width = server.handle_http_request_for_test(
+      "PUT", "/api/video/streams/alpha/config", "{\"output_width\":12.5}");
+  ASSERT_EQ(fractional_width.status, 400);
+
+  const auto unknown_field = server.handle_http_request_for_test(
+      "PUT", "/api/video/streams/alpha/config", "{\"surprise\":1}");
+  ASSERT_EQ(unknown_field.status, 400);
+}
+
+TEST(WebRtcHttpTest, RateLimitingRejectsRepeatedConfigMutations) {
+  auto server_config = make_http_test_config();
+  server_config.config_rate_limit_max_requests = 2;
+  server_config.config_rate_limit_window_seconds = 60;
+  video_server::WebRtcVideoServer server(server_config);
+  ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8}));
+
+  const auto first = server.handle_http_request_for_test(
+      "PUT", "/api/video/streams/alpha/config", "{\"display_mode\":\"white_hot\"}");
+  const auto second = server.handle_http_request_for_test(
+      "PUT", "/api/video/streams/alpha/config", "{\"display_mode\":\"black_hot\"}");
+  const auto third = server.handle_http_request_for_test(
+      "PUT", "/api/video/streams/alpha/config", "{\"display_mode\":\"rainbow\"}");
+
+  ASSERT_EQ(first.status, 200);
+  ASSERT_EQ(second.status, 200);
+  ASSERT_EQ(third.status, 429);
+}
+
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) {
-  video_server::WebRtcVideoServer server({"127.0.0.1", 0, false});
+  video_server::WebRtcVideoServer server(make_http_test_config());
   const video_server::StreamConfig alpha{"alpha", "Alpha", 640, 360, 15.0, video_server::VideoPixelFormat::GRAY8};
   const video_server::StreamConfig bravo{"bravo", "Bravo", 320, 240, 30.0, video_server::VideoPixelFormat::GRAY8};
   ASSERT_TRUE(server.register_stream(alpha));
@@ -1010,7 +1108,9 @@ TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) {
 TEST(WebRtcHttpTest, PerStreamConfigApiSupportsIsolationValidationAndObservability) {
   const uint16_t port = static_cast<uint16_t>(21000 + (::getpid() % 10000));
   const std::string host = "127.0.0.1";
-  video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+  auto server_config = make_http_test_config(host, port, true);
+  server_config.enable_debug_api = true;
+  video_server::WebRtcVideoServer server(server_config);
   video_server::StreamConfig alpha{"alpha", "alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
   video_server::StreamConfig bravo{"bravo", "bravo", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
   ASSERT_TRUE(server.register_stream(alpha));

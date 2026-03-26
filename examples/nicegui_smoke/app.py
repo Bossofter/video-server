@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--smoke-binary', default=str(DEFAULT_SMOKE_BINARY), help='Path to the smoke server executable.')
     parser.add_argument('--server-host', default='127.0.0.1', help='Host to pass to the smoke server when --start-server is used.')
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
     parser.add_argument('--width', type=int, default=640, help='Synthetic stream width for the launched smoke server.')
     parser.add_argument('--height', type=int, default=360, help='Synthetic stream height for the launched smoke server.')
     parser.add_argument('--fps', type=float, default=30.0, help='Synthetic stream FPS for the launched smoke server.')
@@ -103,6 +104,10 @@ def start_smoke_server() -> subprocess.Popen[str]:
         cmd.extend(['--stats-interval-seconds', str(ARGS.stress_stats_interval_seconds)])
         if ARGS.stress_print_summary:
             cmd.append('--print-observability-summary')
+    if ARGS.debug:
+        cmd.append('--enable-debug-api')
+    if ARGS.shared_key:
+        cmd.extend(['--shared-key', ARGS.shared_key])
 
     probe_host = ARGS.server_host
     if probe_host in ('0.0.0.0', '::', ''):
@@ -189,6 +194,7 @@ async def _shutdown() -> None:
 
 INITIAL_CONFIG = {
     'serverBase': ARGS.video_server_url,
+    'sharedKey': ARGS.shared_key,
     'streamId': DEFAULT_STREAM_ID,
     'streamCatalog': STREAM_SPECS,
     'widgetFps': STREAM_SPECS[0]['fps'],
@@ -287,6 +293,12 @@ window.videoSmokeHarness = (() => {{
     return `${{formatNumber(width, '?')}}x${{formatNumber(height, '?')}}`;
   }};
   const configUrl = (serverBase, streamId) => `${{serverBase}}/api/video/streams/${{encodeURIComponent(streamId)}}/config`;
+  const authHeaders = (contentType=null) => {{
+    const headers = {{}};
+    if (contentType) headers['Content-Type'] = contentType;
+    if (state.config?.sharedKey) headers['Authorization'] = `Bearer ${{state.config.sharedKey}}`;
+    return headers;
+  }};
   const selectedStreamSpec = (streamId) => {{
     const catalog = Array.isArray(state.config?.streamCatalog) ? state.config.streamCatalog : [];
     return catalog.find((spec) => spec.streamId === streamId) || catalog[0] || null;
@@ -798,7 +810,7 @@ window.videoSmokeHarness = (() => {{
   async function postCandidate(serverBase, streamId, candidate) {{
     const response = await fetch(`${{serverBase}}/api/video/signaling/${{streamId}}/candidate`, {{
       method: 'POST',
-      headers: {{'Content-Type': 'text/plain'}},
+      headers: authHeaders('text/plain'),
       body: candidate,
     }});
     if (!response.ok) {{
@@ -872,7 +884,9 @@ window.videoSmokeHarness = (() => {{
     const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
     if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/session`);
+      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/session`, {{
+        headers: authHeaders(),
+      }});
       if (!sessionResponse.ok) {{
         appendLog('session', `session poll failed: HTTP ${{sessionResponse.status}}`);
         return;
@@ -911,7 +925,9 @@ window.videoSmokeHarness = (() => {{
     const cfg = state.config;
     if (!cfg?.serverBase) return;
     try {{
-      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`);
+      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`, {{
+        headers: authHeaders(),
+      }});
       if (!response.ok) {{
         appendLog('session', `observability poll failed: HTTP ${{response.status}}`);
         return;
@@ -1047,7 +1063,7 @@ window.videoSmokeHarness = (() => {{
       appendLog('signaling', 'posting SDP offer to server');
       const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/offer`, {{
         method: 'POST',
-        headers: {{'Content-Type': 'text/plain'}},
+        headers: authHeaders('text/plain'),
         body: pc.localDescription.sdp,
       }});
       if (!offerResponse.ok) {{
@@ -1093,7 +1109,9 @@ window.videoSmokeHarness = (() => {{
     if (!cfg.serverBase || !cfg.streamId) return;
     updateConfigStreamIdentity(cfg.streamId);
     setConfigStatus(`Loading config for ${{cfg.streamId}}...`);
-    const response = await fetch(configUrl(cfg.serverBase, cfg.streamId));
+    const response = await fetch(configUrl(cfg.serverBase, cfg.streamId), {{
+      headers: authHeaders(),
+    }});
     if (!response.ok) throw new Error(await response.text() || `config load failed: ${{response.status}}`);
     const data = await response.json();
     applyConfigDataToUi(cfg.streamId, data);
@@ -1113,7 +1131,7 @@ window.videoSmokeHarness = (() => {{
     setConfigStatus(`Applying config to ${{cfg.streamId}}...`);
     const response = await fetch(configUrl(cfg.serverBase, cfg.streamId), {{
       method: 'PUT',
-      headers: {{'Content-Type': 'application/json'}},
+      headers: authHeaders('application/json'),
       body: JSON.stringify(payload),
     }});
     const bodyText = await response.text();

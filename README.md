@@ -74,6 +74,14 @@ If you intentionally want a no-backend build, configure manually with `-DENABLE_
 
 More detail: `docs/video_server.md`.
 
+## Security hardening defaults
+
+- HTTP still binds to `127.0.0.1` by default.
+- `GET /api/video/debug/stats` is now disabled by default; enable it explicitly with `WebRtcVideoServerConfig.enable_debug_api = true`.
+- Runtime config and signaling routes remain available on loopback by default, but sensitive routes are blocked on non-loopback binds unless you explicitly opt into `allow_unsafe_public_routes` or enable a shared key and/or IP allowlist.
+- Shared-key protection accepts either `Authorization: Bearer <key>` or `X-Video-Server-Key: <key>`.
+- CORS is no longer wildcard by default. Loopback origins are allowed automatically for loopback binds, and non-loopback deployments should set `cors_allowed_origins` explicitly.
+
 ## NiceGUI smoke harness
 
 A manual NiceGUI smoke harness lives in `examples/nicegui_smoke/`. It keeps UI code isolated from the server core while exercising the current intended browser path: synthetic content -> H264 access units -> WebRTC signaling -> browser `<video>` playback.
@@ -89,6 +97,8 @@ python examples/nicegui_smoke/app.py --start-server
 ```
 
 Then open `http://127.0.0.1:8090/`.
+
+To exercise a protected server from the harness, pass `--shared-key your-token`. The harness forwards that token on signaling, config, and debug requests, and when `--start-server` is used it also launches the smoke server with the same shared key.
 
 ## Raw-to-H264 bridge pipeline
 

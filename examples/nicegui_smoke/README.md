@@ -30,6 +30,8 @@ Open:
 http://127.0.0.1:8090/
 ```
 
+If you enable shared-key protection on the server, launch the harness with `--shared-key YOUR_TOKEN`. When `--start-server` is used, the harness passes the same token to the smoke server and includes `Authorization: Bearer YOUR_TOKEN` on signaling, config, and debug requests. `--debug` also enables the smoke server's debug endpoint explicitly, which now defaults to disabled.
+
 ## Default multi-stream demo set
 
 By default, the smoke harness now launches a three-stream demo unless you explicitly pass single-stream sizing/id flags. `--multi-stream-demo` selects the same default set explicitly:
