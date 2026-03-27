@@ -16,7 +16,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+from fastapi.responses import Response
 from nicegui import app, ui
+import nicegui.client as nicegui_client
 from ui_helpers import default_demo_streams, parse_stream_spec
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--smoke-binary', default=str(DEFAULT_SMOKE_BINARY), help='Path to the smoke server executable.')
     parser.add_argument('--server-host', default='0.0.0.0', help='Host to pass to the smoke server when --start-server is used.')
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--lan-only', action='store_true', help='Enable LAN smoke mode: allow remote signaling/config/debug access on the launched smoke server.')
     parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
     parser.add_argument('--width', type=int, default=640, help='Synthetic stream width for the launched smoke server.')
     parser.add_argument('--height', type=int, default=360, help='Synthetic stream height for the launched smoke server.')
@@ -51,6 +54,67 @@ def parse_args() -> argparse.Namespace:
 
 ARGS = parse_args()
 SMOKE_PROCESS: Optional[subprocess.Popen[str]] = None
+
+
+def patch_nicegui_build_response() -> None:
+    if getattr(nicegui_client.Client.build_response, '__name__', '') == 'patched_build_response':
+        return
+
+    def patched_build_response(self: nicegui_client.Client, request: Any, status_code: int = 200) -> Response:
+        self.outbox.updates.clear()
+        prefix = request.headers.get('X-Forwarded-Prefix', '') + request.scope.get('root_path', '')
+        elements = json.dumps({
+            id: element._to_dict() for id, element in self.elements.items()  # pylint: disable=protected-access
+        })
+        socket_io_js_query_params = {
+            **nicegui_client.core.app.config.socket_io_js_query_params,
+            'client_id': self.id,
+            'next_message_id': self.outbox.next_message_id,
+            'implicit_handshake': not nicegui_client._is_prefetch(request),
+        }
+        vue_html, vue_styles, vue_scripts, imports, js_imports, js_imports_urls = nicegui_client.generate_resources(
+            prefix, self.elements.values()
+        )
+        return nicegui_client.templates.TemplateResponse(
+            request=request,
+            name='index.html',
+            context={
+                'request': request,
+                'version': nicegui_client.__version__,
+                'elements': elements.translate(nicegui_client.HTML_ESCAPE_TABLE),
+                'head_html': self.head_html,
+                'body_html': '<style>' + '\n'.join(vue_styles) + '</style>\n' + self.body_html + '\n' + '\n'.join(vue_html),
+                'vue_scripts': '\n'.join(vue_scripts),
+                'imports': json.dumps(imports),
+                'js_imports': '\n'.join(js_imports),
+                'js_imports_urls': js_imports_urls,
+                'vue_config': json.dumps(nicegui_client.core.app.config.quasar_config),
+                'vue_config_script': nicegui_client.core.app.config.vue_config_script.replace('None', 'null'),
+                'title': self.resolve_title(),
+                'viewport': self.page.resolve_viewport(),
+                'favicon_url': nicegui_client.get_favicon_url(self.page, prefix),
+                'dark': json.dumps(self.page.resolve_dark()),
+                'language': self.page.resolve_language(),
+                'translations': nicegui_client.translations.get(
+                    self.page.resolve_language(), nicegui_client.translations['en-US']
+                ),
+                'prefix': prefix,
+                'tailwind': nicegui_client.core.app.config.tailwind,
+                'unocss': nicegui_client.core.app.config.unocss,
+                'headwind_css': nicegui_client.HEADWIND_CONTENT if nicegui_client.core.app.config.tailwind else '',
+                'prod_js': nicegui_client.core.app.config.prod_js,
+                'socket_io_js_query_params': json.dumps(socket_io_js_query_params),
+                'socket_io_js_extra_headers': json.dumps(nicegui_client.core.app.config.socket_io_js_extra_headers),
+                'socket_io_js_transports': json.dumps(nicegui_client.core.app.config.socket_io_js_transports),
+            },
+            status_code=status_code,
+            headers={'Cache-Control': 'no-store', 'X-NiceGUI-Content': 'page'},
+        )
+
+    nicegui_client.Client.build_response = patched_build_response
+
+
+patch_nicegui_build_response()
 
 def requested_streams() -> list[dict[str, Any]]:
     explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
@@ -106,6 +170,8 @@ def start_smoke_server() -> subprocess.Popen[str]:
             cmd.append('--print-observability-summary')
     if ARGS.debug:
         cmd.append('--enable-debug-api')
+    if ARGS.lan_only:
+        cmd.append('--lan-only')
     if ARGS.shared_key:
         cmd.extend(['--shared-key', ARGS.shared_key])
 
