@@ -34,7 +34,7 @@ struct StreamSpec {
 };
 
 struct Options {
-  std::string host{"127.0.0.1"};
+  std::string host{"0.0.0.0"};
   uint16_t port{8080};
   bool enable_debug_api{false};
   std::string shared_key;
@@ -250,6 +250,8 @@ int main(int argc, char** argv) {
   server_config.http_port = options->port;
   server_config.enable_http_api = true;
   server_config.enable_debug_api = options->enable_debug_api;
+  server_config.allow_unsafe_public_routes = true;
+  server_config.cors_allowed_origins = {"*"};
   if (!options->shared_key.empty()) {
     server_config.enable_shared_key_auth = true;
     server_config.shared_key = options->shared_key;

@@ -25,15 +25,15 @@ DEFAULT_SMOKE_BINARY = ROOT / 'build' / 'video_server_nicegui_smoke_server'
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='NiceGUI smoke harness for the video-server WebRTC H264 path.')
-    parser.add_argument('--video-server-url', default='http://127.0.0.1:8080', help='Base URL for the running video server.')
+    parser.add_argument('--video-server-url', default='http://0.0.0.0:8080', help='Base URL for the running video server.')
     parser.add_argument('--stream-id', default='synthetic-h264', help='Synthetic stream id to consume.')
     parser.add_argument('--stream', action='append', default=[], help='Repeatable multi-stream demo spec: id:width:height:fps[:label].')
     parser.add_argument('--multi-stream-demo', action='store_true', help='Launch the default alpha/bravo/charlie multi-stream demo set.')
-    parser.add_argument('--ui-host', default='127.0.0.1', help='NiceGUI host.')
+    parser.add_argument('--ui-host', default='0.0.0.0', help='NiceGUI host.')
     parser.add_argument('--ui-port', type=int, default=8090, help='NiceGUI port.')
     parser.add_argument('--start-server', action='store_true', help='Launch the smoke C++ server executable automatically.')
     parser.add_argument('--smoke-binary', default=str(DEFAULT_SMOKE_BINARY), help='Path to the smoke server executable.')
-    parser.add_argument('--server-host', default='127.0.0.1', help='Host to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--server-host', default='0.0.0.0', help='Host to pass to the smoke server when --start-server is used.')
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
     parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
     parser.add_argument('--width', type=int, default=640, help='Synthetic stream width for the launched smoke server.')
@@ -292,6 +292,24 @@ window.videoSmokeHarness = (() => {{
     if (!width && !height) return fallback;
     return `${{formatNumber(width, '?')}}x${{formatNumber(height, '?')}}`;
   }};
+  const normalizeServerBase = (serverBase) => {{
+    const raw = String(serverBase || '').trim();
+    if (!raw) return raw;
+    try {{
+      const url = new URL(raw);
+      const host = (url.hostname || '').toLowerCase();
+      if (['0.0.0.0', '::', '[::]', '127.0.0.1', '::1', 'localhost'].includes(host)) {{
+        const browserHost = window.location.hostname;
+        if (browserHost) {{
+          url.hostname = browserHost;
+          return url.toString().replace(/\\/$/, '');
+        }}
+      }}
+      return url.toString().replace(/\\/$/, '');
+    }} catch (_error) {{
+      return raw.replace(/\\/$/, '');
+    }}
+  }};
   const configUrl = (serverBase, streamId) => `${{serverBase}}/api/video/streams/${{encodeURIComponent(streamId)}}/config`;
   const authHeaders = (contentType=null) => {{
     const headers = {{}};
@@ -317,6 +335,7 @@ window.videoSmokeHarness = (() => {{
     }}
     const defaults = Object.assign({{}}, window.videoSmokeDefaults || {{}});
     state.config = Object.assign({{}}, defaults, saved);
+    state.config.serverBase = normalizeServerBase(state.config.serverBase || defaults.serverBase || '');
     state.config.streamCatalog = Array.isArray(defaults.streamCatalog) ? defaults.streamCatalog : (state.config.streamCatalog || []);
     state.config.modeLabel = defaults.modeLabel || state.config.modeLabel;
     state.config.smokeServerManaged = !!defaults.smokeServerManaged;
@@ -1534,7 +1553,7 @@ PAGE_HTML = """
         </div>
         <button id="close-settings" class="toolbar-button small">Close</button>
       </div>
-      <label>Server URL<input id="config-server-url" type="text" placeholder="http://127.0.0.1:8080"></label>
+      <label>Server URL<input id="config-server-url" type="text" placeholder="http://0.0.0.0:8080"></label>
       <label>Stream ID<input id="config-stream-id" type="text" placeholder="synthetic-h264"></label>
       <label>Session poll interval (ms)<input id="config-session-poll-ms" type="number" min="200" step="100"></label>
       <label>Log filter
