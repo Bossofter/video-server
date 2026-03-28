@@ -21,14 +21,16 @@ From the repo root:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r examples/nicegui_smoke/requirements.txt
-python examples/nicegui_smoke/app.py --start-server --multi-stream-demo --auto-connect --debug
+python examples/nicegui_smoke/app.py --start-server --multi-stream-demo --auto-connect --debug --lan-only
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8090/
+http://<smoke-host-lan-ip>:8090/
 ```
+
+The smoke harness now binds both the NiceGUI app and the synthetic WebRTC server to `0.0.0.0` by default so a second machine on the same LAN can open the page. When the browser loads a loopback or wildcard `--video-server-url`, the page rewrites it to the hostname it was opened with so `0.0.0.0` does not leak into browser fetches. Use `--lan-only` when you want the launched synthetic smoke server to allow remote signaling/config/debug access from the LAN.
 
 If you enable shared-key protection on the server, launch the harness with `--shared-key YOUR_TOKEN`. When `--start-server` is used, the harness passes the same token to the smoke server and includes `Authorization: Bearer YOUR_TOKEN` on signaling, config, and debug requests. `--debug` also enables the smoke server's debug endpoint explicitly, which now defaults to disabled.
 
@@ -52,7 +54,7 @@ python examples/nicegui_smoke/app.py \
   --stream alpha:640:360:30:Alpha-Sweep \
   --stream bravo:1280:720:30:Bravo-Orbit \
   --stream charlie:320:240:30:Charlie-Checker \
-  --auto-connect --debug
+  --auto-connect --debug --lan-only
 ```
 
 The smoke tab now also includes a dropdown selector so you can point the full debug player at any configured stream before connecting or reconnecting.
@@ -84,13 +86,13 @@ If you already launched the smoke server yourself:
 
 ```bash
 ./build/video_server_nicegui_smoke_server --multi-stream-demo
-python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
+python examples/nicegui_smoke/app.py --video-server-url http://0.0.0.0:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
 ```
 
 ## Caveats
 
 - This is a debug harness, not a production UI.
-- It targets local/manual validation.
-- It keeps signaling intentionally simple and primarily relies on SDP exchange on localhost.
+- It targets local/manual validation, including same-LAN smoke testing.
+- `--lan-only` enables permissive CORS and unsafe public routes on the synthetic smoke server; do not treat that configuration as production-safe.
 - The current backend still exposes one active WebRTC session slot per stream.
 - Session and stats polling are lightweight but still periodic; increase the poll interval if you want less churn.

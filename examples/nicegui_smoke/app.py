@@ -15,8 +15,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urljoin, urlparse
 
+from fastapi import Request
+from fastapi.responses import Response
 from nicegui import app, ui
+import nicegui.client as nicegui_client
 from ui_helpers import default_demo_streams, parse_stream_spec
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,16 +29,17 @@ DEFAULT_SMOKE_BINARY = ROOT / 'build' / 'video_server_nicegui_smoke_server'
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='NiceGUI smoke harness for the video-server WebRTC H264 path.')
-    parser.add_argument('--video-server-url', default='http://127.0.0.1:8080', help='Base URL for the running video server.')
+    parser.add_argument('--video-server-url', default='http://0.0.0.0:8080', help='Base URL for the running video server.')
     parser.add_argument('--stream-id', default='synthetic-h264', help='Synthetic stream id to consume.')
     parser.add_argument('--stream', action='append', default=[], help='Repeatable multi-stream demo spec: id:width:height:fps[:label].')
     parser.add_argument('--multi-stream-demo', action='store_true', help='Launch the default alpha/bravo/charlie multi-stream demo set.')
-    parser.add_argument('--ui-host', default='127.0.0.1', help='NiceGUI host.')
+    parser.add_argument('--ui-host', default='0.0.0.0', help='NiceGUI host.')
     parser.add_argument('--ui-port', type=int, default=8090, help='NiceGUI port.')
     parser.add_argument('--start-server', action='store_true', help='Launch the smoke C++ server executable automatically.')
     parser.add_argument('--smoke-binary', default=str(DEFAULT_SMOKE_BINARY), help='Path to the smoke server executable.')
-    parser.add_argument('--server-host', default='127.0.0.1', help='Host to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--server-host', default='0.0.0.0', help='Host to pass to the smoke server when --start-server is used.')
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--lan-only', action='store_true', help='Enable LAN smoke mode: allow remote signaling/config/debug access on the launched smoke server.')
     parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
     parser.add_argument('--width', type=int, default=640, help='Synthetic stream width for the launched smoke server.')
     parser.add_argument('--height', type=int, default=360, help='Synthetic stream height for the launched smoke server.')
@@ -51,6 +56,105 @@ def parse_args() -> argparse.Namespace:
 
 ARGS = parse_args()
 SMOKE_PROCESS: Optional[subprocess.Popen[str]] = None
+
+
+def patch_nicegui_build_response() -> None:
+    if getattr(nicegui_client.Client.build_response, '__name__', '') == 'patched_build_response':
+        return
+
+    def patched_build_response(self: nicegui_client.Client, request: Any, status_code: int = 200) -> Response:
+        self.outbox.updates.clear()
+        prefix = request.headers.get('X-Forwarded-Prefix', '') + request.scope.get('root_path', '')
+        elements = json.dumps({
+            id: element._to_dict() for id, element in self.elements.items()  # pylint: disable=protected-access
+        })
+        socket_io_js_query_params = {
+            **nicegui_client.core.app.config.socket_io_js_query_params,
+            'client_id': self.id,
+            'next_message_id': self.outbox.next_message_id,
+            'implicit_handshake': not nicegui_client._is_prefetch(request),
+        }
+        vue_html, vue_styles, vue_scripts, imports, js_imports, js_imports_urls = nicegui_client.generate_resources(
+            prefix, self.elements.values()
+        )
+        return nicegui_client.templates.TemplateResponse(
+            request=request,
+            name='index.html',
+            context={
+                'request': request,
+                'version': nicegui_client.__version__,
+                'elements': elements.translate(nicegui_client.HTML_ESCAPE_TABLE),
+                'head_html': self.head_html,
+                'body_html': '<style>' + '\n'.join(vue_styles) + '</style>\n' + self.body_html + '\n' + '\n'.join(vue_html),
+                'vue_scripts': '\n'.join(vue_scripts),
+                'imports': json.dumps(imports),
+                'js_imports': '\n'.join(js_imports),
+                'js_imports_urls': js_imports_urls,
+                'vue_config': json.dumps(nicegui_client.core.app.config.quasar_config),
+                'vue_config_script': nicegui_client.core.app.config.vue_config_script.replace('None', 'null'),
+                'title': self.resolve_title(),
+                'viewport': self.page.resolve_viewport(),
+                'favicon_url': nicegui_client.get_favicon_url(self.page, prefix),
+                'dark': json.dumps(self.page.resolve_dark()),
+                'language': self.page.resolve_language(),
+                'translations': nicegui_client.translations.get(
+                    self.page.resolve_language(), nicegui_client.translations['en-US']
+                ),
+                'prefix': prefix,
+                'tailwind': nicegui_client.core.app.config.tailwind,
+                'unocss': nicegui_client.core.app.config.unocss,
+                'headwind_css': nicegui_client.HEADWIND_CONTENT if nicegui_client.core.app.config.tailwind else '',
+                'prod_js': nicegui_client.core.app.config.prod_js,
+                'socket_io_js_query_params': json.dumps(socket_io_js_query_params),
+                'socket_io_js_extra_headers': json.dumps(nicegui_client.core.app.config.socket_io_js_extra_headers),
+                'socket_io_js_transports': json.dumps(nicegui_client.core.app.config.socket_io_js_transports),
+            },
+            status_code=status_code,
+            headers={'Cache-Control': 'no-store', 'X-NiceGUI-Content': 'page'},
+        )
+
+    nicegui_client.Client.build_response = patched_build_response
+
+
+patch_nicegui_build_response()
+
+
+def proxy_target_url(base: str, path: str) -> str:
+    parsed = urlparse(base)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        raise ValueError(f'invalid proxy base URL: {base!r}')
+    if not path.startswith('/api/video/'):
+        raise ValueError(f'invalid proxy path: {path!r}')
+    return urljoin(base.rstrip('/') + '/', path.lstrip('/'))
+
+
+@app.api_route('/_video_proxy/{full_path:path}', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
+async def video_proxy(request: Request, full_path: str) -> Response:
+    base = request.query_params.get('base', '').strip()
+    path = '/' + full_path.lstrip('/')
+    if request.method == 'OPTIONS':
+        return Response(status_code=204)
+    try:
+        target = proxy_target_url(base, path)
+    except ValueError as exc:
+        return Response(str(exc), status_code=400, media_type='text/plain')
+
+    body = await request.body()
+    outgoing = urllib.request.Request(target, data=body if request.method in {'POST', 'PUT'} else None, method=request.method)
+    for header_name in ('Authorization', 'Content-Type', 'X-Video-Server-Key'):
+        header_value = request.headers.get(header_name)
+        if header_value:
+            outgoing.add_header(header_name, header_value)
+    try:
+        with urllib.request.urlopen(outgoing, timeout=5.0) as upstream:
+            response_body = upstream.read()
+            content_type = upstream.headers.get('Content-Type', 'application/octet-stream')
+            return Response(content=response_body, status_code=upstream.status, media_type=content_type)
+    except urllib.error.HTTPError as exc:
+        return Response(content=exc.read(), status_code=exc.code, media_type=exc.headers.get('Content-Type', 'text/plain'))
+    except OSError as exc:
+        return Response(str(exc), status_code=502, media_type='text/plain')
+
 
 def requested_streams() -> list[dict[str, Any]]:
     explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
@@ -106,6 +210,8 @@ def start_smoke_server() -> subprocess.Popen[str]:
             cmd.append('--print-observability-summary')
     if ARGS.debug:
         cmd.append('--enable-debug-api')
+    if ARGS.lan_only:
+        cmd.append('--lan-only')
     if ARGS.shared_key:
         cmd.extend(['--shared-key', ARGS.shared_key])
 
@@ -292,7 +398,29 @@ window.videoSmokeHarness = (() => {{
     if (!width && !height) return fallback;
     return `${{formatNumber(width, '?')}}x${{formatNumber(height, '?')}}`;
   }};
-  const configUrl = (serverBase, streamId) => `${{serverBase}}/api/video/streams/${{encodeURIComponent(streamId)}}/config`;
+  const apiProxyUrl = (serverBase, path) => {{
+    const query = new URLSearchParams({{base: serverBase}});
+    return `${{window.location.origin}}/_video_proxy/${{path.replace(/^\\/+/, '')}}?${{query.toString()}}`;
+  }};
+  const normalizeServerBase = (serverBase) => {{
+    const raw = String(serverBase || '').trim();
+    if (!raw) return raw;
+    try {{
+      const url = new URL(raw);
+      const host = (url.hostname || '').toLowerCase();
+      if (['0.0.0.0', '::', '[::]', '127.0.0.1', '::1', 'localhost'].includes(host)) {{
+        const browserHost = window.location.hostname;
+        if (browserHost) {{
+          url.hostname = browserHost;
+          return url.toString().replace(/\\/$/, '');
+        }}
+      }}
+      return url.toString().replace(/\\/$/, '');
+    }} catch (_error) {{
+      return raw.replace(/\\/$/, '');
+    }}
+  }};
+  const configUrl = (serverBase, streamId) => apiProxyUrl(serverBase, `/api/video/streams/${{encodeURIComponent(streamId)}}/config`);
   const authHeaders = (contentType=null) => {{
     const headers = {{}};
     if (contentType) headers['Content-Type'] = contentType;
@@ -317,6 +445,7 @@ window.videoSmokeHarness = (() => {{
     }}
     const defaults = Object.assign({{}}, window.videoSmokeDefaults || {{}});
     state.config = Object.assign({{}}, defaults, saved);
+    state.config.serverBase = normalizeServerBase(state.config.serverBase || defaults.serverBase || '');
     state.config.streamCatalog = Array.isArray(defaults.streamCatalog) ? defaults.streamCatalog : (state.config.streamCatalog || []);
     state.config.modeLabel = defaults.modeLabel || state.config.modeLabel;
     state.config.smokeServerManaged = !!defaults.smokeServerManaged;
@@ -808,7 +937,7 @@ window.videoSmokeHarness = (() => {{
   }}
 
   async function postCandidate(serverBase, streamId, candidate) {{
-    const response = await fetch(`${{serverBase}}/api/video/signaling/${{streamId}}/candidate`, {{
+    const response = await fetch(apiProxyUrl(serverBase, `/api/video/signaling/${{streamId}}/candidate`), {{
       method: 'POST',
       headers: authHeaders('text/plain'),
       body: candidate,
@@ -884,7 +1013,7 @@ window.videoSmokeHarness = (() => {{
     const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
     if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/session`, {{
+      const sessionResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/session`), {{
         headers: authHeaders(),
       }});
       if (!sessionResponse.ok) {{
@@ -925,7 +1054,7 @@ window.videoSmokeHarness = (() => {{
     const cfg = state.config;
     if (!cfg?.serverBase) return;
     try {{
-      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`, {{
+      const response = await fetch(apiProxyUrl(cfg.serverBase, '/api/video/debug/stats'), {{
         headers: authHeaders(),
       }});
       if (!response.ok) {{
@@ -1061,7 +1190,7 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
 
       appendLog('signaling', 'posting SDP offer to server');
-      const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/offer`, {{
+      const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/offer`), {{
         method: 'POST',
         headers: authHeaders('text/plain'),
         body: pc.localDescription.sdp,
@@ -1534,7 +1663,7 @@ PAGE_HTML = """
         </div>
         <button id="close-settings" class="toolbar-button small">Close</button>
       </div>
-      <label>Server URL<input id="config-server-url" type="text" placeholder="http://127.0.0.1:8080"></label>
+      <label>Server URL<input id="config-server-url" type="text" placeholder="http://0.0.0.0:8080"></label>
       <label>Stream ID<input id="config-stream-id" type="text" placeholder="synthetic-h264"></label>
       <label>Session poll interval (ms)<input id="config-session-poll-ms" type="number" min="200" step="100"></label>
       <label>Log filter
@@ -1696,7 +1825,7 @@ This page is a manual browser harness for the current H264 WebRTC consumer path.
 - **Settings access:** use the **Settings** button or right-click the video area.
             """
         ).classes('max-w-5xl w-full')
-        ui.html(PAGE_HTML).classes('w-full')
+        ui.html(PAGE_HTML, sanitize=False).classes('w-full')
 
 if __name__ in {'__main__', '__mp_main__'}:
     try:
