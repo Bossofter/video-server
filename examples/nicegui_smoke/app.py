@@ -1781,7 +1781,7 @@ This page is a manual browser harness for the current H264 WebRTC consumer path.
 - **Settings access:** use the **Settings** button or right-click the video area.
             """
         ).classes('max-w-5xl w-full')
-        ui.html(PAGE_HTML).classes('w-full')
+        ui.html(PAGE_HTML, sanitize=False).classes('w-full')
 
 if __name__ in {'__main__', '__mp_main__'}:
     try:
