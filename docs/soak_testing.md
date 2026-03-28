@@ -77,6 +77,7 @@ Metrics stay in memory for the full run and can also be written to JSON and CSV.
 ## Output
 
 - Periodic concise summary lines for each stream.
-- Final pass/fail summary with per-stream end-state.
+- Final pass/fail summary with per-stream end-state, including reconnect count, config update count, reconnect/config coverage booleans, final session generation, and final config generation.
+- Run-level scenario coverage line showing whether all streams exercised reconnect churn and config churn, plus any missing streams.
 - Optional JSON report for long-run inspection.
 - Optional CSV samples for spreadsheets/plotting.

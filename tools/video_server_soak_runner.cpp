@@ -24,10 +24,38 @@ int main(int argc, char** argv) {
     std::cout << "[soak] completed duration=" << summary.total_duration_seconds
               << "s success=" << (summary.success ? "true" : "false")
               << " failures=" << summary.failures.size() << '\n';
+    std::cout << "[soak] scenario_coverage reconnect="
+              << (summary.all_streams_saw_reconnect_churn ? "all-streams" : "partial")
+              << " config="
+              << (summary.all_streams_saw_config_churn ? "all-streams" : "partial");
+    if (!summary.streams_missing_reconnect_churn.empty()) {
+      std::cout << " missing_reconnect=";
+      for (size_t i = 0; i < summary.streams_missing_reconnect_churn.size(); ++i) {
+        if (i > 0) {
+          std::cout << ',';
+        }
+        std::cout << summary.streams_missing_reconnect_churn[i];
+      }
+    }
+    if (!summary.streams_missing_config_churn.empty()) {
+      std::cout << " missing_config=";
+      for (size_t i = 0; i < summary.streams_missing_config_churn.size(); ++i) {
+        if (i > 0) {
+          std::cout << ',';
+        }
+        std::cout << summary.streams_missing_config_churn[i];
+      }
+    }
+    std::cout << '\n';
     for (const auto& stream : summary.streams) {
       std::cout << "[soak] stream=" << stream.stream_id
                 << " samples=" << stream.samples
-                << " final_generation=" << stream.final_session_generation
+                << " reconnects=" << stream.reconnect_count
+                << " config_updates=" << stream.config_updates
+                << " reconnect_churn=" << (stream.reconnect_churn_observed ? "yes" : "no")
+                << " config_churn=" << (stream.config_churn_observed ? "yes" : "no")
+                << " final_session_generation=" << stream.final_session_generation
+                << " final_config_generation=" << stream.final_config_generation
                 << " disconnects=" << stream.final_disconnect_count
                 << " packets_sent=" << stream.final_packets_sent
                 << " attempted=" << stream.final_packets_attempted

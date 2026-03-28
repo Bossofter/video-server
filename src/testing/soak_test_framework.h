@@ -106,7 +106,10 @@ struct StreamRunSummary {
   uint64_t samples{0};
   uint64_t reconnect_count{0};
   uint64_t config_updates{0};
+  bool reconnect_churn_observed{false};
+  bool config_churn_observed{false};
   uint64_t final_session_generation{0};
+  uint64_t final_config_generation{0};
   uint64_t final_disconnect_count{0};
   uint64_t final_packets_sent{0};
   uint64_t final_packets_attempted{0};
@@ -118,8 +121,19 @@ struct StreamRunSummary {
 struct RunSummary {
   double total_duration_seconds{0.0};
   bool success{false};
+  bool all_streams_saw_reconnect_churn{false};
+  bool all_streams_saw_config_churn{false};
   std::vector<StreamRunSummary> streams;
+  std::vector<std::string> streams_missing_reconnect_churn;
+  std::vector<std::string> streams_missing_config_churn;
   std::vector<FailureRecord> failures;
+};
+
+struct StreamChurnSummary {
+  uint64_t reconnect_count{0};
+  uint64_t config_update_count{0};
+  bool reconnect_churn_observed{false};
+  bool config_churn_observed{false};
 };
 
 struct PendingConfigExpectation {
@@ -135,6 +149,8 @@ struct StreamEvaluationState {
   bool saw_expected_disconnect{false};
   std::optional<SteadyClock::time_point> reconnect_resume_at;
   std::optional<SteadyClock::time_point> reconnect_deadline;
+  uint64_t observed_reconnect_count{0};
+  uint64_t observed_config_update_count{0};
   uint64_t expected_previous_generation{0};
   std::optional<uint64_t> last_session_generation;
   std::optional<uint64_t> last_disconnect_count;
@@ -150,10 +166,12 @@ class MetricsCollector {
   void record(const MetricSample& sample);
   const std::vector<MetricSample>& samples() const { return samples_; }
   RunSummary build_summary(double total_duration_seconds,
-                           const std::vector<FailureRecord>& failures) const;
+                           const std::vector<FailureRecord>& failures,
+                           const std::unordered_map<std::string, StreamChurnSummary>& churn_by_stream = {}) const;
   bool write_json_report(const std::string& path,
                          double total_duration_seconds,
-                         const std::vector<FailureRecord>& failures) const;
+                         const std::vector<FailureRecord>& failures,
+                         const std::unordered_map<std::string, StreamChurnSummary>& churn_by_stream = {}) const;
   bool write_csv_report(const std::string& path) const;
 
  private:

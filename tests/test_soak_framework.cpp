@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 
 #include "../src/testing/soak_test_framework.h"
 
@@ -13,6 +15,7 @@ using video_server::soak::MetricsCollector;
 using video_server::soak::RunnerOptions;
 using video_server::soak::SessionHttpSnapshot;
 using video_server::soak::SteadyClock;
+using video_server::soak::StreamChurnSummary;
 using video_server::soak::StreamEvaluationState;
 
 video_server::StreamDebugSnapshot make_stream_snapshot(const std::string& stream_id,
@@ -73,17 +76,34 @@ TEST(SoakFrameworkTest, MetricsCollectorBuildsPerStreamSummary) {
   collector.record(MetricSample{1.0, "alpha", 1, 0, 10, 10, 0, 0, 10, 0, 0, 1, true, true, "sending-h264-rtp", "ok"});
   collector.record(MetricSample{2.0, "alpha", 2, 1, 20, 22, 1, 0, 20, 0, 2, 2, true, true, "sending-h264-rtp", "ok"});
   collector.record(MetricSample{2.5, "bravo", 1, 0, 5, 5, 0, 0, 5, 0, 0, 1, true, true, "sending-h264-rtp", "ok"});
+  const std::unordered_map<std::string, StreamChurnSummary> churn_by_stream{
+      {"alpha", StreamChurnSummary{2, 3, true, true}},
+      {"bravo", StreamChurnSummary{0, 1, false, true}},
+  };
 
   const std::vector<FailureRecord> failures{{2.1, "alpha", "packet_progress_stalled", "stalled"}};
-  const auto summary = collector.build_summary(3.0, failures);
+  const auto summary = collector.build_summary(3.0, failures, churn_by_stream);
   ASSERT_FALSE(summary.success);
   ASSERT_EQ(summary.failures.size(), 1u);
   ASSERT_EQ(summary.streams.size(), 2u);
+  EXPECT_FALSE(summary.all_streams_saw_reconnect_churn);
+  EXPECT_TRUE(summary.all_streams_saw_config_churn);
+  ASSERT_EQ(summary.streams_missing_reconnect_churn.size(), 1u);
+  EXPECT_EQ(summary.streams_missing_reconnect_churn.front(), "bravo");
   EXPECT_EQ(summary.streams[0].stream_id, "alpha");
+  EXPECT_EQ(summary.streams[0].reconnect_count, 2u);
+  EXPECT_EQ(summary.streams[0].config_updates, 3u);
+  EXPECT_TRUE(summary.streams[0].reconnect_churn_observed);
+  EXPECT_TRUE(summary.streams[0].config_churn_observed);
   EXPECT_EQ(summary.streams[0].final_session_generation, 2u);
+  EXPECT_EQ(summary.streams[0].final_config_generation, 2u);
   EXPECT_EQ(summary.streams[0].final_disconnect_count, 1u);
   EXPECT_EQ(summary.streams[0].final_packets_sent, 20u);
   EXPECT_EQ(summary.streams[1].stream_id, "bravo");
+  EXPECT_EQ(summary.streams[1].reconnect_count, 0u);
+  EXPECT_EQ(summary.streams[1].config_updates, 1u);
+  EXPECT_FALSE(summary.streams[1].reconnect_churn_observed);
+  EXPECT_TRUE(summary.streams[1].config_churn_observed);
 }
 
 TEST(SoakFrameworkTest, FailureDetectorFlagsPacketStallAndUnexpectedReset) {
@@ -127,4 +147,36 @@ TEST(SoakFrameworkTest, FailureDetectorTracksPendingConfigTimeout) {
                                                          SteadyClock::now() + std::chrono::seconds(2), 2.0, state);
   ASSERT_FALSE(failures.empty());
   EXPECT_EQ(failures.front().code, "config_apply_timeout");
+}
+
+TEST(SoakFrameworkTest, JsonReportIncludesChurnCountsAndCoverageFlags) {
+  MetricsCollector collector;
+  collector.record(MetricSample{1.0, "alpha", 2, 1, 20, 22, 1, 0, 20, 0, 2, 3, true, true, "sending-h264-rtp", "ok"});
+  collector.record(MetricSample{1.0, "bravo", 1, 0, 5, 5, 0, 0, 5, 0, 0, 1, true, true, "sending-h264-rtp", "ok"});
+  const std::unordered_map<std::string, StreamChurnSummary> churn_by_stream{
+      {"alpha", StreamChurnSummary{1, 2, true, true}},
+      {"bravo", StreamChurnSummary{0, 0, false, false}},
+  };
+
+  const auto report_path = std::filesystem::temp_directory_path() / "video_server_soak_report_test.json";
+  ASSERT_TRUE(collector.write_json_report(report_path.string(), 5.0, {}, churn_by_stream));
+
+  std::ifstream input(report_path);
+  ASSERT_TRUE(input.is_open());
+  std::stringstream buffer;
+  buffer << input.rdbuf();
+  const std::string json = buffer.str();
+  EXPECT_NE(json.find("\"scenario_coverage\""), std::string::npos);
+  EXPECT_NE(json.find("\"all_streams_saw_reconnect_churn\":false"), std::string::npos);
+  EXPECT_NE(json.find("\"all_streams_saw_config_churn\":false"), std::string::npos);
+  EXPECT_NE(json.find("\"streams_missing_reconnect_churn\":[\"bravo\"]"), std::string::npos);
+  EXPECT_NE(json.find("\"streams_missing_config_churn\":[\"bravo\"]"), std::string::npos);
+  EXPECT_NE(json.find("\"reconnect_count\":1"), std::string::npos);
+  EXPECT_NE(json.find("\"config_updates\":2"), std::string::npos);
+  EXPECT_NE(json.find("\"reconnect_churn_observed\":true"), std::string::npos);
+  EXPECT_NE(json.find("\"config_churn_observed\":true"), std::string::npos);
+  EXPECT_NE(json.find("\"final_session_generation\":2"), std::string::npos);
+  EXPECT_NE(json.find("\"final_config_generation\":3"), std::string::npos);
+
+  std::filesystem::remove(report_path);
 }

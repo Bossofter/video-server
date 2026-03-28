@@ -342,7 +342,8 @@ SessionHttpSnapshot parse_session_http_snapshot(const std::string& json) {
 void MetricsCollector::record(const MetricSample& sample) { samples_.push_back(sample); }
 
 RunSummary MetricsCollector::build_summary(double total_duration_seconds,
-                                          const std::vector<FailureRecord>& failures) const {
+                                          const std::vector<FailureRecord>& failures,
+                                          const std::unordered_map<std::string, StreamChurnSummary>& churn_by_stream) const {
   RunSummary summary;
   summary.total_duration_seconds = total_duration_seconds;
   summary.success = failures.empty();
@@ -353,7 +354,15 @@ RunSummary MetricsCollector::build_summary(double total_duration_seconds,
     auto& stream = by_stream[sample.stream_id];
     stream.stream_id = sample.stream_id;
     stream.samples += 1;
+    const auto churn_it = churn_by_stream.find(sample.stream_id);
+    if (churn_it != churn_by_stream.end()) {
+      stream.reconnect_count = churn_it->second.reconnect_count;
+      stream.config_updates = churn_it->second.config_update_count;
+      stream.reconnect_churn_observed = churn_it->second.reconnect_churn_observed;
+      stream.config_churn_observed = churn_it->second.config_churn_observed;
+    }
     stream.final_session_generation = sample.session_generation;
+    stream.final_config_generation = sample.config_generation;
     stream.final_disconnect_count = sample.disconnect_count;
     stream.final_packets_sent = sample.packets_sent;
     stream.final_packets_attempted = sample.packets_attempted;
@@ -373,21 +382,52 @@ RunSummary MetricsCollector::build_summary(double total_duration_seconds,
   }
   std::sort(summary.streams.begin(), summary.streams.end(),
             [](const StreamRunSummary& lhs, const StreamRunSummary& rhs) { return lhs.stream_id < rhs.stream_id; });
+  summary.all_streams_saw_reconnect_churn = true;
+  summary.all_streams_saw_config_churn = true;
+  for (const auto& stream : summary.streams) {
+    if (!stream.reconnect_churn_observed) {
+      summary.all_streams_saw_reconnect_churn = false;
+      summary.streams_missing_reconnect_churn.push_back(stream.stream_id);
+    }
+    if (!stream.config_churn_observed) {
+      summary.all_streams_saw_config_churn = false;
+      summary.streams_missing_config_churn.push_back(stream.stream_id);
+    }
+  }
   return summary;
 }
 
 bool MetricsCollector::write_json_report(const std::string& path,
                                          double total_duration_seconds,
-                                         const std::vector<FailureRecord>& failures) const {
+                                         const std::vector<FailureRecord>& failures,
+                                         const std::unordered_map<std::string, StreamChurnSummary>& churn_by_stream) const {
   std::ofstream out;
   if (!open_output_file(path, out)) {
     return false;
   }
 
-  const auto summary = build_summary(total_duration_seconds, failures);
+  const auto summary = build_summary(total_duration_seconds, failures, churn_by_stream);
   out << "{";
   out << "\"success\":" << (summary.success ? "true" : "false") << ',';
   out << "\"total_duration_seconds\":" << std::fixed << std::setprecision(3) << total_duration_seconds << ',';
+  out << "\"scenario_coverage\":{"
+      << "\"all_streams_saw_reconnect_churn\":" << (summary.all_streams_saw_reconnect_churn ? "true" : "false") << ','
+      << "\"all_streams_saw_config_churn\":" << (summary.all_streams_saw_config_churn ? "true" : "false") << ','
+      << "\"streams_missing_reconnect_churn\":[";
+  for (size_t i = 0; i < summary.streams_missing_reconnect_churn.size(); ++i) {
+    if (i > 0) {
+      out << ',';
+    }
+    out << '"' << json_escape(summary.streams_missing_reconnect_churn[i]) << '"';
+  }
+  out << "],\"streams_missing_config_churn\":[";
+  for (size_t i = 0; i < summary.streams_missing_config_churn.size(); ++i) {
+    if (i > 0) {
+      out << ',';
+    }
+    out << '"' << json_escape(summary.streams_missing_config_churn[i]) << '"';
+  }
+  out << "]},";
   out << "\"streams\":[";
   for (size_t i = 0; i < summary.streams.size(); ++i) {
     if (i > 0) {
@@ -396,7 +436,12 @@ bool MetricsCollector::write_json_report(const std::string& path,
     const auto& stream = summary.streams[i];
     out << "{\"stream_id\":\"" << json_escape(stream.stream_id) << "\","
         << "\"samples\":" << stream.samples << ','
+        << "\"reconnect_count\":" << stream.reconnect_count << ','
+        << "\"config_updates\":" << stream.config_updates << ','
+        << "\"reconnect_churn_observed\":" << (stream.reconnect_churn_observed ? "true" : "false") << ','
+        << "\"config_churn_observed\":" << (stream.config_churn_observed ? "true" : "false") << ','
         << "\"final_session_generation\":" << stream.final_session_generation << ','
+        << "\"final_config_generation\":" << stream.final_config_generation << ','
         << "\"final_disconnect_count\":" << stream.final_disconnect_count << ','
         << "\"final_packets_sent\":" << stream.final_packets_sent << ','
         << "\"final_packets_attempted\":" << stream.final_packets_attempted << ','
@@ -514,6 +559,7 @@ std::vector<FailureRecord> FailureDetector::evaluate_stream(const RunnerOptions&
     state.first_sending_active_at.reset();
     state.last_packet_progress_at = now;
     state.last_packets_sent = current_packets_sent;
+    state.observed_reconnect_count += 1;
     state.reconnect_events.push_back(now);
     while (!state.reconnect_events.empty() && now - state.reconnect_events.front() > options.rapid_reconnect_window) {
       state.reconnect_events.pop_front();
@@ -562,6 +608,7 @@ std::vector<FailureRecord> FailureDetector::evaluate_stream(const RunnerOptions&
     const auto& pending = *state.pending_config;
     if (debug_snapshot.config_generation >= pending.expected_generation &&
         stream_config_matches(debug_snapshot, pending.expected_config)) {
+      state.observed_config_update_count += 1;
       state.pending_config.reset();
     } else if (now > pending.deadline) {
       add_failure("config_apply_timeout", "config churn did not apply within the expected timeout");
@@ -1119,12 +1166,30 @@ RunSummary SoakRunner::run() {
   const double total_duration_seconds =
       std::chrono::duration_cast<std::chrono::duration<double>>(SteadyClock::now() - run_started_at).count();
   if (options_.write_json_report) {
-    metrics_.write_json_report(options_.json_report_path, total_duration_seconds, failures_);
+    std::unordered_map<std::string, StreamChurnSummary> churn_by_stream;
+    for (const auto& [stream_id, state] : evaluation_states_) {
+      churn_by_stream[stream_id] = StreamChurnSummary{
+          state.observed_reconnect_count,
+          state.observed_config_update_count,
+          state.observed_reconnect_count > 0,
+          state.observed_config_update_count > 0,
+      };
+    }
+    metrics_.write_json_report(options_.json_report_path, total_duration_seconds, failures_, churn_by_stream);
   }
   if (options_.write_csv_report) {
     metrics_.write_csv_report(options_.csv_report_path);
   }
-  return metrics_.build_summary(total_duration_seconds, failures_);
+  std::unordered_map<std::string, StreamChurnSummary> churn_by_stream;
+  for (const auto& [stream_id, state] : evaluation_states_) {
+    churn_by_stream[stream_id] = StreamChurnSummary{
+        state.observed_reconnect_count,
+        state.observed_config_update_count,
+        state.observed_reconnect_count > 0,
+        state.observed_config_update_count > 0,
+    };
+  }
+  return metrics_.build_summary(total_duration_seconds, failures_, churn_by_stream);
 }
 
 std::optional<RunnerOptions> parse_runner_options(int argc, char** argv, std::string* error_message) {
