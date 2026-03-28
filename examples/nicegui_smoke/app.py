@@ -15,7 +15,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urljoin, urlparse
 
+from fastapi import Request
 from fastapi.responses import Response
 from nicegui import app, ui
 import nicegui.client as nicegui_client
@@ -115,6 +117,44 @@ def patch_nicegui_build_response() -> None:
 
 
 patch_nicegui_build_response()
+
+
+def proxy_target_url(base: str, path: str) -> str:
+    parsed = urlparse(base)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        raise ValueError(f'invalid proxy base URL: {base!r}')
+    if not path.startswith('/api/video/'):
+        raise ValueError(f'invalid proxy path: {path!r}')
+    return urljoin(base.rstrip('/') + '/', path.lstrip('/'))
+
+
+@app.api_route('/_video_proxy/{full_path:path}', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
+async def video_proxy(request: Request, full_path: str) -> Response:
+    base = request.query_params.get('base', '').strip()
+    path = '/' + full_path.lstrip('/')
+    if request.method == 'OPTIONS':
+        return Response(status_code=204)
+    try:
+        target = proxy_target_url(base, path)
+    except ValueError as exc:
+        return Response(str(exc), status_code=400, media_type='text/plain')
+
+    body = await request.body()
+    outgoing = urllib.request.Request(target, data=body if request.method in {'POST', 'PUT'} else None, method=request.method)
+    for header_name in ('Authorization', 'Content-Type', 'X-Video-Server-Key'):
+        header_value = request.headers.get(header_name)
+        if header_value:
+            outgoing.add_header(header_name, header_value)
+    try:
+        with urllib.request.urlopen(outgoing, timeout=5.0) as upstream:
+            response_body = upstream.read()
+            content_type = upstream.headers.get('Content-Type', 'application/octet-stream')
+            return Response(content=response_body, status_code=upstream.status, media_type=content_type)
+    except urllib.error.HTTPError as exc:
+        return Response(content=exc.read(), status_code=exc.code, media_type=exc.headers.get('Content-Type', 'text/plain'))
+    except OSError as exc:
+        return Response(str(exc), status_code=502, media_type='text/plain')
+
 
 def requested_streams() -> list[dict[str, Any]]:
     explicit_single_stream = has_cli_flag('--stream-id', '--width', '--height', '--fps')
@@ -358,6 +398,10 @@ window.videoSmokeHarness = (() => {{
     if (!width && !height) return fallback;
     return `${{formatNumber(width, '?')}}x${{formatNumber(height, '?')}}`;
   }};
+  const apiProxyUrl = (serverBase, path) => {{
+    const query = new URLSearchParams({{base: serverBase}});
+    return `${{window.location.origin}}/_video_proxy/${{path.replace(/^\\/+/, '')}}?${{query.toString()}}`;
+  }};
   const normalizeServerBase = (serverBase) => {{
     const raw = String(serverBase || '').trim();
     if (!raw) return raw;
@@ -376,7 +420,7 @@ window.videoSmokeHarness = (() => {{
       return raw.replace(/\\/$/, '');
     }}
   }};
-  const configUrl = (serverBase, streamId) => `${{serverBase}}/api/video/streams/${{encodeURIComponent(streamId)}}/config`;
+  const configUrl = (serverBase, streamId) => apiProxyUrl(serverBase, `/api/video/streams/${{encodeURIComponent(streamId)}}/config`);
   const authHeaders = (contentType=null) => {{
     const headers = {{}};
     if (contentType) headers['Content-Type'] = contentType;
@@ -893,7 +937,7 @@ window.videoSmokeHarness = (() => {{
   }}
 
   async function postCandidate(serverBase, streamId, candidate) {{
-    const response = await fetch(`${{serverBase}}/api/video/signaling/${{streamId}}/candidate`, {{
+    const response = await fetch(apiProxyUrl(serverBase, `/api/video/signaling/${{streamId}}/candidate`), {{
       method: 'POST',
       headers: authHeaders('text/plain'),
       body: candidate,
@@ -969,7 +1013,7 @@ window.videoSmokeHarness = (() => {{
     const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
     if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/session`, {{
+      const sessionResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/session`), {{
         headers: authHeaders(),
       }});
       if (!sessionResponse.ok) {{
@@ -1010,7 +1054,7 @@ window.videoSmokeHarness = (() => {{
     const cfg = state.config;
     if (!cfg?.serverBase) return;
     try {{
-      const response = await fetch(`${{cfg.serverBase}}/api/video/debug/stats`, {{
+      const response = await fetch(apiProxyUrl(cfg.serverBase, '/api/video/debug/stats'), {{
         headers: authHeaders(),
       }});
       if (!response.ok) {{
@@ -1146,7 +1190,7 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
 
       appendLog('signaling', 'posting SDP offer to server');
-      const offerResponse = await fetch(`${{cfg.serverBase}}/api/video/signaling/${{streamId}}/offer`, {{
+      const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/offer`), {{
         method: 'POST',
         headers: authHeaders('text/plain'),
         body: pc.localDescription.sdp,
