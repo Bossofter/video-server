@@ -116,7 +116,7 @@ namespace video_server
 
         /**
          * @brief Returns the latest transformed frame snapshot for a stream.
-         * 
+         *
          * @param stream_id Identifier of the stream to query.
          * @return Latest transformed frame snapshot, or `nullptr` when unavailable.
          */
@@ -124,7 +124,7 @@ namespace video_server
 
         /**
          * @brief Returns the latest encoded access-unit snapshot for a stream.
-         * 
+         *
          * @param stream_id Identifier of the stream to query.
          * @return Latest encoded-unit snapshot, or `nullptr` when unavailable.
          */
@@ -132,7 +132,7 @@ namespace video_server
 
         /**
          * @brief Returns a debug snapshot for one stream when present.
-         * 
+         *
          * @param stream_id Identifier of the stream to query.
          * @return Debug snapshot when the stream exists, otherwise `std::nullopt`.
          */
@@ -140,7 +140,7 @@ namespace video_server
 
         /**
          * @brief Returns debug snapshots for all streams.
-         * 
+         *
          * @return Debug snapshots for all registered streams.
          */
         std::vector<StreamDebugSnapshot> list_stream_debug_snapshots() const;
@@ -160,15 +160,15 @@ namespace video_server
     private:
         /**
          * @brief Validates supported rotation values.
-         * 
+         *
          * @param degrees Rotation in degrees to validate.
          * @return True when the rotation is supported, false otherwise.
          */
         static bool is_valid_rotation(int degrees);
-        
+
         /**
          * @brief Validates requested output dimensions.
-         * 
+         *
          * @param width Requested output width.
          * @param height Requested output height.
          * @return True when the output dimensions are valid, false otherwise.
@@ -177,7 +177,7 @@ namespace video_server
 
         /**
          * @brief Validates requested output FPS.
-         * 
+         *
          * @param fps Requested output FPS.
          * @return True when the FPS value is valid, false otherwise.
          */
@@ -185,7 +185,7 @@ namespace video_server
 
         /**
          * @brief Checks whether the input pixel format is supported by the core.
-         * 
+         *
          * @param pixel_format Input pixel format to validate.
          * @return True when the pixel format is supported, false otherwise.
          */
@@ -193,7 +193,7 @@ namespace video_server
 
         /**
          * @brief Returns bytes per pixel for packed formats handled directly by the core.
-         * 
+         *
          * @param pixel_format Packed pixel format to inspect.
          * @return Bytes per pixel for the supplied format.
          */
