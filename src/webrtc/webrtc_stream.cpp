@@ -18,1037 +18,1196 @@
 #include "logging_utils.h"
 #include "video_server/video_types.h"
 
-namespace video_server {
-namespace {
-
-std::string codec_to_string(VideoCodec codec) {
-  switch (codec) {
-    case VideoCodec::H264:
-      return "H264";
-  }
-  return "Unknown";
-}
-
-bool is_start_code_at(const std::vector<uint8_t>& bytes, size_t offset, size_t* start_code_size) {
-  if (offset + 3 <= bytes.size() && bytes[offset] == 0x00 && bytes[offset + 1] == 0x00 && bytes[offset + 2] == 0x01) {
-    *start_code_size = 3;
-    return true;
-  }
-  if (offset + 4 <= bytes.size() && bytes[offset] == 0x00 && bytes[offset + 1] == 0x00 && bytes[offset + 2] == 0x00 &&
-      bytes[offset + 3] == 0x01) {
-    *start_code_size = 4;
-    return true;
-  }
-  return false;
-}
-
-constexpr uint8_t kH264PayloadType = 102;
-constexpr uint64_t kH264ClockRate = 90000;
-constexpr size_t kMaxRtpPayloadSize = 1200;
-
-uint32_t timestamp_ns_to_h264_rtp_timestamp(uint64_t timestamp_ns) {
-  constexpr uint64_t kClockRate = kH264ClockRate;
-  constexpr uint64_t kNsPerSecond = 1000000000ull;
-  return static_cast<uint32_t>((timestamp_ns * kClockRate) / kNsPerSecond);
-}
-
-uint32_t make_random_ssrc() {
-  static std::mt19937 generator(std::random_device{}());
-  static std::uniform_int_distribution<uint32_t> distribution(1u, 0xffffffffu);
-  return distribution(generator);
-}
-
-std::vector<std::vector<uint8_t>> split_annex_b_nalus(const std::vector<uint8_t>& bytes) {
-  std::vector<std::vector<uint8_t>> nalus;
-  size_t nal_start = 0;
-  while (nal_start < bytes.size()) {
-    size_t start_code_size = 0;
-    while (nal_start < bytes.size() && !is_start_code_at(bytes, nal_start, &start_code_size)) {
-      ++nal_start;
-    }
-    if (nal_start >= bytes.size()) {
-      break;
-    }
-    const size_t payload_offset = nal_start + start_code_size;
-    if (payload_offset >= bytes.size()) {
-      break;
-    }
-    size_t nal_end = payload_offset;
-    size_t next_start_code_size = 0;
-    while (nal_end < bytes.size() && !is_start_code_at(bytes, nal_end, &next_start_code_size)) {
-      ++nal_end;
-    }
-    if (nal_end > payload_offset) {
-      nalus.emplace_back(bytes.begin() + static_cast<std::ptrdiff_t>(payload_offset),
-                         bytes.begin() + static_cast<std::ptrdiff_t>(nal_end));
-    }
-    nal_start = nal_end;
-  }
-
-  if (nalus.empty() && !bytes.empty()) {
-    nalus.push_back(bytes);
-  }
-  return nalus;
-}
-
-size_t count_sdp_media_sections(const std::string& sdp) {
-  size_t count = 0;
-  size_t pos = 0;
-  while ((pos = sdp.find("\nm=", pos)) != std::string::npos) {
-    ++count;
-    pos += 3;
-  }
-  if (sdp.rfind("m=", 0) == 0) {
-    ++count;
-  }
-  return count;
-}
-
-std::vector<std::string> extract_sdp_mids(const std::string& sdp) {
-  std::vector<std::string> mids;
-  size_t pos = 0;
-  while (pos < sdp.size()) {
-    const size_t line_end = sdp.find('\n', pos);
-    const size_t line_size = (line_end == std::string::npos ? sdp.size() : line_end) - pos;
-    std::string_view line(sdp.data() + pos, line_size);
-    if (!line.empty() && line.back() == '\r') {
-      line.remove_suffix(1);
-    }
-    if (line.rfind("a=mid:", 0) == 0) {
-      mids.emplace_back(line.substr(6));
-    }
-    if (line_end == std::string::npos) {
-      break;
-    }
-    pos = line_end + 1;
-  }
-  return mids;
-}
-
-size_t count_rejected_sdp_media_sections(const std::string& sdp) {
-  size_t count = 0;
-  size_t pos = 0;
-  while ((pos = sdp.find("\nm=", pos)) != std::string::npos) {
-    const size_t line_start = pos + 1;
-    const size_t line_end = sdp.find('\n', line_start);
-    const std::string line = sdp.substr(line_start, line_end == std::string::npos ? std::string::npos : line_end - line_start);
-    if (line.find("m=") == 0 && line.find(" 0 ") != std::string::npos) {
-      ++count;
-    }
-    pos = line_start + 2;
-  }
-  if (sdp.rfind("m=", 0) == 0) {
-    const size_t line_end = sdp.find('\n');
-    const std::string line = sdp.substr(0, line_end == std::string::npos ? std::string::npos : line_end);
-    if (line.find(" 0 ") != std::string::npos) {
-      ++count;
-    }
-  }
-  return count;
-}
-
-std::string join_strings(const std::vector<std::string>& values) {
-  std::ostringstream out;
-  for (size_t i = 0; i < values.size(); ++i) {
-    if (i != 0) {
-      out << ',';
-    }
-    out << values[i];
-  }
-  return out.str();
-}
-
-std::string sanitize_answer_setup_role(std::string sdp) {
-  const std::string from = "a=setup:actpass";
-  const std::string to = "a=setup:active";
-  size_t pos = 0;
-  while ((pos = sdp.find(from, pos)) != std::string::npos) {
-    sdp.replace(pos, from.size(), to);
-    pos += to.size();
-  }
-  return sdp;
-}
-
-std::vector<uint8_t> make_rtp_packet(const uint8_t* payload, size_t payload_size, uint16_t sequence_number,
-                                     uint32_t timestamp, uint32_t ssrc, uint8_t payload_type, bool marker) {
-  std::vector<uint8_t> packet(12 + payload_size);
-  packet[0] = 0x80;
-  packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | payload_type);
-  packet[2] = static_cast<uint8_t>(sequence_number >> 8);
-  packet[3] = static_cast<uint8_t>(sequence_number & 0xff);
-  packet[4] = static_cast<uint8_t>(timestamp >> 24);
-  packet[5] = static_cast<uint8_t>((timestamp >> 16) & 0xff);
-  packet[6] = static_cast<uint8_t>((timestamp >> 8) & 0xff);
-  packet[7] = static_cast<uint8_t>(timestamp & 0xff);
-  packet[8] = static_cast<uint8_t>(ssrc >> 24);
-  packet[9] = static_cast<uint8_t>((ssrc >> 16) & 0xff);
-  packet[10] = static_cast<uint8_t>((ssrc >> 8) & 0xff);
-  packet[11] = static_cast<uint8_t>(ssrc & 0xff);
-  std::copy(payload, payload + payload_size, packet.begin() + 12);
-  return packet;
-}
-
-class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge {
- public:
-  void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    latest_snapshot_available_ = latest_frame != nullptr && latest_frame->valid;
-    if (!latest_snapshot_available_) {
-      latest_snapshot_frame_id_ = 0;
-      latest_snapshot_timestamp_ns_ = 0;
-      latest_snapshot_width_ = 0;
-      latest_snapshot_height_ = 0;
-      return;
-    }
-
-    latest_snapshot_frame_id_ = latest_frame->frame_id;
-    latest_snapshot_timestamp_ns_ = latest_frame->timestamp_ns;
-    latest_snapshot_width_ = latest_frame->width;
-    latest_snapshot_height_ = latest_frame->height;
-  }
-
-  void on_latest_encoded_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    latest_encoded_unit_ = std::move(latest_encoded_unit);
-    latest_encoded_access_unit_available_ = latest_encoded_unit_ != nullptr && latest_encoded_unit_->valid;
-    if (!latest_encoded_access_unit_available_) {
-      latest_encoded_codec_.clear();
-      latest_encoded_timestamp_ns_ = 0;
-      latest_encoded_sequence_id_ = 0;
-      latest_encoded_size_bytes_ = 0;
-      latest_encoded_keyframe_ = false;
-      latest_encoded_codec_config_ = false;
-      return;
-    }
-
-    latest_encoded_codec_ = codec_to_string(latest_encoded_unit_->codec);
-    latest_encoded_timestamp_ns_ = latest_encoded_unit_->timestamp_ns;
-    latest_encoded_sequence_id_ = latest_encoded_unit_->sequence_id;
-    latest_encoded_size_bytes_ = latest_encoded_unit_->bytes.size();
-    latest_encoded_keyframe_ = latest_encoded_unit_->keyframe;
-    latest_encoded_codec_config_ = latest_encoded_unit_->codec_config;
-  }
-
-  std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit() const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return latest_encoded_unit_;
-  }
-
-  WebRtcMediaSourceSnapshot snapshot() const override {
-    WebRtcMediaSourceSnapshot snapshot;
-    snapshot.bridge_state = "awaiting-video-track-bridge";
-    snapshot.preferred_media_path = "latest-frame-snapshot";
-
+namespace video_server
+{
+    namespace
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      snapshot.latest_snapshot_available = latest_snapshot_available_;
-      snapshot.latest_snapshot_frame_id = latest_snapshot_frame_id_;
-      snapshot.latest_snapshot_timestamp_ns = latest_snapshot_timestamp_ns_;
-      snapshot.latest_snapshot_width = latest_snapshot_width_;
-      snapshot.latest_snapshot_height = latest_snapshot_height_;
-      snapshot.latest_encoded_access_unit_available = latest_encoded_access_unit_available_;
-      snapshot.latest_encoded_codec = latest_encoded_codec_;
-      snapshot.latest_encoded_timestamp_ns = latest_encoded_timestamp_ns_;
-      snapshot.latest_encoded_sequence_id = latest_encoded_sequence_id_;
-      snapshot.latest_encoded_size_bytes = latest_encoded_size_bytes_;
-      snapshot.latest_encoded_keyframe = latest_encoded_keyframe_;
-      snapshot.latest_encoded_codec_config = latest_encoded_codec_config_;
-    }
 
-    if (snapshot.latest_encoded_access_unit_available) {
-      snapshot.preferred_media_path = "encoded-access-unit";
-      snapshot.bridge_state = "awaiting-h264-video-track-bridge";
-    }
-
-    return snapshot;
-  }
-
- private:
-  mutable std::mutex mutex_;
-  bool latest_snapshot_available_{false};
-  uint64_t latest_snapshot_frame_id_{0};
-  uint64_t latest_snapshot_timestamp_ns_{0};
-  uint32_t latest_snapshot_width_{0};
-  uint32_t latest_snapshot_height_{0};
-  bool latest_encoded_access_unit_available_{false};
-  std::string latest_encoded_codec_;
-  uint64_t latest_encoded_timestamp_ns_{0};
-  uint64_t latest_encoded_sequence_id_{0};
-  size_t latest_encoded_size_bytes_{0};
-  std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit_;
-  bool latest_encoded_keyframe_{false};
-  bool latest_encoded_codec_config_{false};
-};
-
-class H264EncodedVideoSender : public IEncodedVideoSender {
- public:
-  H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink, uint32_t ssrc)
-      : video_track_sink_(std::move(video_track_sink)), ssrc_(ssrc) {}
-
-  void set_negotiated_h264_parameters(int payload_type, std::string fmtp) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    negotiated_h264_payload_type_ = payload_type;
-    negotiated_h264_fmtp_ = std::move(fmtp);
-  }
-
-  void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override {
-    if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid) {
-      return;
-    }
-
-    if (latest_encoded_unit->codec != VideoCodec::H264 || latest_encoded_unit->bytes.empty()) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      ++failed_units_;
-      sender_state_ = "rejected-non-h264-access-unit";
-      last_packetization_status_ = "rejected-invalid-input";
-      return;
-    }
-
-    const H264AccessUnitDescriptor descriptor = inspect_h264_access_unit(*latest_encoded_unit);
-    const bool contains_codec_config = latest_encoded_unit->codec_config || (descriptor.has_sps && descriptor.has_pps);
-    const bool is_keyframe = latest_encoded_unit->keyframe || descriptor.has_idr;
-    const bool contains_idr = descriptor.has_idr;
-    bool should_send = false;
-    bool startup_sequence_required = false;
-    bool first_decodable_frame_sent = false;
-    bool cached_codec_config_available = false;
-    bool has_track = false;
-    bool track_open = false;
-    bool transport_ready = false;
-    bool cached_idr_available = false;
-    std::string startup_gate_reason;
-    std::shared_ptr<IEncodedVideoTrackSink> track_sink;
-    std::shared_ptr<const LatestEncodedUnit> cached_codec_config;
-    std::shared_ptr<const LatestEncodedUnit> cached_startup_idr;
-    int payload_type = kH264PayloadType;
-
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!session_active_) {
-        h264_delivery_active_ = false;
-        sender_state_ = "session-inactive";
-        last_packetization_status_ = "session-inactive";
-        last_lifecycle_event_ = session_teardown_reason_;
-        return;
-      }
-      has_pending_encoded_unit_ = true;
-      codec_ = codec_to_string(latest_encoded_unit->codec);
-      video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
-      video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
-      has_track = video_track_exists_;
-      track_open = video_track_open_;
-      transport_ready = has_track && track_open;
-      track_sink = video_track_sink_;
-
-      if (last_delivered_sequence_id_ == latest_encoded_unit->sequence_id) {
-        ++duplicate_units_skipped_;
-        last_packetization_status_ = "duplicate-sequence-skipped";
-        return;
-      }
-
-      if (contains_codec_config) {
-        cached_codec_config_ = latest_encoded_unit;
-        cached_codec_config_available_ = true;
-      }
-      if (contains_idr) {
-        cached_startup_idr_ = latest_encoded_unit;
-        cached_idr_available_ = true;
-      }
-
-      codec_config_seen_ = codec_config_seen_ || contains_codec_config;
-      keyframe_seen_ = keyframe_seen_ || is_keyframe;
-      ready_for_video_track_ = has_track && codec_config_seen_ && cached_idr_available_;
-      payload_type = negotiated_h264_payload_type_ > 0 ? negotiated_h264_payload_type_ : kH264PayloadType;
-      first_decodable_frame_sent = first_decodable_frame_sent_;
-      cached_codec_config_available = cached_codec_config_available_;
-      cached_idr_available = cached_idr_available_;
-
-      last_delivered_sequence_id_ = latest_encoded_unit->sequence_id;
-      last_delivered_timestamp_ns_ = latest_encoded_unit->timestamp_ns;
-      last_delivered_size_bytes_ = latest_encoded_unit->bytes.size();
-      last_delivered_keyframe_ = latest_encoded_unit->keyframe;
-      last_delivered_codec_config_ = latest_encoded_unit->codec_config;
-      last_contains_sps_ = descriptor.has_sps;
-      last_contains_pps_ = descriptor.has_pps;
-      last_contains_idr_ = descriptor.has_idr;
-      last_contains_non_idr_ = descriptor.has_non_idr_slice;
-
-      ++delivered_units_;
-      startup_sequence_required = transport_ready && !startup_sequence_sent_ &&
-                                  codec_config_seen_ && cached_idr_available_;
-      should_send = transport_ready &&
-                    (startup_sequence_required || (ready_for_video_track_ && contains_idr) || first_decodable_frame_sent);
-      cached_codec_config = cached_codec_config_;
-      cached_startup_idr = cached_startup_idr_;
-      if (!has_track) {
-        ++skipped_no_track_;
-        sender_state_ = "video-track-missing";
-        last_packetization_status_ = "no-video-track";
-        startup_gate_reason = "no-video-track";
-      } else if (!codec_config_seen_) {
-        ++skipped_codec_config_wait_;
-        sender_state_ = "waiting-for-h264-codec-config";
-        last_packetization_status_ = "codec-config-required";
-        startup_gate_reason = "codec-config-required";
-      } else if (!cached_idr_available_) {
-        ++skipped_keyframe_wait_;
-        sender_state_ = "waiting-for-h264-keyframe";
-        last_packetization_status_ = "keyframe-required";
-        startup_gate_reason = "keyframe-required";
-      } else if (!track_open) {
-        ++skipped_track_not_open_;
-        sender_state_ = "waiting-for-video-track-open";
-        last_packetization_status_ = "track-not-open-yet";
-        startup_gate_reason = "track-not-open";
-      } else if (!first_decodable_frame_sent && !startup_sequence_required && !contains_idr) {
-        ++skipped_startup_idr_wait_;
-        sender_state_ = "waiting-for-decoded-startup-idr";
-        last_packetization_status_ = "startup-idr-required";
-        startup_gate_reason = "startup-idr-required";
-      } else {
-        sender_state_ = "sending-h264-rtp";
-        last_packetization_status_ = "packetization-attempt-pending";
-        startup_gate_reason = startup_sequence_required ? "startup-sequence-required" : "packetization-ready";
-      }
-
-      spdlog::trace(
-          "[h264-sender] access_unit seq={} ts_ns={} state={} gate={} track_exists={} track_open={} "
-          "transport_ready={} codec_config_seen={} cached_codec_config={} cached_idr={} "
-          "first_decodable_sent={} startup_sent={} should_send={}",
-          latest_encoded_unit->sequence_id, latest_encoded_unit->timestamp_ns, sender_state_, startup_gate_reason,
-          has_track, track_open, transport_ready, codec_config_seen_, cached_codec_config_available_,
-          cached_idr_available_, first_decodable_frame_sent_, startup_sequence_sent_, should_send);
-    }
-
-    if (!should_send || !track_sink) {
-      spdlog::trace("[h264-sender] skip-send seq={} reason={} has_track_sink={}", latest_encoded_unit->sequence_id,
-                    last_packetization_status_, static_cast<bool>(track_sink));
-      return;
-    }
-
-    if (!track_sink->exists() || !track_sink->is_open()) {
-      mark_track_not_sendable("track-closed-before-send", "track-closed-before-send");
-      spdlog::info("[h264-sender] track not sendable before packetization seq={} reason=track-closed-before-send "
-                   "has_track_sink={}",
-                   latest_encoded_unit->sequence_id, static_cast<bool>(track_sink));
-      return;
-    }
-
-    spdlog::trace("[h264-sender] packetization-attempt seq={} payload_type={} startup_required={} "
-                  "cached_codec_config={} cached_idr={}",
-                  latest_encoded_unit->sequence_id, payload_type, startup_sequence_required,
-                  static_cast<bool>(cached_codec_config), static_cast<bool>(cached_startup_idr));
-
-    const uint32_t rtp_timestamp = timestamp_ns_to_h264_rtp_timestamp(latest_encoded_unit->timestamp_ns);
-    std::vector<std::vector<uint8_t>> nalus_to_send;
-    bool sent_startup_sequence = false;
-    size_t startup_nalu_count = 0;
-    if (startup_sequence_required && cached_startup_idr != nullptr) {
-      if (cached_codec_config != nullptr) {
-        auto cached_nalus = split_annex_b_nalus(cached_codec_config->bytes);
-        nalus_to_send.insert(nalus_to_send.end(), cached_nalus.begin(), cached_nalus.end());
-        startup_nalu_count += cached_nalus.size();
-      }
-      auto startup_idr_nalus = split_annex_b_nalus(cached_startup_idr->bytes);
-      nalus_to_send.insert(nalus_to_send.end(), startup_idr_nalus.begin(), startup_idr_nalus.end());
-      startup_nalu_count += startup_idr_nalus.size();
-      sent_startup_sequence = !startup_idr_nalus.empty();
-      if (cached_startup_idr->sequence_id == latest_encoded_unit->sequence_id) {
-        // The current unit is already represented by the retained startup IDR.
-      } else if (first_decodable_frame_sent || descriptor.has_non_idr_slice || (!contains_idr && !contains_codec_config)) {
-        auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
-        nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
-      }
-    } else if (cached_codec_config_available && contains_idr && !contains_codec_config && cached_codec_config != nullptr) {
-      auto cached_nalus = split_annex_b_nalus(cached_codec_config->bytes);
-      nalus_to_send.insert(nalus_to_send.end(), cached_nalus.begin(), cached_nalus.end());
-      startup_nalu_count += cached_nalus.size();
-      auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
-      nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
-      startup_nalu_count += unit_nalus.size();
-      sent_startup_sequence = true;
-    } else if (!first_decodable_frame_sent) {
-      return;
-    } else {
-      auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
-      nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
-    }
-
-    uint64_t packet_count = 0;
-    uint64_t startup_packet_count = 0;
-    try {
-      for (size_t nal_index = 0; nal_index < nalus_to_send.size(); ++nal_index) {
-        const auto& nal = nalus_to_send[nal_index];
-        const bool is_last_nal = nal_index + 1 == nalus_to_send.size();
-        const bool part_of_startup = nal_index < startup_nalu_count;
-        if (nal.empty()) {
-          continue;
+        std::string codec_to_string(VideoCodec codec)
+        {
+            switch (codec)
+            {
+            case VideoCodec::H264:
+                return "H264";
+            }
+            return "Unknown";
         }
 
-        if (!track_sink->exists() || !track_sink->is_open()) {
-          throw std::runtime_error("Track is closed");
+        bool is_start_code_at(const std::vector<uint8_t> &bytes, size_t offset, size_t *start_code_size)
+        {
+            if (offset + 3 <= bytes.size() && bytes[offset] == 0x00 && bytes[offset + 1] == 0x00 && bytes[offset + 2] == 0x01)
+            {
+                *start_code_size = 3;
+                return true;
+            }
+            if (offset + 4 <= bytes.size() && bytes[offset] == 0x00 && bytes[offset + 1] == 0x00 && bytes[offset + 2] == 0x00 &&
+                bytes[offset + 3] == 0x01)
+            {
+                *start_code_size = 4;
+                return true;
+            }
+            return false;
         }
 
-        if (nal.size() <= kMaxRtpPayloadSize) {
-          auto packet = make_rtp_packet(nal.data(), nal.size(), sequence_number_++, rtp_timestamp, ssrc_,
-                                        static_cast<uint8_t>(payload_type), is_last_nal);
-          track_sink->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
-          ++packet_count;
-          startup_packet_count += part_of_startup ? 1u : 0u;
-          continue;
+        constexpr uint8_t kH264PayloadType = 102;
+        constexpr uint64_t kH264ClockRate = 90000;
+        constexpr size_t kMaxRtpPayloadSize = 1200;
+
+        uint32_t timestamp_ns_to_h264_rtp_timestamp(uint64_t timestamp_ns)
+        {
+            constexpr uint64_t kClockRate = kH264ClockRate;
+            constexpr uint64_t kNsPerSecond = 1000000000ull;
+            return static_cast<uint32_t>((timestamp_ns * kClockRate) / kNsPerSecond);
         }
 
-        const uint8_t nal_header = nal[0];
-        const uint8_t fu_indicator = static_cast<uint8_t>((nal_header & 0xe0) | 28u);
-        const uint8_t nal_type = static_cast<uint8_t>(nal_header & 0x1f);
-        const size_t fragment_payload_capacity = kMaxRtpPayloadSize - 2;
-        size_t offset = 1;
-        while (offset < nal.size()) {
-          if (!track_sink->exists() || !track_sink->is_open()) {
-            throw std::runtime_error("Track is closed");
-          }
-
-          const size_t remaining = nal.size() - offset;
-          const size_t fragment_size = std::min(fragment_payload_capacity, remaining);
-          const bool start = offset == 1;
-          const bool end = fragment_size == remaining;
-          std::vector<uint8_t> fu_payload(2 + fragment_size);
-          fu_payload[0] = fu_indicator;
-          fu_payload[1] = static_cast<uint8_t>((start ? 0x80 : 0x00) | (end ? 0x40 : 0x00) | nal_type);
-          std::copy(nal.begin() + static_cast<std::ptrdiff_t>(offset),
-                    nal.begin() + static_cast<std::ptrdiff_t>(offset + fragment_size), fu_payload.begin() + 2);
-          auto packet = make_rtp_packet(fu_payload.data(), fu_payload.size(), sequence_number_++, rtp_timestamp, ssrc_,
-                                        static_cast<uint8_t>(payload_type), is_last_nal && end);
-          track_sink->send(reinterpret_cast<const std::byte*>(packet.data()), packet.size());
-          ++packet_count;
-          startup_packet_count += part_of_startup ? 1u : 0u;
-          offset += fragment_size;
+        uint32_t make_random_ssrc()
+        {
+            static std::mt19937 generator(std::random_device{}());
+            static std::uniform_int_distribution<uint32_t> distribution(1u, 0xffffffffu);
+            return distribution(generator);
         }
-      }
-    } catch (const std::exception& ex) {
-      const std::string message = ex.what();
-      const bool track_closed = message.find("Track is closed") != std::string::npos;
-      mark_track_not_sendable(track_closed ? "track-closed-during-send" : "track-send-failed",
-                              track_closed ? "track-closed-exception" : "track-send-exception");
-      spdlog::warn("[h264-sender] send-failed seq={} packets_before_failure={} status={} error={}",
-                   latest_encoded_unit->sequence_id, packet_count,
-                   (track_closed ? "track-closed-during-send" : "track-send-failed"), message);
-      return;
-    }
 
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      packets_attempted_ += packet_count;
-      packets_sent_after_track_open_ += packet_count;
-      if (sent_startup_sequence) {
-        startup_sequence_sent_ = true;
-        if (!first_decodable_frame_sent_) {
-          ++first_decodable_transitions_;
+        std::vector<std::vector<uint8_t>> split_annex_b_nalus(const std::vector<uint8_t> &bytes)
+        {
+            std::vector<std::vector<uint8_t>> nalus;
+            size_t nal_start = 0;
+            while (nal_start < bytes.size())
+            {
+                size_t start_code_size = 0;
+                while (nal_start < bytes.size() && !is_start_code_at(bytes, nal_start, &start_code_size))
+                {
+                    ++nal_start;
+                }
+                if (nal_start >= bytes.size())
+                {
+                    break;
+                }
+                const size_t payload_offset = nal_start + start_code_size;
+                if (payload_offset >= bytes.size())
+                {
+                    break;
+                }
+                size_t nal_end = payload_offset;
+                size_t next_start_code_size = 0;
+                while (nal_end < bytes.size() && !is_start_code_at(bytes, nal_end, &next_start_code_size))
+                {
+                    ++nal_end;
+                }
+                if (nal_end > payload_offset)
+                {
+                    nalus.emplace_back(bytes.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+                                       bytes.begin() + static_cast<std::ptrdiff_t>(nal_end));
+                }
+                nal_start = nal_end;
+            }
+
+            if (nalus.empty() && !bytes.empty())
+            {
+                nalus.push_back(bytes);
+            }
+            return nalus;
         }
-        first_decodable_frame_sent_ = true;
-        startup_packets_sent_ += startup_packet_count;
-        ++startup_sequence_injections_;
-      }
-      h264_delivery_active_ = true;
-      video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
-      last_packetization_status_ = packet_count > 0 ? "rtp-packets-sent" : "no-rtp-packets-generated";
-      if (sent_startup_sequence) {
-        spdlog::info(
-            "[h264-sender] startup sequence emitted seq={} packets={} startup_packets={} track_exists={} "
-            "track_open={}",
-            latest_encoded_unit->sequence_id, packet_count, startup_packet_count,
-            (video_track_sink_ && video_track_sink_->exists()), video_track_open_);
-      } else {
-        spdlog::trace("[h264-sender] packets-emitted seq={} packets={} startup_packets={} startup_sent={} "
-                      "first_decodable_sent={} track_exists={} track_open={}",
-                      latest_encoded_unit->sequence_id, packet_count, startup_packet_count, startup_sequence_sent_,
-                      first_decodable_frame_sent_, (video_track_sink_ && video_track_sink_->exists()),
-                      video_track_open_);
-      }
-    }
-  }
 
-  void deactivate(std::string reason) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    session_active_ = false;
-    session_teardown_reason_ = std::move(reason);
-    last_lifecycle_event_ = session_teardown_reason_;
-    video_track_exists_ = false;
-    video_track_open_ = false;
-    ready_for_video_track_ = false;
-    h264_delivery_active_ = false;
-    sender_state_ = "session-inactive";
-    last_packetization_status_ = "session-inactive";
-  }
+        size_t count_sdp_media_sections(const std::string &sdp)
+        {
+            size_t count = 0;
+            size_t pos = 0;
+            while ((pos = sdp.find("\nm=", pos)) != std::string::npos)
+            {
+                ++count;
+                pos += 3;
+            }
+            if (sdp.rfind("m=", 0) == 0)
+            {
+                ++count;
+            }
+            return count;
+        }
 
-  EncodedVideoSenderSnapshot snapshot() const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    EncodedVideoSenderSnapshot snapshot;
-    snapshot.sender_state = sender_state_;
-    snapshot.codec = codec_;
-    snapshot.session_active = session_active_;
-    snapshot.session_teardown_reason = session_teardown_reason_;
-    snapshot.last_lifecycle_event = last_lifecycle_event_;
-    snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
-    snapshot.codec_config_seen = codec_config_seen_;
-    snapshot.video_track_exists = session_active_ && video_track_sink_ && video_track_sink_->exists();
-    snapshot.video_track_open = session_active_ && video_track_sink_ && video_track_sink_->is_open();
-    snapshot.ready_for_video_track = snapshot.video_track_exists && codec_config_seen_ && cached_idr_available_;
-    snapshot.h264_delivery_active = h264_delivery_active_;
-    snapshot.keyframe_seen = keyframe_seen_;
-    snapshot.cached_codec_config_available = cached_codec_config_available_;
-    snapshot.cached_idr_available = cached_idr_available_;
-    snapshot.first_decodable_frame_sent = first_decodable_frame_sent_;
-    snapshot.startup_sequence_sent = startup_sequence_sent_;
-    snapshot.delivered_units = delivered_units_;
-    snapshot.duplicate_units_skipped = duplicate_units_skipped_;
-    snapshot.failed_units = failed_units_;
-    snapshot.packets_attempted = packets_attempted_;
-    snapshot.packets_sent_after_track_open = packets_sent_after_track_open_;
-    snapshot.startup_packets_sent = startup_packets_sent_;
-    snapshot.startup_sequence_injections = startup_sequence_injections_;
-    snapshot.first_decodable_transitions = first_decodable_transitions_;
-    snapshot.packetization_failures = packetization_failures_;
-    snapshot.track_closed_events = track_closed_events_;
-    snapshot.send_failures = send_failures_;
-    snapshot.skipped_no_track = skipped_no_track_;
-    snapshot.skipped_track_not_open = skipped_track_not_open_;
-    snapshot.skipped_codec_config_wait = skipped_codec_config_wait_;
-    snapshot.skipped_keyframe_wait = skipped_keyframe_wait_;
-    snapshot.skipped_startup_idr_wait = skipped_startup_idr_wait_;
-    snapshot.last_delivered_sequence_id = last_delivered_sequence_id_;
-    snapshot.last_delivered_timestamp_ns = last_delivered_timestamp_ns_;
-    snapshot.last_delivered_size_bytes = last_delivered_size_bytes_;
-    snapshot.last_delivered_keyframe = last_delivered_keyframe_;
-    snapshot.last_delivered_codec_config = last_delivered_codec_config_;
-    snapshot.last_contains_sps = last_contains_sps_;
-    snapshot.last_contains_pps = last_contains_pps_;
-    snapshot.last_contains_idr = last_contains_idr_;
-    snapshot.last_contains_non_idr = last_contains_non_idr_;
-    snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
-    snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
-    snapshot.last_packetization_status = last_packetization_status_;
-    snapshot.video_mid = (session_active_ && video_track_sink_) ? video_track_sink_->mid() : "";
-    if (!snapshot.session_active) {
-      snapshot.sender_state = "session-inactive";
-      snapshot.video_track_exists = false;
-      snapshot.video_track_open = false;
-      snapshot.ready_for_video_track = false;
-    } else if (snapshot.sender_state == "video-track-missing" && snapshot.video_track_exists) {
-      if (!snapshot.codec_config_seen) {
-        snapshot.sender_state = "waiting-for-h264-codec-config";
-      } else if (!snapshot.cached_idr_available) {
-        snapshot.sender_state = "waiting-for-h264-keyframe";
-      } else if (!snapshot.first_decodable_frame_sent) {
-        snapshot.sender_state = "waiting-for-decoded-startup-idr";
-      } else {
-        snapshot.sender_state = "sending-h264-rtp";
-      }
-    }
-    return snapshot;
-  }
+        std::vector<std::string> extract_sdp_mids(const std::string &sdp)
+        {
+            std::vector<std::string> mids;
+            size_t pos = 0;
+            while (pos < sdp.size())
+            {
+                const size_t line_end = sdp.find('\n', pos);
+                const size_t line_size = (line_end == std::string::npos ? sdp.size() : line_end) - pos;
+                std::string_view line(sdp.data() + pos, line_size);
+                if (!line.empty() && line.back() == '\r')
+                {
+                    line.remove_suffix(1);
+                }
+                if (line.rfind("a=mid:", 0) == 0)
+                {
+                    mids.emplace_back(line.substr(6));
+                }
+                if (line_end == std::string::npos)
+                {
+                    break;
+                }
+                pos = line_end + 1;
+            }
+            return mids;
+        }
 
- private:
-  void mark_track_not_sendable(std::string sender_state, std::string packetization_status) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!session_active_) {
-      sender_state_ = "session-inactive";
-      last_packetization_status_ = "session-inactive";
-      h264_delivery_active_ = false;
-      return;
-    }
-    video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
-    video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
-    ready_for_video_track_ = video_track_exists_ && codec_config_seen_ && cached_idr_available_;
-    h264_delivery_active_ = false;
-    ++packetization_failures_;
-    if (sender_state.find("track-closed") != std::string::npos) {
-      ++track_closed_events_;
-    } else {
-      ++send_failures_;
-    }
-    sender_state_ = std::move(sender_state);
-    last_packetization_status_ = std::move(packetization_status);
-  }
+        size_t count_rejected_sdp_media_sections(const std::string &sdp)
+        {
+            size_t count = 0;
+            size_t pos = 0;
+            while ((pos = sdp.find("\nm=", pos)) != std::string::npos)
+            {
+                const size_t line_start = pos + 1;
+                const size_t line_end = sdp.find('\n', line_start);
+                const std::string line = sdp.substr(line_start, line_end == std::string::npos ? std::string::npos : line_end - line_start);
+                if (line.find("m=") == 0 && line.find(" 0 ") != std::string::npos)
+                {
+                    ++count;
+                }
+                pos = line_start + 2;
+            }
+            if (sdp.rfind("m=", 0) == 0)
+            {
+                const size_t line_end = sdp.find('\n');
+                const std::string line = sdp.substr(0, line_end == std::string::npos ? std::string::npos : line_end);
+                if (line.find(" 0 ") != std::string::npos)
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
 
-  mutable std::mutex mutex_;
-  std::shared_ptr<IEncodedVideoTrackSink> video_track_sink_;
-  std::shared_ptr<const LatestEncodedUnit> cached_codec_config_;
-  std::shared_ptr<const LatestEncodedUnit> cached_startup_idr_;
-  std::string sender_state_{"waiting-for-encoded-input"};
-  std::string codec_;
-  bool session_active_{true};
-  std::string session_teardown_reason_{"not-terminated"};
-  std::string last_lifecycle_event_{"session-created"};
-  uint32_t ssrc_{0};
-  uint16_t sequence_number_{0};
-  int negotiated_h264_payload_type_{kH264PayloadType};
-  std::string negotiated_h264_fmtp_;
-  bool has_pending_encoded_unit_{false};
-  bool codec_config_seen_{false};
-  bool ready_for_video_track_{false};
-  bool video_track_exists_{false};
-  bool video_track_open_{false};
-  bool h264_delivery_active_{false};
-  bool keyframe_seen_{false};
-  bool cached_codec_config_available_{false};
-  bool cached_idr_available_{false};
-  bool first_decodable_frame_sent_{false};
-  bool startup_sequence_sent_{false};
-  uint64_t delivered_units_{0};
-  uint64_t duplicate_units_skipped_{0};
-  uint64_t failed_units_{0};
-  uint64_t packets_attempted_{0};
-  uint64_t packets_sent_after_track_open_{0};
-  uint64_t startup_packets_sent_{0};
-  uint64_t startup_sequence_injections_{0};
-  uint64_t first_decodable_transitions_{0};
-  uint64_t packetization_failures_{0};
-  uint64_t track_closed_events_{0};
-  uint64_t send_failures_{0};
-  uint64_t skipped_no_track_{0};
-  uint64_t skipped_track_not_open_{0};
-  uint64_t skipped_codec_config_wait_{0};
-  uint64_t skipped_keyframe_wait_{0};
-  uint64_t skipped_startup_idr_wait_{0};
-  uint64_t last_delivered_sequence_id_{0};
-  uint64_t last_delivered_timestamp_ns_{0};
-  size_t last_delivered_size_bytes_{0};
-  bool last_delivered_keyframe_{false};
-  bool last_delivered_codec_config_{false};
-  bool last_contains_sps_{false};
-  bool last_contains_pps_{false};
-  bool last_contains_idr_{false};
-  bool last_contains_non_idr_{false};
-  std::string last_packetization_status_{"awaiting-encoded-input"};
-};
+        std::string join_strings(const std::vector<std::string> &values)
+        {
+            std::ostringstream out;
+            for (size_t i = 0; i < values.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    out << ',';
+                }
+                out << values[i];
+            }
+            return out.str();
+        }
 
-class RtcTrackPacketSink : public IEncodedVideoTrackSink {
- public:
-  explicit RtcTrackPacketSink(std::shared_ptr<rtc::Track> track) : track_(std::move(track)) {}
+        std::string sanitize_answer_setup_role(std::string sdp)
+        {
+            const std::string from = "a=setup:actpass";
+            const std::string to = "a=setup:active";
+            size_t pos = 0;
+            while ((pos = sdp.find(from, pos)) != std::string::npos)
+            {
+                sdp.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+            return sdp;
+        }
 
-  bool exists() const override { return static_cast<bool>(track_); }
-  bool is_open() const override { return track_ && track_->isOpen(); }
-  std::string mid() const override { return track_ ? track_->mid() : ""; }
+        std::vector<uint8_t> make_rtp_packet(const uint8_t *payload, size_t payload_size, uint16_t sequence_number,
+                                             uint32_t timestamp, uint32_t ssrc, uint8_t payload_type, bool marker)
+        {
+            std::vector<uint8_t> packet(12 + payload_size);
+            packet[0] = 0x80;
+            packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0x00) | payload_type);
+            packet[2] = static_cast<uint8_t>(sequence_number >> 8);
+            packet[3] = static_cast<uint8_t>(sequence_number & 0xff);
+            packet[4] = static_cast<uint8_t>(timestamp >> 24);
+            packet[5] = static_cast<uint8_t>((timestamp >> 16) & 0xff);
+            packet[6] = static_cast<uint8_t>((timestamp >> 8) & 0xff);
+            packet[7] = static_cast<uint8_t>(timestamp & 0xff);
+            packet[8] = static_cast<uint8_t>(ssrc >> 24);
+            packet[9] = static_cast<uint8_t>((ssrc >> 16) & 0xff);
+            packet[10] = static_cast<uint8_t>((ssrc >> 8) & 0xff);
+            packet[11] = static_cast<uint8_t>(ssrc & 0xff);
+            std::copy(payload, payload + payload_size, packet.begin() + 12);
+            return packet;
+        }
 
-  void send(const std::byte* data, size_t size) override {
-    if (track_) {
-      track_->send(data, size);
-    }
-  }
+        class StreamMediaSourceBridge : public IWebRtcMediaSourceBridge
+        {
+        public:
+            void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                latest_snapshot_available_ = latest_frame != nullptr && latest_frame->valid;
+                if (!latest_snapshot_available_)
+                {
+                    latest_snapshot_frame_id_ = 0;
+                    latest_snapshot_timestamp_ns_ = 0;
+                    latest_snapshot_width_ = 0;
+                    latest_snapshot_height_ = 0;
+                    return;
+                }
 
- private:
-  std::shared_ptr<rtc::Track> track_;
-};
+                latest_snapshot_frame_id_ = latest_frame->frame_id;
+                latest_snapshot_timestamp_ns_ = latest_frame->timestamp_ns;
+                latest_snapshot_width_ = latest_frame->width;
+                latest_snapshot_height_ = latest_frame->height;
+            }
 
-class AttachableRtcTrackSink : public IEncodedVideoTrackSink {
- public:
-  bool exists() const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return static_cast<bool>(track_);
-  }
+            void on_latest_encoded_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                latest_encoded_unit_ = std::move(latest_encoded_unit);
+                latest_encoded_access_unit_available_ = latest_encoded_unit_ != nullptr && latest_encoded_unit_->valid;
+                if (!latest_encoded_access_unit_available_)
+                {
+                    latest_encoded_codec_.clear();
+                    latest_encoded_timestamp_ns_ = 0;
+                    latest_encoded_sequence_id_ = 0;
+                    latest_encoded_size_bytes_ = 0;
+                    latest_encoded_keyframe_ = false;
+                    latest_encoded_codec_config_ = false;
+                    return;
+                }
 
-  bool is_open() const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return track_ && track_->isOpen();
-  }
+                latest_encoded_codec_ = codec_to_string(latest_encoded_unit_->codec);
+                latest_encoded_timestamp_ns_ = latest_encoded_unit_->timestamp_ns;
+                latest_encoded_sequence_id_ = latest_encoded_unit_->sequence_id;
+                latest_encoded_size_bytes_ = latest_encoded_unit_->bytes.size();
+                latest_encoded_keyframe_ = latest_encoded_unit_->keyframe;
+                latest_encoded_codec_config_ = latest_encoded_unit_->codec_config;
+            }
 
-  std::string mid() const override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return track_ ? track_->mid() : "";
-  }
+            std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit() const override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return latest_encoded_unit_;
+            }
 
-  void send(const std::byte* data, size_t size) override {
-    std::shared_ptr<rtc::Track> track;
+            WebRtcMediaSourceSnapshot snapshot() const override
+            {
+                WebRtcMediaSourceSnapshot snapshot;
+                snapshot.bridge_state = "awaiting-video-track-bridge";
+                snapshot.preferred_media_path = "latest-frame-snapshot";
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    snapshot.latest_snapshot_available = latest_snapshot_available_;
+                    snapshot.latest_snapshot_frame_id = latest_snapshot_frame_id_;
+                    snapshot.latest_snapshot_timestamp_ns = latest_snapshot_timestamp_ns_;
+                    snapshot.latest_snapshot_width = latest_snapshot_width_;
+                    snapshot.latest_snapshot_height = latest_snapshot_height_;
+                    snapshot.latest_encoded_access_unit_available = latest_encoded_access_unit_available_;
+                    snapshot.latest_encoded_codec = latest_encoded_codec_;
+                    snapshot.latest_encoded_timestamp_ns = latest_encoded_timestamp_ns_;
+                    snapshot.latest_encoded_sequence_id = latest_encoded_sequence_id_;
+                    snapshot.latest_encoded_size_bytes = latest_encoded_size_bytes_;
+                    snapshot.latest_encoded_keyframe = latest_encoded_keyframe_;
+                    snapshot.latest_encoded_codec_config = latest_encoded_codec_config_;
+                }
+
+                if (snapshot.latest_encoded_access_unit_available)
+                {
+                    snapshot.preferred_media_path = "encoded-access-unit";
+                    snapshot.bridge_state = "awaiting-h264-video-track-bridge";
+                }
+
+                return snapshot;
+            }
+
+        private:
+            mutable std::mutex mutex_;
+            bool latest_snapshot_available_{false};
+            uint64_t latest_snapshot_frame_id_{0};
+            uint64_t latest_snapshot_timestamp_ns_{0};
+            uint32_t latest_snapshot_width_{0};
+            uint32_t latest_snapshot_height_{0};
+            bool latest_encoded_access_unit_available_{false};
+            std::string latest_encoded_codec_;
+            uint64_t latest_encoded_timestamp_ns_{0};
+            uint64_t latest_encoded_sequence_id_{0};
+            size_t latest_encoded_size_bytes_{0};
+            std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit_;
+            bool latest_encoded_keyframe_{false};
+            bool latest_encoded_codec_config_{false};
+        };
+
+        class H264EncodedVideoSender : public IEncodedVideoSender
+        {
+        public:
+            H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink, uint32_t ssrc)
+                : video_track_sink_(std::move(video_track_sink)), ssrc_(ssrc) {}
+
+            void set_negotiated_h264_parameters(int payload_type, std::string fmtp) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                negotiated_h264_payload_type_ = payload_type;
+                negotiated_h264_fmtp_ = std::move(fmtp);
+            }
+
+            void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override
+            {
+                if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid)
+                {
+                    return;
+                }
+
+                if (latest_encoded_unit->codec != VideoCodec::H264 || latest_encoded_unit->bytes.empty())
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ++failed_units_;
+                    sender_state_ = "rejected-non-h264-access-unit";
+                    last_packetization_status_ = "rejected-invalid-input";
+                    return;
+                }
+
+                const H264AccessUnitDescriptor descriptor = inspect_h264_access_unit(*latest_encoded_unit);
+                const bool contains_codec_config = latest_encoded_unit->codec_config || (descriptor.has_sps && descriptor.has_pps);
+                const bool is_keyframe = latest_encoded_unit->keyframe || descriptor.has_idr;
+                const bool contains_idr = descriptor.has_idr;
+                bool should_send = false;
+                bool startup_sequence_required = false;
+                bool first_decodable_frame_sent = false;
+                bool cached_codec_config_available = false;
+                bool has_track = false;
+                bool track_open = false;
+                bool transport_ready = false;
+                bool cached_idr_available = false;
+                std::string startup_gate_reason;
+                std::shared_ptr<IEncodedVideoTrackSink> track_sink;
+                std::shared_ptr<const LatestEncodedUnit> cached_codec_config;
+                std::shared_ptr<const LatestEncodedUnit> cached_startup_idr;
+                int payload_type = kH264PayloadType;
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!session_active_)
+                    {
+                        h264_delivery_active_ = false;
+                        sender_state_ = "session-inactive";
+                        last_packetization_status_ = "session-inactive";
+                        last_lifecycle_event_ = session_teardown_reason_;
+                        return;
+                    }
+                    has_pending_encoded_unit_ = true;
+                    codec_ = codec_to_string(latest_encoded_unit->codec);
+                    video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
+                    video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
+                    has_track = video_track_exists_;
+                    track_open = video_track_open_;
+                    transport_ready = has_track && track_open;
+                    track_sink = video_track_sink_;
+
+                    if (last_delivered_sequence_id_ == latest_encoded_unit->sequence_id)
+                    {
+                        ++duplicate_units_skipped_;
+                        last_packetization_status_ = "duplicate-sequence-skipped";
+                        return;
+                    }
+
+                    if (contains_codec_config)
+                    {
+                        cached_codec_config_ = latest_encoded_unit;
+                        cached_codec_config_available_ = true;
+                    }
+                    if (contains_idr)
+                    {
+                        cached_startup_idr_ = latest_encoded_unit;
+                        cached_idr_available_ = true;
+                    }
+
+                    codec_config_seen_ = codec_config_seen_ || contains_codec_config;
+                    keyframe_seen_ = keyframe_seen_ || is_keyframe;
+                    ready_for_video_track_ = has_track && codec_config_seen_ && cached_idr_available_;
+                    payload_type = negotiated_h264_payload_type_ > 0 ? negotiated_h264_payload_type_ : kH264PayloadType;
+                    first_decodable_frame_sent = first_decodable_frame_sent_;
+                    cached_codec_config_available = cached_codec_config_available_;
+                    cached_idr_available = cached_idr_available_;
+
+                    last_delivered_sequence_id_ = latest_encoded_unit->sequence_id;
+                    last_delivered_timestamp_ns_ = latest_encoded_unit->timestamp_ns;
+                    last_delivered_size_bytes_ = latest_encoded_unit->bytes.size();
+                    last_delivered_keyframe_ = latest_encoded_unit->keyframe;
+                    last_delivered_codec_config_ = latest_encoded_unit->codec_config;
+                    last_contains_sps_ = descriptor.has_sps;
+                    last_contains_pps_ = descriptor.has_pps;
+                    last_contains_idr_ = descriptor.has_idr;
+                    last_contains_non_idr_ = descriptor.has_non_idr_slice;
+
+                    ++delivered_units_;
+                    startup_sequence_required = transport_ready && !startup_sequence_sent_ &&
+                                                codec_config_seen_ && cached_idr_available_;
+                    should_send = transport_ready &&
+                                  (startup_sequence_required || (ready_for_video_track_ && contains_idr) || first_decodable_frame_sent);
+                    cached_codec_config = cached_codec_config_;
+                    cached_startup_idr = cached_startup_idr_;
+                    if (!has_track)
+                    {
+                        ++skipped_no_track_;
+                        sender_state_ = "video-track-missing";
+                        last_packetization_status_ = "no-video-track";
+                        startup_gate_reason = "no-video-track";
+                    }
+                    else if (!codec_config_seen_)
+                    {
+                        ++skipped_codec_config_wait_;
+                        sender_state_ = "waiting-for-h264-codec-config";
+                        last_packetization_status_ = "codec-config-required";
+                        startup_gate_reason = "codec-config-required";
+                    }
+                    else if (!cached_idr_available_)
+                    {
+                        ++skipped_keyframe_wait_;
+                        sender_state_ = "waiting-for-h264-keyframe";
+                        last_packetization_status_ = "keyframe-required";
+                        startup_gate_reason = "keyframe-required";
+                    }
+                    else if (!track_open)
+                    {
+                        ++skipped_track_not_open_;
+                        sender_state_ = "waiting-for-video-track-open";
+                        last_packetization_status_ = "track-not-open-yet";
+                        startup_gate_reason = "track-not-open";
+                    }
+                    else if (!first_decodable_frame_sent && !startup_sequence_required && !contains_idr)
+                    {
+                        ++skipped_startup_idr_wait_;
+                        sender_state_ = "waiting-for-decoded-startup-idr";
+                        last_packetization_status_ = "startup-idr-required";
+                        startup_gate_reason = "startup-idr-required";
+                    }
+                    else
+                    {
+                        sender_state_ = "sending-h264-rtp";
+                        last_packetization_status_ = "packetization-attempt-pending";
+                        startup_gate_reason = startup_sequence_required ? "startup-sequence-required" : "packetization-ready";
+                    }
+
+                    spdlog::trace(
+                        "[h264-sender] access_unit seq={} ts_ns={} state={} gate={} track_exists={} track_open={} "
+                        "transport_ready={} codec_config_seen={} cached_codec_config={} cached_idr={} "
+                        "first_decodable_sent={} startup_sent={} should_send={}",
+                        latest_encoded_unit->sequence_id, latest_encoded_unit->timestamp_ns, sender_state_, startup_gate_reason,
+                        has_track, track_open, transport_ready, codec_config_seen_, cached_codec_config_available_,
+                        cached_idr_available_, first_decodable_frame_sent_, startup_sequence_sent_, should_send);
+                }
+
+                if (!should_send || !track_sink)
+                {
+                    spdlog::trace("[h264-sender] skip-send seq={} reason={} has_track_sink={}", latest_encoded_unit->sequence_id,
+                                  last_packetization_status_, static_cast<bool>(track_sink));
+                    return;
+                }
+
+                if (!track_sink->exists() || !track_sink->is_open())
+                {
+                    mark_track_not_sendable("track-closed-before-send", "track-closed-before-send");
+                    spdlog::info("[h264-sender] track not sendable before packetization seq={} reason=track-closed-before-send "
+                                 "has_track_sink={}",
+                                 latest_encoded_unit->sequence_id, static_cast<bool>(track_sink));
+                    return;
+                }
+
+                spdlog::trace("[h264-sender] packetization-attempt seq={} payload_type={} startup_required={} "
+                              "cached_codec_config={} cached_idr={}",
+                              latest_encoded_unit->sequence_id, payload_type, startup_sequence_required,
+                              static_cast<bool>(cached_codec_config), static_cast<bool>(cached_startup_idr));
+
+                const uint32_t rtp_timestamp = timestamp_ns_to_h264_rtp_timestamp(latest_encoded_unit->timestamp_ns);
+                std::vector<std::vector<uint8_t>> nalus_to_send;
+                bool sent_startup_sequence = false;
+                size_t startup_nalu_count = 0;
+                if (startup_sequence_required && cached_startup_idr != nullptr)
+                {
+                    if (cached_codec_config != nullptr)
+                    {
+                        auto cached_nalus = split_annex_b_nalus(cached_codec_config->bytes);
+                        nalus_to_send.insert(nalus_to_send.end(), cached_nalus.begin(), cached_nalus.end());
+                        startup_nalu_count += cached_nalus.size();
+                    }
+                    auto startup_idr_nalus = split_annex_b_nalus(cached_startup_idr->bytes);
+                    nalus_to_send.insert(nalus_to_send.end(), startup_idr_nalus.begin(), startup_idr_nalus.end());
+                    startup_nalu_count += startup_idr_nalus.size();
+                    sent_startup_sequence = !startup_idr_nalus.empty();
+                    if (cached_startup_idr->sequence_id == latest_encoded_unit->sequence_id)
+                    {
+                        // The current unit is already represented by the retained startup IDR.
+                    }
+                    else if (first_decodable_frame_sent || descriptor.has_non_idr_slice || (!contains_idr && !contains_codec_config))
+                    {
+                        auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
+                        nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
+                    }
+                }
+                else if (cached_codec_config_available && contains_idr && !contains_codec_config && cached_codec_config != nullptr)
+                {
+                    auto cached_nalus = split_annex_b_nalus(cached_codec_config->bytes);
+                    nalus_to_send.insert(nalus_to_send.end(), cached_nalus.begin(), cached_nalus.end());
+                    startup_nalu_count += cached_nalus.size();
+                    auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
+                    nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
+                    startup_nalu_count += unit_nalus.size();
+                    sent_startup_sequence = true;
+                }
+                else if (!first_decodable_frame_sent)
+                {
+                    return;
+                }
+                else
+                {
+                    auto unit_nalus = split_annex_b_nalus(latest_encoded_unit->bytes);
+                    nalus_to_send.insert(nalus_to_send.end(), unit_nalus.begin(), unit_nalus.end());
+                }
+
+                uint64_t packet_count = 0;
+                uint64_t startup_packet_count = 0;
+                try
+                {
+                    for (size_t nal_index = 0; nal_index < nalus_to_send.size(); ++nal_index)
+                    {
+                        const auto &nal = nalus_to_send[nal_index];
+                        const bool is_last_nal = nal_index + 1 == nalus_to_send.size();
+                        const bool part_of_startup = nal_index < startup_nalu_count;
+                        if (nal.empty())
+                        {
+                            continue;
+                        }
+
+                        if (!track_sink->exists() || !track_sink->is_open())
+                        {
+                            throw std::runtime_error("Track is closed");
+                        }
+
+                        if (nal.size() <= kMaxRtpPayloadSize)
+                        {
+                            auto packet = make_rtp_packet(nal.data(), nal.size(), sequence_number_++, rtp_timestamp, ssrc_,
+                                                          static_cast<uint8_t>(payload_type), is_last_nal);
+                            track_sink->send(reinterpret_cast<const std::byte *>(packet.data()), packet.size());
+                            ++packet_count;
+                            startup_packet_count += part_of_startup ? 1u : 0u;
+                            continue;
+                        }
+
+                        const uint8_t nal_header = nal[0];
+                        const uint8_t fu_indicator = static_cast<uint8_t>((nal_header & 0xe0) | 28u);
+                        const uint8_t nal_type = static_cast<uint8_t>(nal_header & 0x1f);
+                        const size_t fragment_payload_capacity = kMaxRtpPayloadSize - 2;
+                        size_t offset = 1;
+                        while (offset < nal.size())
+                        {
+                            if (!track_sink->exists() || !track_sink->is_open())
+                            {
+                                throw std::runtime_error("Track is closed");
+                            }
+
+                            const size_t remaining = nal.size() - offset;
+                            const size_t fragment_size = std::min(fragment_payload_capacity, remaining);
+                            const bool start = offset == 1;
+                            const bool end = fragment_size == remaining;
+                            std::vector<uint8_t> fu_payload(2 + fragment_size);
+                            fu_payload[0] = fu_indicator;
+                            fu_payload[1] = static_cast<uint8_t>((start ? 0x80 : 0x00) | (end ? 0x40 : 0x00) | nal_type);
+                            std::copy(nal.begin() + static_cast<std::ptrdiff_t>(offset),
+                                      nal.begin() + static_cast<std::ptrdiff_t>(offset + fragment_size), fu_payload.begin() + 2);
+                            auto packet = make_rtp_packet(fu_payload.data(), fu_payload.size(), sequence_number_++, rtp_timestamp, ssrc_,
+                                                          static_cast<uint8_t>(payload_type), is_last_nal && end);
+                            track_sink->send(reinterpret_cast<const std::byte *>(packet.data()), packet.size());
+                            ++packet_count;
+                            startup_packet_count += part_of_startup ? 1u : 0u;
+                            offset += fragment_size;
+                        }
+                    }
+                }
+                catch (const std::exception &ex)
+                {
+                    const std::string message = ex.what();
+                    const bool track_closed = message.find("Track is closed") != std::string::npos;
+                    mark_track_not_sendable(track_closed ? "track-closed-during-send" : "track-send-failed",
+                                            track_closed ? "track-closed-exception" : "track-send-exception");
+                    spdlog::warn("[h264-sender] send-failed seq={} packets_before_failure={} status={} error={}",
+                                 latest_encoded_unit->sequence_id, packet_count,
+                                 (track_closed ? "track-closed-during-send" : "track-send-failed"), message);
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    packets_attempted_ += packet_count;
+                    packets_sent_after_track_open_ += packet_count;
+                    if (sent_startup_sequence)
+                    {
+                        startup_sequence_sent_ = true;
+                        if (!first_decodable_frame_sent_)
+                        {
+                            ++first_decodable_transitions_;
+                        }
+                        first_decodable_frame_sent_ = true;
+                        startup_packets_sent_ += startup_packet_count;
+                        ++startup_sequence_injections_;
+                    }
+                    h264_delivery_active_ = true;
+                    video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
+                    last_packetization_status_ = packet_count > 0 ? "rtp-packets-sent" : "no-rtp-packets-generated";
+                    if (sent_startup_sequence)
+                    {
+                        spdlog::info(
+                            "[h264-sender] startup sequence emitted seq={} packets={} startup_packets={} track_exists={} "
+                            "track_open={}",
+                            latest_encoded_unit->sequence_id, packet_count, startup_packet_count,
+                            (video_track_sink_ && video_track_sink_->exists()), video_track_open_);
+                    }
+                    else
+                    {
+                        spdlog::trace("[h264-sender] packets-emitted seq={} packets={} startup_packets={} startup_sent={} "
+                                      "first_decodable_sent={} track_exists={} track_open={}",
+                                      latest_encoded_unit->sequence_id, packet_count, startup_packet_count, startup_sequence_sent_,
+                                      first_decodable_frame_sent_, (video_track_sink_ && video_track_sink_->exists()),
+                                      video_track_open_);
+                    }
+                }
+            }
+
+            void deactivate(std::string reason) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                session_active_ = false;
+                session_teardown_reason_ = std::move(reason);
+                last_lifecycle_event_ = session_teardown_reason_;
+                video_track_exists_ = false;
+                video_track_open_ = false;
+                ready_for_video_track_ = false;
+                h264_delivery_active_ = false;
+                sender_state_ = "session-inactive";
+                last_packetization_status_ = "session-inactive";
+            }
+
+            EncodedVideoSenderSnapshot snapshot() const override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                EncodedVideoSenderSnapshot snapshot;
+                snapshot.sender_state = sender_state_;
+                snapshot.codec = codec_;
+                snapshot.session_active = session_active_;
+                snapshot.session_teardown_reason = session_teardown_reason_;
+                snapshot.last_lifecycle_event = last_lifecycle_event_;
+                snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
+                snapshot.codec_config_seen = codec_config_seen_;
+                snapshot.video_track_exists = session_active_ && video_track_sink_ && video_track_sink_->exists();
+                snapshot.video_track_open = session_active_ && video_track_sink_ && video_track_sink_->is_open();
+                snapshot.ready_for_video_track = snapshot.video_track_exists && codec_config_seen_ && cached_idr_available_;
+                snapshot.h264_delivery_active = h264_delivery_active_;
+                snapshot.keyframe_seen = keyframe_seen_;
+                snapshot.cached_codec_config_available = cached_codec_config_available_;
+                snapshot.cached_idr_available = cached_idr_available_;
+                snapshot.first_decodable_frame_sent = first_decodable_frame_sent_;
+                snapshot.startup_sequence_sent = startup_sequence_sent_;
+                snapshot.delivered_units = delivered_units_;
+                snapshot.duplicate_units_skipped = duplicate_units_skipped_;
+                snapshot.failed_units = failed_units_;
+                snapshot.packets_attempted = packets_attempted_;
+                snapshot.packets_sent_after_track_open = packets_sent_after_track_open_;
+                snapshot.startup_packets_sent = startup_packets_sent_;
+                snapshot.startup_sequence_injections = startup_sequence_injections_;
+                snapshot.first_decodable_transitions = first_decodable_transitions_;
+                snapshot.packetization_failures = packetization_failures_;
+                snapshot.track_closed_events = track_closed_events_;
+                snapshot.send_failures = send_failures_;
+                snapshot.skipped_no_track = skipped_no_track_;
+                snapshot.skipped_track_not_open = skipped_track_not_open_;
+                snapshot.skipped_codec_config_wait = skipped_codec_config_wait_;
+                snapshot.skipped_keyframe_wait = skipped_keyframe_wait_;
+                snapshot.skipped_startup_idr_wait = skipped_startup_idr_wait_;
+                snapshot.last_delivered_sequence_id = last_delivered_sequence_id_;
+                snapshot.last_delivered_timestamp_ns = last_delivered_timestamp_ns_;
+                snapshot.last_delivered_size_bytes = last_delivered_size_bytes_;
+                snapshot.last_delivered_keyframe = last_delivered_keyframe_;
+                snapshot.last_delivered_codec_config = last_delivered_codec_config_;
+                snapshot.last_contains_sps = last_contains_sps_;
+                snapshot.last_contains_pps = last_contains_pps_;
+                snapshot.last_contains_idr = last_contains_idr_;
+                snapshot.last_contains_non_idr = last_contains_non_idr_;
+                snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
+                snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
+                snapshot.last_packetization_status = last_packetization_status_;
+                snapshot.video_mid = (session_active_ && video_track_sink_) ? video_track_sink_->mid() : "";
+                if (!snapshot.session_active)
+                {
+                    snapshot.sender_state = "session-inactive";
+                    snapshot.video_track_exists = false;
+                    snapshot.video_track_open = false;
+                    snapshot.ready_for_video_track = false;
+                }
+                else if (snapshot.sender_state == "video-track-missing" && snapshot.video_track_exists)
+                {
+                    if (!snapshot.codec_config_seen)
+                    {
+                        snapshot.sender_state = "waiting-for-h264-codec-config";
+                    }
+                    else if (!snapshot.cached_idr_available)
+                    {
+                        snapshot.sender_state = "waiting-for-h264-keyframe";
+                    }
+                    else if (!snapshot.first_decodable_frame_sent)
+                    {
+                        snapshot.sender_state = "waiting-for-decoded-startup-idr";
+                    }
+                    else
+                    {
+                        snapshot.sender_state = "sending-h264-rtp";
+                    }
+                }
+                return snapshot;
+            }
+
+        private:
+            void mark_track_not_sendable(std::string sender_state, std::string packetization_status)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!session_active_)
+                {
+                    sender_state_ = "session-inactive";
+                    last_packetization_status_ = "session-inactive";
+                    h264_delivery_active_ = false;
+                    return;
+                }
+                video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
+                video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
+                ready_for_video_track_ = video_track_exists_ && codec_config_seen_ && cached_idr_available_;
+                h264_delivery_active_ = false;
+                ++packetization_failures_;
+                if (sender_state.find("track-closed") != std::string::npos)
+                {
+                    ++track_closed_events_;
+                }
+                else
+                {
+                    ++send_failures_;
+                }
+                sender_state_ = std::move(sender_state);
+                last_packetization_status_ = std::move(packetization_status);
+            }
+
+            mutable std::mutex mutex_;
+            std::shared_ptr<IEncodedVideoTrackSink> video_track_sink_;
+            std::shared_ptr<const LatestEncodedUnit> cached_codec_config_;
+            std::shared_ptr<const LatestEncodedUnit> cached_startup_idr_;
+            std::string sender_state_{"waiting-for-encoded-input"};
+            std::string codec_;
+            bool session_active_{true};
+            std::string session_teardown_reason_{"not-terminated"};
+            std::string last_lifecycle_event_{"session-created"};
+            uint32_t ssrc_{0};
+            uint16_t sequence_number_{0};
+            int negotiated_h264_payload_type_{kH264PayloadType};
+            std::string negotiated_h264_fmtp_;
+            bool has_pending_encoded_unit_{false};
+            bool codec_config_seen_{false};
+            bool ready_for_video_track_{false};
+            bool video_track_exists_{false};
+            bool video_track_open_{false};
+            bool h264_delivery_active_{false};
+            bool keyframe_seen_{false};
+            bool cached_codec_config_available_{false};
+            bool cached_idr_available_{false};
+            bool first_decodable_frame_sent_{false};
+            bool startup_sequence_sent_{false};
+            uint64_t delivered_units_{0};
+            uint64_t duplicate_units_skipped_{0};
+            uint64_t failed_units_{0};
+            uint64_t packets_attempted_{0};
+            uint64_t packets_sent_after_track_open_{0};
+            uint64_t startup_packets_sent_{0};
+            uint64_t startup_sequence_injections_{0};
+            uint64_t first_decodable_transitions_{0};
+            uint64_t packetization_failures_{0};
+            uint64_t track_closed_events_{0};
+            uint64_t send_failures_{0};
+            uint64_t skipped_no_track_{0};
+            uint64_t skipped_track_not_open_{0};
+            uint64_t skipped_codec_config_wait_{0};
+            uint64_t skipped_keyframe_wait_{0};
+            uint64_t skipped_startup_idr_wait_{0};
+            uint64_t last_delivered_sequence_id_{0};
+            uint64_t last_delivered_timestamp_ns_{0};
+            size_t last_delivered_size_bytes_{0};
+            bool last_delivered_keyframe_{false};
+            bool last_delivered_codec_config_{false};
+            bool last_contains_sps_{false};
+            bool last_contains_pps_{false};
+            bool last_contains_idr_{false};
+            bool last_contains_non_idr_{false};
+            std::string last_packetization_status_{"awaiting-encoded-input"};
+        };
+
+        class RtcTrackPacketSink : public IEncodedVideoTrackSink
+        {
+        public:
+            explicit RtcTrackPacketSink(std::shared_ptr<rtc::Track> track) : track_(std::move(track)) {}
+
+            bool exists() const override { return static_cast<bool>(track_); }
+            bool is_open() const override { return track_ && track_->isOpen(); }
+            std::string mid() const override { return track_ ? track_->mid() : ""; }
+
+            void send(const std::byte *data, size_t size) override
+            {
+                if (track_)
+                {
+                    track_->send(data, size);
+                }
+            }
+
+        private:
+            std::shared_ptr<rtc::Track> track_;
+        };
+
+        class AttachableRtcTrackSink : public IEncodedVideoTrackSink
+        {
+        public:
+            bool exists() const override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return static_cast<bool>(track_);
+            }
+
+            bool is_open() const override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return track_ && track_->isOpen();
+            }
+
+            std::string mid() const override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return track_ ? track_->mid() : "";
+            }
+
+            void send(const std::byte *data, size_t size) override
+            {
+                std::shared_ptr<rtc::Track> track;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    track = track_;
+                }
+                if (track)
+                {
+                    track->send(data, size);
+                }
+            }
+
+            void bind(std::shared_ptr<rtc::Track> track)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                track_ = std::move(track);
+            }
+
+            void unbind()
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                track_.reset();
+            }
+
+        private:
+            mutable std::mutex mutex_;
+            std::shared_ptr<rtc::Track> track_;
+        };
+
+    } // namespace
+
+    H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit &access_unit)
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      track = track_;
+        H264AccessUnitDescriptor descriptor;
+        if (!access_unit.valid || access_unit.codec != VideoCodec::H264 || access_unit.bytes.empty())
+        {
+            return descriptor;
+        }
+
+        const auto &bytes = access_unit.bytes;
+        size_t nal_start = 0;
+        bool found_any = false;
+        while (nal_start < bytes.size())
+        {
+            size_t start_code_size = 0;
+            while (nal_start < bytes.size() && !is_start_code_at(bytes, nal_start, &start_code_size))
+            {
+                ++nal_start;
+            }
+            if (nal_start >= bytes.size())
+            {
+                break;
+            }
+
+            const size_t payload_offset = nal_start + start_code_size;
+            if (payload_offset >= bytes.size())
+            {
+                break;
+            }
+
+            size_t nal_end = payload_offset;
+            size_t next_start_code_size = 0;
+            while (nal_end < bytes.size() && !is_start_code_at(bytes, nal_end, &next_start_code_size))
+            {
+                ++nal_end;
+            }
+
+            if (nal_end <= payload_offset)
+            {
+                nal_start = std::min(bytes.size(), payload_offset + 1);
+                continue;
+            }
+
+            const uint8_t nal_type = static_cast<uint8_t>(bytes[payload_offset] & 0x1f);
+            descriptor.nal_units.push_back(H264NalUnitInfo{nal_type, payload_offset, nal_end - payload_offset});
+            descriptor.valid = true;
+            found_any = true;
+
+            switch (nal_type)
+            {
+            case 7:
+                descriptor.has_sps = true;
+                break;
+            case 8:
+                descriptor.has_pps = true;
+                break;
+            case 5:
+                descriptor.has_idr = true;
+                break;
+            case 1:
+                descriptor.has_non_idr_slice = true;
+                break;
+            case 9:
+                descriptor.has_aud = true;
+                break;
+            default:
+                break;
+            }
+
+            nal_start = nal_end;
+        }
+
+        if (!found_any && !bytes.empty())
+        {
+            const uint8_t nal_type = static_cast<uint8_t>(bytes.front() & 0x1f);
+            descriptor.nal_units.push_back(H264NalUnitInfo{nal_type, 0, bytes.size()});
+            descriptor.valid = true;
+            descriptor.has_sps = nal_type == 7;
+            descriptor.has_pps = nal_type == 8;
+            descriptor.has_idr = nal_type == 5;
+            descriptor.has_non_idr_slice = nal_type == 1;
+            descriptor.has_aud = nal_type == 9;
+        }
+
+        return descriptor;
     }
-    if (track) {
-      track->send(data, size);
-    }
-  }
 
-  void bind(std::shared_ptr<rtc::Track> track) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    track_ = std::move(track);
-  }
-
-  void unbind() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    track_.reset();
-  }
-
- private:
-  mutable std::mutex mutex_;
-  std::shared_ptr<rtc::Track> track_;
-};
-
-}  // namespace
-
-H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit) {
-  H264AccessUnitDescriptor descriptor;
-  if (!access_unit.valid || access_unit.codec != VideoCodec::H264 || access_unit.bytes.empty()) {
-    return descriptor;
-  }
-
-  const auto& bytes = access_unit.bytes;
-  size_t nal_start = 0;
-  bool found_any = false;
-  while (nal_start < bytes.size()) {
-    size_t start_code_size = 0;
-    while (nal_start < bytes.size() && !is_start_code_at(bytes, nal_start, &start_code_size)) {
-      ++nal_start;
-    }
-    if (nal_start >= bytes.size()) {
-      break;
-    }
-
-    const size_t payload_offset = nal_start + start_code_size;
-    if (payload_offset >= bytes.size()) {
-      break;
-    }
-
-    size_t nal_end = payload_offset;
-    size_t next_start_code_size = 0;
-    while (nal_end < bytes.size() && !is_start_code_at(bytes, nal_end, &next_start_code_size)) {
-      ++nal_end;
-    }
-
-    if (nal_end <= payload_offset) {
-      nal_start = std::min(bytes.size(), payload_offset + 1);
-      continue;
-    }
-
-    const uint8_t nal_type = static_cast<uint8_t>(bytes[payload_offset] & 0x1f);
-    descriptor.nal_units.push_back(H264NalUnitInfo{nal_type, payload_offset, nal_end - payload_offset});
-    descriptor.valid = true;
-    found_any = true;
-
-    switch (nal_type) {
-      case 7:
-        descriptor.has_sps = true;
-        break;
-      case 8:
-        descriptor.has_pps = true;
-        break;
-      case 5:
-        descriptor.has_idr = true;
-        break;
-      case 1:
-        descriptor.has_non_idr_slice = true;
-        break;
-      case 9:
-        descriptor.has_aud = true;
-        break;
-      default:
-        break;
-    }
-
-    nal_start = nal_end;
-  }
-
-  if (!found_any && !bytes.empty()) {
-    const uint8_t nal_type = static_cast<uint8_t>(bytes.front() & 0x1f);
-    descriptor.nal_units.push_back(H264NalUnitInfo{nal_type, 0, bytes.size()});
-    descriptor.valid = true;
-    descriptor.has_sps = nal_type == 7;
-    descriptor.has_pps = nal_type == 8;
-    descriptor.has_idr = nal_type == 5;
-    descriptor.has_non_idr_slice = nal_type == 1;
-    descriptor.has_aud = nal_type == 9;
-  }
-
-  return descriptor;
-}
-
-std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
-                                                                    uint32_t ssrc) {
-  return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink), ssrc);
-}
-
-WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
-                                         LatestEncodedUnitGetter latest_encoded_unit_getter)
-    : stream_id_(std::move(stream_id)), callbacks_enabled_(std::make_shared<std::atomic_bool>(true)) {
-  ensure_default_logging_config();
-  rtc::Configuration config;
-  config.disableAutoNegotiation = false;
-  peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
-  media_source_ = std::make_unique<StreamMediaSourceBridge>();
-  video_ssrc_ = make_random_ssrc();
-  video_track_sink_ = std::make_shared<AttachableRtcTrackSink>();
-  encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_, video_ssrc_);
-  media_source_->on_latest_frame(latest_frame_getter(stream_id_));
-  auto latest_encoded = latest_encoded_unit_getter(stream_id_);
-  media_source_->on_latest_encoded_unit(latest_encoded);
-  encoded_sender_->on_encoded_access_unit(std::move(latest_encoded));
-  peer_state_ = peer_state_to_string(peer_connection_->state());
-  configure_callbacks();
-}
-
-WebRtcStreamSession::~WebRtcStreamSession() { stop(); }
-
-bool WebRtcStreamSession::apply_offer(const std::string& offer_sdp, std::string* error_message) {
-  ensure_default_logging_config();
-  try {
-    std::shared_ptr<rtc::PeerConnection> peer_connection;
+    std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
+                                                                        uint32_t ssrc)
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      peer_connection = peer_connection_;
+        return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink), ssrc);
     }
 
-    const auto offer_mids = extract_sdp_mids(offer_sdp);
-    spdlog::info("[signaling] applying offer stream={} media_sections={} mids={}", stream_id_,
-                 count_sdp_media_sections(offer_sdp), join_strings(offer_mids));
-
-    // PeerConnection calls may synchronously invoke onLocalDescription/onLocalCandidate/onStateChange,
-    // so the session mutex must not be held across libdatachannel API calls.
-    peer_connection->setRemoteDescription(rtc::Description(offer_sdp, "offer"));
-    peer_connection->setLocalDescription();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    offer_sdp_ = offer_sdp;
-    return true;
-  } catch (const std::exception& e) {
-    if (error_message != nullptr) {
-      *error_message = e.what();
-    }
-    return false;
-  }
-}
-
-bool WebRtcStreamSession::apply_answer(const std::string& answer_sdp, std::string* error_message) {
-  try {
-    std::shared_ptr<rtc::PeerConnection> peer_connection;
+    WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
+                                             LatestEncodedUnitGetter latest_encoded_unit_getter)
+        : stream_id_(std::move(stream_id)), callbacks_enabled_(std::make_shared<std::atomic_bool>(true))
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      peer_connection = peer_connection_;
+        ensure_default_logging_config();
+        rtc::Configuration config;
+        config.disableAutoNegotiation = false;
+        peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
+        media_source_ = std::make_unique<StreamMediaSourceBridge>();
+        video_ssrc_ = make_random_ssrc();
+        video_track_sink_ = std::make_shared<AttachableRtcTrackSink>();
+        encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_, video_ssrc_);
+        media_source_->on_latest_frame(latest_frame_getter(stream_id_));
+        auto latest_encoded = latest_encoded_unit_getter(stream_id_);
+        media_source_->on_latest_encoded_unit(latest_encoded);
+        encoded_sender_->on_encoded_access_unit(std::move(latest_encoded));
+        peer_state_ = peer_state_to_string(peer_connection_->state());
+        configure_callbacks();
     }
 
-    // PeerConnection callbacks may reenter the session synchronously here too.
-    peer_connection->setRemoteDescription(rtc::Description(answer_sdp, "answer"));
+    WebRtcStreamSession::~WebRtcStreamSession() { stop(); }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    answer_sdp_ = answer_sdp;
-    return true;
-  } catch (const std::exception& e) {
-    if (error_message != nullptr) {
-      *error_message = e.what();
-    }
-    return false;
-  }
-}
-
-bool WebRtcStreamSession::add_remote_candidate(const std::string& candidate_sdp, std::string* error_message) {
-  try {
-    std::shared_ptr<rtc::PeerConnection> peer_connection;
+    bool WebRtcStreamSession::apply_offer(const std::string &offer_sdp, std::string *error_message)
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      peer_connection = peer_connection_;
+        ensure_default_logging_config();
+        try
+        {
+            std::shared_ptr<rtc::PeerConnection> peer_connection;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                peer_connection = peer_connection_;
+            }
+
+            const auto offer_mids = extract_sdp_mids(offer_sdp);
+            spdlog::info("[signaling] applying offer stream={} media_sections={} mids={}", stream_id_,
+                         count_sdp_media_sections(offer_sdp), join_strings(offer_mids));
+
+            // PeerConnection calls may synchronously invoke onLocalDescription/onLocalCandidate/onStateChange,
+            // so the session mutex must not be held across libdatachannel API calls.
+            peer_connection->setRemoteDescription(rtc::Description(offer_sdp, "offer"));
+            peer_connection->setLocalDescription();
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            offer_sdp_ = offer_sdp;
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = e.what();
+            }
+            return false;
+        }
     }
 
-    // Keep candidate insertion callback-safe for synchronous libdatachannel reentrancy.
-    peer_connection->addRemoteCandidate(rtc::Candidate(candidate_sdp));
+    bool WebRtcStreamSession::apply_answer(const std::string &answer_sdp, std::string *error_message)
+    {
+        try
+        {
+            std::shared_ptr<rtc::PeerConnection> peer_connection;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                peer_connection = peer_connection_;
+            }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    last_remote_candidate_ = candidate_sdp;
-    return true;
-  } catch (const std::exception& e) {
-    if (error_message != nullptr) {
-      *error_message = e.what();
+            // PeerConnection callbacks may reenter the session synchronously here too.
+            peer_connection->setRemoteDescription(rtc::Description(answer_sdp, "answer"));
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            answer_sdp_ = answer_sdp;
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = e.what();
+            }
+            return false;
+        }
     }
-    return false;
-  }
-}
 
-void WebRtcStreamSession::on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame) {
-  std::unique_ptr<IWebRtcMediaSourceBridge>* media_source = &media_source_;
-  std::lock_guard<std::mutex> lock(mutex_);
-  (*media_source)->on_latest_frame(std::move(latest_frame));
-}
+    bool WebRtcStreamSession::add_remote_candidate(const std::string &candidate_sdp, std::string *error_message)
+    {
+        try
+        {
+            std::shared_ptr<rtc::PeerConnection> peer_connection;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                peer_connection = peer_connection_;
+            }
 
-void WebRtcStreamSession::on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) {
-  std::unique_lock<std::mutex> lock(mutex_);
-  media_source_->on_latest_encoded_unit(latest_encoded_unit);
-  if (!active_) {
-    return;
-  }
-  auto sender = encoded_sender_.get();
-  lock.unlock();
-  sender->on_encoded_access_unit(std::move(latest_encoded_unit));
-}
+            // Keep candidate insertion callback-safe for synchronous libdatachannel reentrancy.
+            peer_connection->addRemoteCandidate(rtc::Candidate(candidate_sdp));
 
-WebRtcSessionSnapshot WebRtcStreamSession::snapshot() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  WebRtcMediaSourceSnapshot media_snapshot = media_source_->snapshot();
-  media_snapshot.encoded_sender = encoded_sender_->snapshot();
-  return WebRtcSessionSnapshot{stream_id_,
-                               offer_sdp_,
-                               answer_sdp_,
-                               last_remote_candidate_,
-                               last_local_candidate_,
-                               peer_state_,
-                               active_,
-                               sending_active_,
-                               teardown_reason_,
-                               last_transition_reason_,
-                               disconnect_count_,
-                               std::move(media_snapshot)};
-}
-
-void WebRtcStreamSession::stop() {
-  std::shared_ptr<rtc::PeerConnection> peer_connection;
-  std::shared_ptr<AttachableRtcTrackSink> attachable_sink;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (active_) {
-      transition_to_inactive_locked("server-stop-requested", "closed");
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_remote_candidate_ = candidate_sdp;
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = e.what();
+            }
+            return false;
+        }
     }
-    callbacks_enabled_->store(false, std::memory_order_release);
-    peer_connection = peer_connection_;
-    peer_connection_.reset();
-    attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
-  }
 
-  if (attachable_sink) {
-    attachable_sink->unbind();
-  }
+    void WebRtcStreamSession::on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame)
+    {
+        std::unique_ptr<IWebRtcMediaSourceBridge> *media_source = &media_source_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        (*media_source)->on_latest_frame(std::move(latest_frame));
+    }
 
-  if (peer_connection) {
-    // close() may also trigger state callbacks, so do not hold the session mutex here.
-    peer_connection->close();
-  }
-}
+    void WebRtcStreamSession::on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        media_source_->on_latest_encoded_unit(latest_encoded_unit);
+        if (!active_)
+        {
+            return;
+        }
+        auto sender = encoded_sender_.get();
+        lock.unlock();
+        sender->on_encoded_access_unit(std::move(latest_encoded_unit));
+    }
 
-bool WebRtcStreamSession::is_active() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return active_;
-}
+    WebRtcSessionSnapshot WebRtcStreamSession::snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        WebRtcMediaSourceSnapshot media_snapshot = media_source_->snapshot();
+        media_snapshot.encoded_sender = encoded_sender_->snapshot();
+        return WebRtcSessionSnapshot{stream_id_,
+                                     offer_sdp_,
+                                     answer_sdp_,
+                                     last_remote_candidate_,
+                                     last_local_candidate_,
+                                     peer_state_,
+                                     active_,
+                                     sending_active_,
+                                     teardown_reason_,
+                                     last_transition_reason_,
+                                     disconnect_count_,
+                                     std::move(media_snapshot)};
+    }
 
-std::string WebRtcStreamSession::peer_state_to_string(rtc::PeerConnection::State state) {
-  switch (state) {
-    case rtc::PeerConnection::State::New:
-      return "new";
-    case rtc::PeerConnection::State::Connecting:
-      return "connecting";
-    case rtc::PeerConnection::State::Connected:
-      return "connected";
-    case rtc::PeerConnection::State::Disconnected:
-      return "disconnected";
-    case rtc::PeerConnection::State::Failed:
-      return "failed";
-    case rtc::PeerConnection::State::Closed:
-      return "closed";
-  }
-  return "unknown";
-}
+    void WebRtcStreamSession::stop()
+    {
+        std::shared_ptr<rtc::PeerConnection> peer_connection;
+        std::shared_ptr<AttachableRtcTrackSink> attachable_sink;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (active_)
+            {
+                transition_to_inactive_locked("server-stop-requested", "closed");
+            }
+            callbacks_enabled_->store(false, std::memory_order_release);
+            peer_connection = peer_connection_;
+            peer_connection_.reset();
+            attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
+        }
 
-void WebRtcStreamSession::configure_callbacks() {
-  // These callbacks may run synchronously while PeerConnection API calls are still on the stack.
-  // They only touch session-local state under mutex_ and therefore must stay independent.
-  auto callbacks_enabled = callbacks_enabled_;
+        if (attachable_sink)
+        {
+            attachable_sink->unbind();
+        }
 
-  peer_connection_->onTrack([this, callbacks_enabled](std::shared_ptr<rtc::Track> track) {
+        if (peer_connection)
+        {
+            // close() may also trigger state callbacks, so do not hold the session mutex here.
+            peer_connection->close();
+        }
+    }
+
+    bool WebRtcStreamSession::is_active() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return active_;
+    }
+
+    std::string WebRtcStreamSession::peer_state_to_string(rtc::PeerConnection::State state)
+    {
+        switch (state)
+        {
+        case rtc::PeerConnection::State::New:
+            return "new";
+        case rtc::PeerConnection::State::Connecting:
+            return "connecting";
+        case rtc::PeerConnection::State::Connected:
+            return "connected";
+        case rtc::PeerConnection::State::Disconnected:
+            return "disconnected";
+        case rtc::PeerConnection::State::Failed:
+            return "failed";
+        case rtc::PeerConnection::State::Closed:
+            return "closed";
+        }
+        return "unknown";
+    }
+
+    void WebRtcStreamSession::configure_callbacks()
+    {
+        // These callbacks may run synchronously while PeerConnection API calls are still on the stack.
+        // They only touch session-local state under mutex_ and therefore must stay independent.
+        auto callbacks_enabled = callbacks_enabled_;
+
+        peer_connection_->onTrack([this, callbacks_enabled](std::shared_ptr<rtc::Track> track)
+                                  {
     if (!callbacks_enabled->load(std::memory_order_acquire)) {
       return;
     }
@@ -1103,10 +1262,10 @@ void WebRtcStreamSession::configure_callbacks() {
       sending_active_ = true;
       last_transition_reason_ = "video-track-bound";
     }
-    spdlog::info("[signaling] bound negotiated video track stream={} reused_mid={}", stream_id_, track->mid());
-  });
+    spdlog::info("[signaling] bound negotiated video track stream={} reused_mid={}", stream_id_, track->mid()); });
 
-  peer_connection_->onLocalDescription([this, callbacks_enabled](rtc::Description description) {
+        peer_connection_->onLocalDescription([this, callbacks_enabled](rtc::Description description)
+                                             {
     if (!callbacks_enabled->load(std::memory_order_acquire)) {
       return;
     }
@@ -1118,20 +1277,20 @@ void WebRtcStreamSession::configure_callbacks() {
         stream_id_, answer.size(), count_sdp_media_sections(answer), count_rejected_sdp_media_sections(answer),
         join_strings(answer_mids));
     std::lock_guard<std::mutex> lock(mutex_);
-    answer_sdp_ = answer;
-  });
+    answer_sdp_ = answer; });
 
-  peer_connection_->onLocalCandidate([this, callbacks_enabled](rtc::Candidate candidate) {
+        peer_connection_->onLocalCandidate([this, callbacks_enabled](rtc::Candidate candidate)
+                                           {
     if (!callbacks_enabled->load(std::memory_order_acquire)) {
       return;
     }
     const std::string local_candidate = std::string(candidate);
     spdlog::debug("[signaling] local candidate generated stream={} size={}", stream_id_, local_candidate.size());
     std::lock_guard<std::mutex> lock(mutex_);
-    last_local_candidate_ = local_candidate;
-  });
+    last_local_candidate_ = local_candidate; });
 
-  peer_connection_->onStateChange([this, callbacks_enabled](rtc::PeerConnection::State state) {
+        peer_connection_->onStateChange([this, callbacks_enabled](rtc::PeerConnection::State state)
+                                        {
     if (!callbacks_enabled->load(std::memory_order_acquire)) {
       return;
     }
@@ -1143,28 +1302,31 @@ void WebRtcStreamSession::configure_callbacks() {
       transition_to_inactive_locked("peer-failed");
     } else if (state == rtc::PeerConnection::State::Closed) {
       transition_to_inactive_locked("peer-closed");
+    } });
     }
-  });
-}
 
-void WebRtcStreamSession::transition_to_inactive_locked(std::string reason, std::string peer_state_override) {
-  if (!active_) {
-    return;
-  }
+    void WebRtcStreamSession::transition_to_inactive_locked(std::string reason, std::string peer_state_override)
+    {
+        if (!active_)
+        {
+            return;
+        }
 
-  auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
-  active_ = false;
-  sending_active_ = false;
-  teardown_reason_ = std::move(reason);
-  last_transition_reason_ = teardown_reason_;
-  ++disconnect_count_;
-  if (!peer_state_override.empty()) {
-    peer_state_ = std::move(peer_state_override);
-  }
-  encoded_sender_->deactivate(teardown_reason_);
-  if (attachable_sink) {
-    attachable_sink->unbind();
-  }
-}
+        auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
+        active_ = false;
+        sending_active_ = false;
+        teardown_reason_ = std::move(reason);
+        last_transition_reason_ = teardown_reason_;
+        ++disconnect_count_;
+        if (!peer_state_override.empty())
+        {
+            peer_state_ = std::move(peer_state_override);
+        }
+        encoded_sender_->deactivate(teardown_reason_);
+        if (attachable_sink)
+        {
+            attachable_sink->unbind();
+        }
+    }
 
-}  // namespace video_server
+} // namespace video_server

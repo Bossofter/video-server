@@ -5,14 +5,24 @@
 
 #include "../core/video_server_core.h"
 
-namespace video_server {
+namespace video_server
+{
 
-struct EncodedFramePayload {
-  std::string body;
-  std::string content_type;
-};
+    /**
+     * @brief Encoded HTTP payload returned by the latest-frame endpoint.
+     */
+    struct EncodedFramePayload
+    {
+        std::string body;         /**< Serialized response body. */
+        std::string content_type; /**< MIME content type of the encoded payload. */
+    };
 
-std::optional<EncodedFramePayload> encode_latest_frame_as_ppm(const LatestFrame& frame);
+    /**
+     * @brief Encodes a transformed latest frame snapshot as a PPM payload.
+     *
+     * @param frame Latest transformed frame snapshot to encode.
+     * @return Encoded payload when conversion succeeded, otherwise `std::nullopt`.
+     */
+    std::optional<EncodedFramePayload> encode_latest_frame_as_ppm(const LatestFrame &frame);
 
-}  // namespace video_server
-
+} // namespace video_server

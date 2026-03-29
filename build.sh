@@ -19,6 +19,7 @@ if [[ ! -f "${TOOLCHAIN_FILE}" ]]; then
 fi
 
 BUILD_DIR="build"
+INSTALL_DIR="${BUILD_DIR}/install"
 
 cmake -S . -B "${BUILD_DIR}" \
   -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
@@ -27,3 +28,4 @@ cmake -S . -B "${BUILD_DIR}" \
   -DBUILD_TESTING=ON
 
 cmake --build "${BUILD_DIR}" -j
+cmake --install "${BUILD_DIR}" --prefix "${INSTALL_DIR}"

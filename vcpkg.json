@@ -1,24 +1,24 @@
 {
-  "name": "video-server",
-  "version-string": "0.1.0",
-  "description": "Portable C++ video streaming subsystem",
-  "dependencies": [
-    "gtest",
-    {
-      "name": "ffmpeg",
-      "features": [
-        "openh264"
-      ]
-    },
-    {
-      "name": "libdatachannel",
-      "features": [
-        "srtp"
-      ]
-    },
-    "libjuice",
-    "openssl",
-    "libsrtp",
-    "spdlog"
-  ]
+    "name": "video-server",
+    "version-string": "1.0.0",
+    "description": "Portable C++ video streaming subsystem",
+    "dependencies": [
+        "gtest",
+        {
+            "name": "ffmpeg",
+            "features": [
+                "openh264"
+            ]
+        },
+        {
+            "name": "libdatachannel",
+            "features": [
+                "srtp"
+            ]
+        },
+        "libjuice",
+        "openssl",
+        "libsrtp",
+        "spdlog"
+    ]
 }
