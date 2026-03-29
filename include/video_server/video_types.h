@@ -5,7 +5,7 @@
 
 namespace video_server {
 
-/// Supported raw input pixel formats.
+//Supported raw input pixel formats.
 enum class VideoPixelFormat {
   RGB24,
   BGR24,
@@ -16,12 +16,12 @@ enum class VideoPixelFormat {
   GRAY8
 };
 
-/// Supported encoded codecs.
+//Supported encoded codecs.
 enum class VideoCodec {
   H264
 };
 
-/// Supported output display and palette modes.
+//Supported output display and palette modes.
 enum class VideoDisplayMode {
   Passthrough,
   Grayscale,
@@ -32,13 +32,38 @@ enum class VideoDisplayMode {
   Arctic
 };
 
-/// Returns a readable name for a display mode value.
+/**
+ * @brief Returns a readable name for a display mode value.
+ * 
+ * @param mode 
+ * @return const char* 
+ */
 const char* to_string(VideoDisplayMode mode);
-/// Returns a readable name for a pixel format value.
+
+
+/**
+ * @brief Returns a readable name for a pixel format value.
+ * 
+ * @param pixel_format 
+ * @return const char* 
+ */
 const char* to_string(VideoPixelFormat pixel_format);
-/// Returns a readable name for a codec value.
+
+
+/**
+ * @brief Returns a readable name for a codec value.
+ * 
+ * @param codec 
+ * @return const char* 
+ */
 const char* to_string(VideoCodec codec);
-/// Parses a display mode from a case-insensitive API string.
+
+/**
+ * @brief Parses a display mode from a case-insensitive API string.
+ * 
+ * @param value 
+ * @return std::optional<VideoDisplayMode> 
+ */
 std::optional<VideoDisplayMode> video_display_mode_from_string(const char* value);
 
 }  // namespace video_server

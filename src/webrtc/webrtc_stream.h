@@ -16,14 +16,14 @@
 
 namespace video_server {
 
-/// One parsed H.264 NAL unit inside an access unit.
+// One parsed H.264 NAL unit inside an access unit.
 struct H264NalUnitInfo {
   uint8_t nal_type{0};
   size_t offset{0};
   size_t size_bytes{0};
 };
 
-/// Parsed summary of an H.264 access unit.
+// Parsed summary of an H.264 access unit.
 struct H264AccessUnitDescriptor {
   bool valid{false};
   bool has_sps{false};
@@ -34,7 +34,7 @@ struct H264AccessUnitDescriptor {
   std::vector<H264NalUnitInfo> nal_units;
 };
 
-/// Snapshot of the encoded sender state for diagnostics.
+// Snapshot of the encoded sender state for diagnostics.
 struct EncodedVideoSenderSnapshot {
   std::string sender_state;
   std::string codec;
@@ -83,7 +83,7 @@ struct EncodedVideoSenderSnapshot {
   std::string video_mid;
 };
 
-/// Snapshot of the media-source bridge state for one session.
+// Snapshot of the media-source bridge state for one session.
 struct WebRtcMediaSourceSnapshot {
   std::string bridge_state;
   std::string preferred_media_path;
@@ -102,23 +102,23 @@ struct WebRtcMediaSourceSnapshot {
   EncodedVideoSenderSnapshot encoded_sender;
 };
 
-/// Bridge interface that exposes latest frame and encoded-unit snapshots to a session.
+// Bridge interface that exposes latest frame and encoded-unit snapshots to a session.
 class IWebRtcMediaSourceBridge {
  public:
   virtual ~IWebRtcMediaSourceBridge() = default;
 
-  /// Publishes the latest transformed frame snapshot.
+  // Publishes the latest transformed frame snapshot.
   virtual void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame) = 0;
-  /// Publishes the latest encoded access-unit snapshot.
+  // Publishes the latest encoded access-unit snapshot.
   virtual void on_latest_encoded_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
-  /// Returns the most recent encoded access-unit snapshot.
+  // Returns the most recent encoded access-unit snapshot.
   virtual std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit() const = 0;
 
-  /// Returns a diagnostic snapshot of the bridge state.
+  // Returns a diagnostic snapshot of the bridge state.
   virtual WebRtcMediaSourceSnapshot snapshot() const = 0;
 };
 
-/// Snapshot of one WebRTC session exposed through signaling inspection.
+// Snapshot of one WebRTC session exposed through signaling inspection.
 struct WebRtcSessionSnapshot {
   std::string stream_id;
   std::string offer_sdp;
@@ -134,44 +134,44 @@ struct WebRtcSessionSnapshot {
   WebRtcMediaSourceSnapshot media_source;
 };
 
-/// Session-side encoded video sender boundary.
+// Session-side encoded video sender boundary.
 class IEncodedVideoSender {
  public:
   virtual ~IEncodedVideoSender() = default;
   // Session-side delivery/packetization boundary for encoded units feeding the browser-facing track.
-  /// Consumes one encoded access-unit snapshot.
+  // Consumes one encoded access-unit snapshot.
   virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
-  /// Applies negotiated H.264 parameters from SDP.
+  // Applies negotiated H.264 parameters from SDP.
   virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
-  /// Deactivates the sender permanently for this session.
+  // Deactivates the sender permanently for this session.
   virtual void deactivate(std::string reason) = 0;
-  /// Returns a diagnostic sender snapshot.
+  // Returns a diagnostic sender snapshot.
   virtual EncodedVideoSenderSnapshot snapshot() const = 0;
 };
 
-/// Minimal sink used to write packetized media to the negotiated video track.
+// Minimal sink used to write packetized media to the negotiated video track.
 class IEncodedVideoTrackSink {
  public:
   virtual ~IEncodedVideoTrackSink() = default;
-  /// Returns true when a track object exists.
+  // Returns true when a track object exists.
   virtual bool exists() const = 0;
-  /// Returns true when the bound track is open for sending.
+  // Returns true when the bound track is open for sending.
   virtual bool is_open() const = 0;
-  /// Returns the MID for the negotiated track when available.
+  // Returns the MID for the negotiated track when available.
   virtual std::string mid() const = 0;
-  /// Sends one already-packetized payload.
+  // Sends one already-packetized payload.
   virtual void send(const std::byte* data, size_t size) = 0;
 };
 
-/// One stream-scoped WebRTC session and sender pipeline.
+// One stream-scoped WebRTC session and sender pipeline.
 class WebRtcStreamSession {
  public:
-  /// Callback used to fetch the latest transformed frame.
+  // Callback used to fetch the latest transformed frame.
   using LatestFrameGetter = std::function<std::shared_ptr<const LatestFrame>(const std::string&)>;
-  /// Callback used to fetch the latest encoded access unit.
+  // Callback used to fetch the latest encoded access unit.
   using LatestEncodedUnitGetter = std::function<std::shared_ptr<const LatestEncodedUnit>(const std::string&)>;
 
-  /// Creates a session for one stream.
+  // Creates a session for one stream.
   WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
                       LatestEncodedUnitGetter latest_encoded_unit_getter);
   ~WebRtcStreamSession();
@@ -179,29 +179,29 @@ class WebRtcStreamSession {
   WebRtcStreamSession(const WebRtcStreamSession&) = delete;
   WebRtcStreamSession& operator=(const WebRtcStreamSession&) = delete;
 
-  /// Applies a remote SDP offer.
+  // Applies a remote SDP offer.
   bool apply_offer(const std::string& offer_sdp, std::string* error_message = nullptr);
-  /// Applies a remote SDP answer.
+  // Applies a remote SDP answer.
   bool apply_answer(const std::string& answer_sdp, std::string* error_message = nullptr);
-  /// Adds a remote ICE candidate.
+  // Adds a remote ICE candidate.
   bool add_remote_candidate(const std::string& candidate_sdp, std::string* error_message = nullptr);
-  /// Publishes the latest transformed frame snapshot to the session.
+  // Publishes the latest transformed frame snapshot to the session.
   void on_latest_frame(std::shared_ptr<const LatestFrame> latest_frame);
-  /// Publishes the latest encoded access-unit snapshot to the session.
+  // Publishes the latest encoded access-unit snapshot to the session.
   void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit);
-  /// Returns the current session snapshot.
+  // Returns the current session snapshot.
   WebRtcSessionSnapshot snapshot() const;
-  /// Stops the session and disconnects the peer.
+  // Stops the session and disconnects the peer.
   void stop();
-  /// Returns true while the session is active.
+  // Returns true while the session is active.
   bool is_active() const;
 
  private:
-  /// Converts a libdatachannel peer state enum to a readable string.
+  // Converts a libdatachannel peer state enum to a readable string.
   static std::string peer_state_to_string(rtc::PeerConnection::State state);
-  /// Transitions the session to an inactive terminal state.
+  // Transitions the session to an inactive terminal state.
   void transition_to_inactive_locked(std::string reason, std::string peer_state_override = "");
-  /// Installs peer-connection callbacks.
+  // Installs peer-connection callbacks.
   void configure_callbacks();
 
   const std::string stream_id_;
@@ -225,9 +225,9 @@ class WebRtcStreamSession {
   std::shared_ptr<std::atomic_bool> callbacks_enabled_;
 };
 
-/// Inspects one encoded unit and summarizes its contained NAL units.
+// Inspects one encoded unit and summarizes its contained NAL units.
 H264AccessUnitDescriptor inspect_h264_access_unit(const LatestEncodedUnit& access_unit);
-/// Creates the H.264 sender implementation used by stream sessions.
+// Creates the H.264 sender implementation used by stream sessions.
 std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
                                                                     uint32_t ssrc);
 

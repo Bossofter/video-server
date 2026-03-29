@@ -6,7 +6,7 @@
 
 namespace video_server {
 
-/// Installs the repo's default spdlog configuration once per process.
+// Installs the repo's default spdlog configuration once per process.
 inline void ensure_default_logging_config() {
   static std::once_flag once;
   std::call_once(once, []() {

@@ -15,7 +15,7 @@ The supported build flow uses the vcpkg CMake toolchain.
 ## 1. Build The Repo
 
 ```bash
-git clone <your-fork-or-copy> video-server
+git clone https://github.com/Bossofter/video-server
 cd video-server
 
 export VCPKG_ROOT=/path/to/vcpkg
