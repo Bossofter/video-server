@@ -9,6 +9,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(GNUInstallDirs)
+
 if(ENABLE_VIDEO_SERVER)
   find_package(FFMPEG REQUIRED COMPONENTS avcodec avutil swscale)
 
@@ -22,18 +24,25 @@ if(ENABLE_VIDEO_SERVER)
 
   target_include_directories(video_server_core
     PUBLIC
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/src/core
       ${CMAKE_CURRENT_SOURCE_DIR}/src/transforms
       ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
+      ${FFMPEG_INCLUDE_DIRS}
   )
-
-  target_include_directories(video_server_core PUBLIC ${FFMPEG_INCLUDE_DIRS})
 
   target_link_libraries(video_server_core
     PUBLIC
       ${FFMPEG_LIBRARIES}
+  )
+
+  install(TARGETS video_server_core
+    EXPORT video_serverTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
 endif()
 
@@ -80,7 +89,8 @@ if(ENABLE_WEBRTC_BACKEND)
 
   target_include_directories(video_server_webrtc
     PUBLIC
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/src/core
       ${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc
@@ -95,6 +105,13 @@ if(ENABLE_WEBRTC_BACKEND)
       LibDataChannel::LibDataChannel
       LibJuice::LibJuice
       libSRTP::srtp2
+  )
+
+  install(TARGETS video_server_webrtc
+    EXPORT video_serverTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
 
   target_include_directories(video_server_nicegui_smoke_server PRIVATE
@@ -120,6 +137,17 @@ if(ENABLE_WEBRTC_BACKEND)
     video_server_soak
   )
 endif()
+
+install(DIRECTORY include/video_server
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "*.h"
+)
+
+install(EXPORT video_serverTargets
+  FILE video_serverTargets.cmake
+  NAMESPACE video_server::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/video_server
+)
 
 if(BUILD_TESTING)
   include(CTest)

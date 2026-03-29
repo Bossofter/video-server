@@ -1,6 +1,6 @@
 {
     "name": "video-server",
-    "version-string": "0.1.0",
+    "version-string": "1.0.0",
     "description": "Portable C++ video streaming subsystem",
     "dependencies": [
         "gtest",
