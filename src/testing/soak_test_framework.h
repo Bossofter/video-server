@@ -27,10 +27,10 @@ namespace video_server
     namespace soak
     {
 
-        // Monotonic clock used by the soak framework.
+        /** @brief Monotonic clock used by the soak framework. */
         using SteadyClock = std::chrono::steady_clock;
 
-        // Static description of one stream used during a soak run.
+        /** @brief Static description of one stream used during a soak run. */
         struct StreamSpec
         {
             std::string stream_id;
@@ -41,7 +41,7 @@ namespace video_server
             VideoPixelFormat pixel_format{VideoPixelFormat::RGB24};
         };
 
-        // Runner configuration for the embedded server, churn, and reports.
+        /** @brief Runner configuration for the embedded server, churn, and reports. */
         struct RunnerOptions
         {
             std::string host{"127.0.0.1"};
@@ -67,7 +67,7 @@ namespace video_server
             std::vector<StreamSpec> streams;
         };
 
-        // Parsed subset of the session HTTP endpoint used by the runner.
+        /** @brief Parsed subset of the session HTTP endpoint used by the runner. */
         struct SessionHttpSnapshot
         {
             uint64_t session_generation{0};
@@ -84,7 +84,7 @@ namespace video_server
             std::string encoded_sender_last_packetization_status;
         };
 
-        // One time-series sample recorded during a soak run.
+        /** @brief One time-series sample recorded during a soak run. */
         struct MetricSample
         {
             double elapsed_seconds{0.0};
@@ -105,7 +105,7 @@ namespace video_server
             std::string last_packetization_status;
         };
 
-        // Failure emitted by the runner's automatic evaluation logic.
+        /** @brief Failure emitted by the runner's automatic evaluation logic. */
         struct FailureRecord
         {
             double elapsed_seconds{0.0};
@@ -114,7 +114,7 @@ namespace video_server
             std::string message;
         };
 
-        // Final per-stream summary for a soak run.
+        /** @brief Final per-stream summary for a soak run. */
         struct StreamRunSummary
         {
             std::string stream_id;
@@ -133,7 +133,7 @@ namespace video_server
             uint64_t final_total_frames_dropped{0};
         };
 
-        // Final run summary including stream coverage and failures.
+        /** @brief Final run summary including stream coverage and failures. */
         struct RunSummary
         {
             double total_duration_seconds{0.0};
@@ -146,7 +146,7 @@ namespace video_server
             std::vector<FailureRecord> failures;
         };
 
-        // Reconnect and config churn coverage for one stream.
+        /** @brief Reconnect and config churn coverage for one stream. */
         struct StreamChurnSummary
         {
             uint64_t reconnect_count{0};
@@ -155,7 +155,7 @@ namespace video_server
             bool config_churn_observed{false};
         };
 
-        // Expected config transition tracked while waiting for application.
+        /** @brief Expected config transition tracked while waiting for application. */
         struct PendingConfigExpectation
         {
             uint64_t previous_generation{0};
@@ -164,7 +164,7 @@ namespace video_server
             SteadyClock::time_point deadline;
         };
 
-        // Internal state used when evaluating one stream over time.
+        /** @brief Internal state used when evaluating one stream over time. */
         struct StreamEvaluationState
         {
             bool expecting_reconnect{false};
@@ -184,35 +184,35 @@ namespace video_server
             std::optional<PendingConfigExpectation> pending_config;
         };
 
-        // Stores metric samples and writes summaries or reports.
+        /** @brief Stores metric samples and writes summaries or reports. */
         class MetricsCollector
         {
         public:
-            // Appends one metric sample.
+            /** @brief Appends one metric sample. */
             void record(const MetricSample &sample);
-            // Returns all recorded metric samples.
+            /** @brief Returns all recorded metric samples. */
             const std::vector<MetricSample> &samples() const { return samples_; }
-            // Builds a final run summary from samples and failures.
+            /** @brief Builds a final run summary from samples and failures. */
             RunSummary build_summary(double total_duration_seconds,
                                      const std::vector<FailureRecord> &failures,
                                      const std::unordered_map<std::string, StreamChurnSummary> &churn_by_stream = {}) const;
-            // Writes a JSON report to disk.
+            /** @brief Writes a JSON report to disk. */
             bool write_json_report(const std::string &path,
                                    double total_duration_seconds,
                                    const std::vector<FailureRecord> &failures,
                                    const std::unordered_map<std::string, StreamChurnSummary> &churn_by_stream = {}) const;
-            // Writes a CSV sample report to disk.
+            /** @brief Writes a CSV sample report to disk. */
             bool write_csv_report(const std::string &path) const;
 
         private:
             std::vector<MetricSample> samples_;
         };
 
-        // Evaluates stream snapshots and emits failure records.
+        /** @brief Evaluates stream snapshots and emits failure records. */
         class FailureDetector
         {
         public:
-            // Evaluates one stream sample and updates the caller-owned state.
+            /** @brief Evaluates one stream sample and updates the caller-owned state. */
             static std::vector<FailureRecord> evaluate_stream(const RunnerOptions &options,
                                                               const StreamDebugSnapshot &debug_snapshot,
                                                               const SessionHttpSnapshot &session_http_snapshot,
@@ -221,25 +221,25 @@ namespace video_server
                                                               StreamEvaluationState &state);
         };
 
-        // Minimal HTTP client used by the soak runner.
+        /** @brief Minimal HTTP client used by the soak runner. */
         class HttpJsonClient
         {
         public:
-            // HTTP response wrapper used by the soak framework.
+            /** @brief HTTP response wrapper used by the soak framework. */
             struct Response
             {
                 int status{0};
                 std::string body;
             };
 
-            // Creates a client for the embedded server host and port.
+            /** @brief Creates a client for the embedded server host and port. */
             HttpJsonClient(std::string host, uint16_t port);
 
-            // Sends a GET request.
+            /** @brief Sends a GET request. */
             Response get(const std::string &path) const;
-            // Sends a POST request.
+            /** @brief Sends a POST request. */
             Response post(const std::string &path, const std::string &body, const std::string &content_type = "application/json") const;
-            // Sends a PUT request.
+            /** @brief Sends a PUT request. */
             Response put(const std::string &path, const std::string &body, const std::string &content_type = "application/json") const;
 
         private:
@@ -252,26 +252,26 @@ namespace video_server
             uint16_t port_{0};
         };
 
-        // Real libdatachannel client session used to exercise the backend.
+        /** @brief Real libdatachannel client session used to exercise the backend. */
         class WebRtcClientSession
         {
         public:
-            // Creates a client bound to one stream id.
+            /** @brief Creates a client bound to one stream id. */
             explicit WebRtcClientSession(std::string stream_id);
             ~WebRtcClientSession();
 
             WebRtcClientSession(const WebRtcClientSession &) = delete;
             WebRtcClientSession &operator=(const WebRtcClientSession &) = delete;
 
-            // Connects to the backend using the signaling HTTP API.
+            /** @brief Connects to the backend using the signaling HTTP API. */
             bool connect(const HttpJsonClient &http_client, std::string *error_message);
-            // Tears down the peer connection.
+            /** @brief Tears down the peer connection. */
             void disconnect();
-            // Polls for answer and ICE updates.
+            /** @brief Polls for answer and ICE updates. */
             void poll(const HttpJsonClient &http_client, std::string *error_message);
 
         private:
-            // Shared callback state captured by async libdatachannel handlers.
+            /** @brief Shared callback state captured by async libdatachannel handlers. */
             struct CallbackState
             {
                 std::mutex mutex;
@@ -287,31 +287,31 @@ namespace video_server
             std::string last_applied_backend_candidate_;
         };
 
-        // Embedded synthetic server plus frame generation threads used by the runner.
+        /** @brief Embedded synthetic server plus frame generation threads used by the runner. */
         class SyntheticServerHarness
         {
         public:
-            // Creates a harness from runner options.
+            /** @brief Creates a harness from runner options. */
             explicit SyntheticServerHarness(RunnerOptions options);
             ~SyntheticServerHarness();
 
             SyntheticServerHarness(const SyntheticServerHarness &) = delete;
             SyntheticServerHarness &operator=(const SyntheticServerHarness &) = delete;
 
-            // Starts the server and all synthetic streams.
+            /** @brief Starts the server and all synthetic streams. */
             bool start(std::string *error_message);
-            // Stops the server and joins worker threads.
+            /** @brief Stops the server and joins worker threads. */
             void stop();
-            // Returns an asynchronous background error when one occurred.
+            /** @brief Returns an asynchronous background error when one occurred. */
             std::optional<std::string> background_error() const;
 
-            // Returns the embedded server instance.
+            /** @brief Returns the embedded server instance. */
             WebRtcVideoServer &server() { return server_; }
-            // Returns the options used to configure the harness.
+            /** @brief Returns the options used to configure the harness. */
             const RunnerOptions &options() const { return options_; }
 
         private:
-            // Runtime state for one synthetic stream.
+            /** @brief Runtime state for one synthetic stream. */
             struct RunningStream
             {
                 explicit RunningStream(const StreamSpec &spec);
@@ -338,34 +338,34 @@ namespace video_server
             std::optional<std::string> background_error_;
         };
 
-        // End-to-end soak runner that coordinates the harness, clients, churn, and reports.
+        /** @brief End-to-end soak runner that coordinates the harness, clients, churn, and reports. */
         class SoakRunner
         {
         public:
-            // Creates a runner from the supplied options.
+            /** @brief Creates a runner from the supplied options. */
             explicit SoakRunner(RunnerOptions options);
 
-            // Executes the run and returns the final summary.
+            /** @brief Executes the run and returns the final summary. */
             RunSummary run();
 
         private:
-            // Connects all client sessions to the embedded server.
+            /** @brief Connects all client sessions to the embedded server. */
             void connect_all_clients();
-            // Disconnects all active client sessions.
+            /** @brief Disconnects all active client sessions. */
             void disconnect_all_clients();
-            // Polls all active client sessions.
+            /** @brief Polls all active client sessions. */
             void poll_clients();
-            // Forces a reconnect cycle for one stream.
+            /** @brief Forces a reconnect cycle for one stream. */
             void trigger_reconnect(StreamSpec &spec);
-            // Applies the next config variant for one stream.
+            /** @brief Applies the next config variant for one stream. */
             void trigger_config_update(StreamSpec &spec);
-            // Builds one metric sample from the latest debug snapshot.
+            /** @brief Builds one metric sample from the latest debug snapshot. */
             MetricSample make_sample(double elapsed_seconds, const StreamDebugSnapshot &snapshot) const;
-            // Fetches and parses the signaling session snapshot for one stream.
+            /** @brief Fetches and parses the signaling session snapshot for one stream. */
             SessionHttpSnapshot fetch_session_snapshot(const std::string &stream_id) const;
-            // Records newly detected failures.
+            /** @brief Records newly detected failures. */
             void record_failures(const std::vector<FailureRecord> &failures);
-            // Returns true when the run has already failed.
+            /** @brief Returns true when the run has already failed. */
             bool has_failures() const { return !failures_.empty(); }
 
             RunnerOptions options_;
@@ -378,13 +378,13 @@ namespace video_server
             std::unordered_map<std::string, size_t> config_variant_index_;
         };
 
-        // Parses runner CLI options or returns an error description.
+        /** @brief Parses runner CLI options or returns an error description. */
         std::optional<RunnerOptions> parse_runner_options(int argc, char **argv, std::string *error_message);
-        // Returns the default stream set used by the runner.
+        /** @brief Returns the default stream set used by the runner. */
         std::vector<StreamSpec> default_stream_specs();
-        // Parses a duration like 5s, 1m, or 2h.
+        /** @brief Parses a duration like 5s, 1m, or 2h. */
         std::optional<std::chrono::milliseconds> parse_duration_to_millis(const std::string &value);
-        // Parses the session endpoint JSON into the runner's HTTP snapshot type.
+        /** @brief Parses the session endpoint JSON into the runner's HTTP snapshot type. */
         SessionHttpSnapshot parse_session_http_snapshot(const std::string &json);
 
     } // namespace soak

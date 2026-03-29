@@ -7,13 +7,20 @@
 
 namespace video_server {
 
-// Encoded HTTP payload returned by the latest-frame endpoint.
+/**
+ * @brief Encoded HTTP payload returned by the latest-frame endpoint.
+ */
 struct EncodedFramePayload {
-  std::string body;
-  std::string content_type;
+  std::string body;          /**< Serialized response body. */
+  std::string content_type;  /**< MIME content type of the encoded payload. */
 };
 
-// Encodes a transformed latest frame snapshot as a PPM payload.
+/**
+ * @brief Encodes a transformed latest frame snapshot as a PPM payload.
+ *
+ * @param frame Latest transformed frame snapshot to encode.
+ * @return Encoded payload when conversion succeeded, otherwise `std::nullopt`.
+ */
 std::optional<EncodedFramePayload> encode_latest_frame_as_ppm(const LatestFrame& frame);
 
 }  // namespace video_server

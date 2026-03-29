@@ -2,48 +2,71 @@
 
 #include <atomic>
 #include <functional>
-#include <unordered_map>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace video_server {
 
-// Parsed HTTP request passed to the API handler callback.
+/**
+ * @brief Parsed HTTP request passed to the API handler callback.
+ */
 struct HttpRequest {
-  std::string method;
-  std::string path;
-  std::string body;
-  std::string remote_address;
-  std::unordered_map<std::string, std::string> headers;
+  std::string method;                                    /**< HTTP method. */
+  std::string path;                                      /**< Request path without query string. */
+  std::string body;                                      /**< Request body payload. */
+  std::string remote_address;                            /**< Remote client address. */
+  std::unordered_map<std::string, std::string> headers;  /**< Request headers. */
 };
 
-// HTTP response returned by the API handler callback.
+/**
+ * @brief HTTP response returned by the API handler callback.
+ */
 struct HttpResponse {
-  int status{200};
-  std::string body;
-  std::string content_type{"application/json"};
-  std::unordered_map<std::string, std::string> headers;
+  int status{200};                                       /**< HTTP status code. */
+  std::string body;                                      /**< Response body payload. */
+  std::string content_type{"application/json"};         /**< Response MIME content type. */
+  std::unordered_map<std::string, std::string> headers;  /**< Response headers. */
 };
 
-// Minimal blocking HTTP server used by the WebRTC backend.
+/**
+ * @brief Minimal blocking HTTP server used by the WebRTC backend.
+ */
 class HttpApiServer {
  public:
-  // Handler invoked once a request has been parsed.
+  /** @brief Handler invoked once a request has been parsed. */
   using Handler = std::function<HttpResponse(const HttpRequest&)>;
 
-  // Creates a server bound to the supplied host and port.
+  /**
+   * @brief Creates a server bound to the supplied host and port.
+   *
+   * @param host Bind host.
+   * @param port Bind port.
+   * @param max_request_bytes Maximum accepted request size.
+   */
   HttpApiServer(std::string host, uint16_t port, size_t max_request_bytes = 262144);
   ~HttpApiServer();
 
-  // Starts the server loop with the provided request handler.
+  /**
+   * @brief Starts the server loop with the provided request handler.
+   *
+   * @param handler Request handler callback.
+   * @return True when startup succeeded, false otherwise.
+   */
   bool start(Handler handler);
-  // Stops the server loop and joins the worker thread.
+
+  /** @brief Stops the server loop and joins the worker thread. */
   void stop();
 
  private:
-  // Accept loop for incoming connections.
+  /** @brief Accept loop for incoming connections. */
   void run_loop();
-  // Handles one connected client.
+  /**
+   * @brief Handles one connected client.
+   *
+   * @param client_fd Accepted socket descriptor.
+   * @param remote_address Remote address string for the client.
+   */
   void handle_client(int client_fd, const std::string& remote_address) const;
 
   std::string host_;
