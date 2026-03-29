@@ -12,6 +12,7 @@
 
 namespace video_server {
 
+/// Immutable snapshot of the latest encoded unit for a stream.
 struct LatestEncodedUnit {
   std::vector<uint8_t> bytes;
   VideoCodec codec{VideoCodec::H264};
@@ -22,6 +23,7 @@ struct LatestEncodedUnit {
   bool valid{false};
 };
 
+/// Immutable snapshot of the latest transformed frame for a stream.
 struct LatestFrame {
   std::vector<uint8_t> bytes;
   uint32_t width{0};
@@ -32,6 +34,7 @@ struct LatestFrame {
   bool valid{false};
 };
 
+/// Core in-memory implementation of stream state, transforms, and latest snapshots.
 class VideoServerCore : public IVideoServer {
  public:
   bool register_stream(const StreamConfig& config) override;
@@ -44,12 +47,17 @@ class VideoServerCore : public IVideoServer {
                                 const StreamOutputConfig& output_config) override;
   std::optional<StreamOutputConfig> get_stream_output_config(const std::string& stream_id) const override;
 
+  /// Returns the latest transformed frame snapshot for a stream.
   std::shared_ptr<const LatestFrame> get_latest_frame_for_stream(const std::string& stream_id) const;
+  /// Returns the latest encoded access-unit snapshot for a stream.
   std::shared_ptr<const LatestEncodedUnit> get_latest_encoded_unit_for_stream(const std::string& stream_id) const;
+  /// Returns a debug snapshot for one stream when present.
   std::optional<StreamDebugSnapshot> get_stream_debug_snapshot(const std::string& stream_id) const;
+  /// Returns debug snapshots for all streams.
   std::vector<StreamDebugSnapshot> list_stream_debug_snapshots() const;
 
  public:
+  /// Mutable state tracked for one registered stream.
   struct StreamState {
     VideoStreamInfo info;
     std::shared_ptr<const LatestFrame> latest_frame;
@@ -58,10 +66,15 @@ class VideoServerCore : public IVideoServer {
   };
 
  private:
+  /// Validates supported rotation values.
   static bool is_valid_rotation(int degrees);
+  /// Validates requested output dimensions.
   static bool is_valid_output_dimensions(uint32_t width, uint32_t height);
+  /// Validates requested output FPS.
   static bool is_valid_output_fps(double fps);
+  /// Checks whether the input pixel format is supported by the core.
   static bool is_supported_input_pixel_format(VideoPixelFormat pixel_format);
+  /// Returns bytes per pixel for packed formats handled directly by the core.
   static uint32_t bytes_per_pixel(VideoPixelFormat pixel_format);
 
   mutable std::mutex mutex_;

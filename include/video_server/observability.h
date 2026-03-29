@@ -8,6 +8,7 @@
 
 namespace video_server {
 
+/// Sender-side counters exposed for diagnostics and soak reporting.
 struct SenderDebugCounters {
   uint64_t delivered_units{0};
   uint64_t duplicate_units_skipped{0};
@@ -27,6 +28,7 @@ struct SenderDebugCounters {
   uint64_t skipped_startup_idr_wait{0};
 };
 
+/// Debug view of the current WebRTC session state for a stream.
 struct StreamSessionDebugSnapshot {
   uint64_t session_generation{0};
   std::string stream_id;
@@ -48,6 +50,7 @@ struct StreamSessionDebugSnapshot {
   SenderDebugCounters counters;
 };
 
+/// Debug snapshot for one stream, including runtime config and session state.
 struct StreamDebugSnapshot {
   std::string stream_id;
   std::string label;
@@ -78,6 +81,7 @@ struct StreamDebugSnapshot {
   std::optional<StreamSessionDebugSnapshot> current_session;
 };
 
+/// Debug snapshot for the whole server instance.
 struct ServerDebugSnapshot {
   uint64_t stream_count{0};
   uint64_t active_session_count{0};

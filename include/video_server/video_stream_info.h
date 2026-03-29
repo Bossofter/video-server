@@ -10,6 +10,7 @@
 
 namespace video_server {
 
+/// Public stream status snapshot returned by the server APIs.
 struct VideoStreamInfo {
   std::string stream_id;
   std::string label;

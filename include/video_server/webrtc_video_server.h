@@ -9,6 +9,7 @@
 
 namespace video_server {
 
+/// WebRTC and HTTP server configuration for the browser delivery backend.
 struct WebRtcVideoServerConfig {
   std::string http_host{"127.0.0.1"};
   uint16_t http_port{8080};
@@ -33,21 +34,26 @@ struct WebRtcVideoServerConfig {
   uint32_t debug_rate_limit_max_requests{60};
 };
 
+/// Lightweight HTTP response container used by test helpers.
 struct WebRtcHttpResponse {
   int status{200};
   std::string body;
   std::unordered_map<std::string, std::string> headers;
 };
 
+/// IVideoServer implementation with HTTP and WebRTC browser delivery support.
 class WebRtcVideoServer : public IVideoServer {
  public:
+  /// Creates a server instance with the supplied configuration.
   explicit WebRtcVideoServer(WebRtcVideoServerConfig config = {});
   ~WebRtcVideoServer() override;
 
   WebRtcVideoServer(const WebRtcVideoServer&) = delete;
   WebRtcVideoServer& operator=(const WebRtcVideoServer&) = delete;
 
+  /// Starts the HTTP and backend services.
   bool start();
+  /// Stops the server and releases active sessions.
   void stop();
 
   bool register_stream(const StreamConfig& config) override;
@@ -60,10 +66,12 @@ class WebRtcVideoServer : public IVideoServer {
                                 const StreamOutputConfig& output_config) override;
   std::optional<StreamOutputConfig> get_stream_output_config(const std::string& stream_id) const override;
 
+  /// Handles a synthetic HTTP request without opening a socket, for tests.
   WebRtcHttpResponse handle_http_request_for_test(const std::string& method, const std::string& path,
                                                   const std::string& body = "",
                                                   std::unordered_map<std::string, std::string> headers = {},
                                                   std::string remote_address = "127.0.0.1");
+  /// Returns the current debug snapshot for the full server.
   ServerDebugSnapshot get_debug_snapshot() const;
 
  private:
