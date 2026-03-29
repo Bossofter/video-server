@@ -70,6 +70,14 @@ if(ENABLE_WEBRTC_BACKEND)
     examples/nicegui_smoke/synthetic_webrtc_smoke_server.cpp
   )
 
+  add_library(video_server_soak
+    src/testing/soak_test_framework.cpp
+  )
+
+  add_executable(video_server_soak_runner
+    tools/video_server_soak_runner.cpp
+  )
+
   target_include_directories(video_server_webrtc
     PUBLIC
       ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -93,8 +101,23 @@ if(ENABLE_WEBRTC_BACKEND)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
   )
 
+  target_include_directories(video_server_soak PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/transforms
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/webrtc
+  )
+
   target_link_libraries(video_server_nicegui_smoke_server PRIVATE
     video_server_webrtc
+  )
+
+  target_link_libraries(video_server_soak
+    PUBLIC
+      video_server_webrtc
+  )
+
+  target_link_libraries(video_server_soak_runner PRIVATE
+    video_server_soak
   )
 endif()
 
@@ -111,6 +134,7 @@ if(BUILD_TESTING)
     tests/test_raw_pipeline.cpp
     tests/test_webrtc_http.cpp
     tests/test_webrtc_stream.cpp
+    tests/test_soak_framework.cpp
   )
 
   add_executable(video_server_tests ${TEST_SOURCES})
@@ -125,7 +149,7 @@ if(BUILD_TESTING)
   target_link_libraries(video_server_tests PRIVATE GTest::gtest)
 
   if(ENABLE_WEBRTC_BACKEND)
-    target_link_libraries(video_server_tests PRIVATE video_server_webrtc)
+    target_link_libraries(video_server_tests PRIVATE video_server_webrtc video_server_soak)
   else()
     target_link_libraries(video_server_tests PRIVATE video_server_core)
   endif()
