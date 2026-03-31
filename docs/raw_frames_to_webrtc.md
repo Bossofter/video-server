@@ -66,6 +66,8 @@ The preferred producer-facing path is now:
 - raw-to-H.264 encode
 - forwarding encoded output into the existing WebRTC delivery path
 
+When `max_streams_per_step` is set, it limits streams that were actually progressed during that call to `step()`. Idle or not-due streams do not consume the budget.
+
 ## Minimal Example
 
 ```cpp
@@ -97,6 +99,7 @@ execution_mode = "manual_step"
 http_poll_timeout_ms = 5
 
 [webrtc]
+execution_mode = "manual_step"
 http_host = "127.0.0.1"
 http_port = 8080
 
@@ -111,6 +114,13 @@ input_pixel_format = "RGB24"
 [default_raw_pipelines.default]
 encoder = "automatic"
 ```
+
+Notes:
+
+- `ManagedVideoServerConfig.execution_mode` controls the outer managed policy: `manual_step`, `inline_on_push`, or `worker_thread`
+- `webrtc.execution_mode` must stay `manual_step` in the managed path because the managed server owns HTTP pumping explicitly
+- `http_poll_timeout_ms` is mirrored into `webrtc.http_poll_timeout_ms`; if both are supplied they must match
+- the managed TOML loader supports the full meaningful `WebRtcVideoServerConfig` HTTP/security/rate-limit surface
 
 ## Lower-Level Split Path
 
@@ -220,7 +230,7 @@ See:
 
 Useful example code:
 
-- synthetic server that registers streams and runs the shared raw-to-H.264 pipeline:
+- synthetic server that loads the managed config and runs a single-threaded `push_frame(...)` + `step()` loop:
   - `examples/nicegui_smoke/synthetic_webrtc_smoke_server.cpp`
 - browser harness that connects and renders video:
   - `examples/nicegui_smoke/app.py`

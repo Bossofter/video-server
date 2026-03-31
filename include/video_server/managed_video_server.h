@@ -18,8 +18,16 @@ namespace video_server
      */
     struct ManagedVideoServerConfig
     {
+        static WebRtcVideoServerConfig default_webrtc_config()
+        {
+            WebRtcVideoServerConfig config;
+            config.execution_mode = ExecutionMode::ManualStep;
+            config.http_poll_timeout_ms = 5;
+            return config;
+        }
+
         ExecutionMode execution_mode{ExecutionMode::ManualStep}; /**< Execution policy for progression. */
-        WebRtcVideoServerConfig webrtc;                          /**< WebRTC/HTTP backend settings. */
+        WebRtcVideoServerConfig webrtc{default_webrtc_config()}; /**< WebRTC/HTTP backend settings. */
         std::vector<StreamConfig> streams;                       /**< Streams loaded during startup. */
         std::unordered_map<std::string, RawVideoPipelineConfig> default_raw_pipelines; /**< Default per-stream pipeline configs. */
         uint32_t http_poll_timeout_ms{5};                        /**< HTTP pump timeout used by stepped progression. */

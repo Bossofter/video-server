@@ -1,6 +1,8 @@
 #include "video_server/managed_video_server.h"
 
 #include <atomic>
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -204,6 +206,27 @@ namespace video_server
             return config;
         }
 
+        std::vector<std::string> parse_string_array(const toml::table &table, const char *key)
+        {
+            std::vector<std::string> values;
+            const auto *array = table.get_as<toml::array>(key);
+            if (array == nullptr)
+            {
+                return values;
+            }
+            values.reserve(array->size());
+            for (const auto &entry : *array)
+            {
+                const auto value = entry.value<std::string>();
+                if (!value.has_value())
+                {
+                    throw std::runtime_error(std::string(key) + " entries must be strings");
+                }
+                values.push_back(*value);
+            }
+            return values;
+        }
+
         size_t frame_storage_size(const VideoFrameView &frame)
         {
             switch (frame.pixel_format)
@@ -228,14 +251,7 @@ namespace video_server
         public:
             explicit ManagedVideoServer(ManagedVideoServerConfig config)
                 : config_(std::move(config)),
-                  server_([this]()
-                          {
-                              WebRtcVideoServerConfig server_config = config_.webrtc;
-                              server_config.execution_mode = ExecutionMode::ManualStep;
-                              server_config.http_poll_timeout_ms = config_.http_poll_timeout_ms;
-                              server_config.max_http_connections_per_step = 1;
-                              return server_config;
-                          }())
+                  server_(validated_webrtc_config(config_))
             {
                 for (const auto &stream : config_.streams)
                 {
@@ -307,27 +323,49 @@ namespace video_server
                 }
 
                 std::vector<std::string> stream_ids;
+                size_t start_index = 0;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    stream_ids.reserve(streams_.size());
-                    for (const auto &[stream_id, _] : streams_)
+                    if (stream_order_.empty())
                     {
-                        stream_ids.push_back(stream_id);
+                        return true;
                     }
+                    stream_ids = stream_order_;
+                    start_index = next_stream_index_ % stream_ids.size();
                 }
 
                 size_t processed = 0;
-                for (const auto &stream_id : stream_ids)
+                size_t last_processed_cursor = start_index;
+                bool progressed_any = false;
+                for (size_t offset = 0; offset < stream_ids.size(); ++offset)
                 {
+                    const size_t index = (start_index + offset) % stream_ids.size();
+                    const auto &stream_id = stream_ids[index];
                     if (config_.max_streams_per_step > 0 && processed >= config_.max_streams_per_step)
                     {
                         break;
                     }
-                    if (!process_stream(stream_id))
+
+                    const auto result = process_stream(stream_id);
+                    if (result == StreamStepResult::Failed)
                     {
                         return false;
                     }
-                    ++processed;
+                    if (result == StreamStepResult::Progressed)
+                    {
+                        ++processed;
+                        progressed_any = true;
+                        last_processed_cursor = (index + 1) % stream_ids.size();
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!stream_order_.empty())
+                    {
+                        next_stream_index_ = progressed_any ? (last_processed_cursor % stream_order_.size())
+                                                           : ((start_index + 1) % stream_order_.size());
+                    }
                 }
                 return true;
             }
@@ -372,6 +410,15 @@ namespace video_server
                 if (it->second.registered_with_server)
                 {
                     server_.remove_stream(stream_id);
+                }
+                stream_order_.erase(std::remove(stream_order_.begin(), stream_order_.end(), stream_id), stream_order_.end());
+                if (!stream_order_.empty())
+                {
+                    next_stream_index_ %= stream_order_.size();
+                }
+                else
+                {
+                    next_stream_index_ = 0;
                 }
                 streams_.erase(it);
                 return true;
@@ -427,7 +474,7 @@ namespace video_server
                     {
                         return false;
                     }
-                    return process_stream(stream_id);
+                    return process_stream(stream_id) != StreamStepResult::Failed;
                 }
                 return true;
             }
@@ -485,6 +532,32 @@ namespace video_server
                 bool registered_with_server{false};
             };
 
+            enum class StreamStepResult
+            {
+                Idle,
+                Progressed,
+                Failed
+            };
+
+            static WebRtcVideoServerConfig validated_webrtc_config(const ManagedVideoServerConfig &config)
+            {
+                if (config.webrtc.execution_mode != ExecutionMode::ManualStep)
+                {
+                    throw std::invalid_argument(
+                        "managed server requires webrtc.execution_mode=ManualStep; use ManagedVideoServerConfig.execution_mode for outer progression policy");
+                }
+                if (config.webrtc.http_poll_timeout_ms != config.http_poll_timeout_ms)
+                {
+                    throw std::invalid_argument(
+                        "managed server requires http_poll_timeout_ms and webrtc.http_poll_timeout_ms to match");
+                }
+                if (config.webrtc.max_http_connections_per_step == 0)
+                {
+                    throw std::invalid_argument("managed server requires webrtc.max_http_connections_per_step >= 1");
+                }
+                return config.webrtc;
+            }
+
             void add_stream_state_locked(const StreamConfig &config)
             {
                 ManagedStreamState state;
@@ -500,6 +573,7 @@ namespace video_server
                     state.pipeline_template = default_it->second;
                 }
                 streams_.emplace(config.stream_id, std::move(state));
+                stream_order_.push_back(config.stream_id);
             }
 
             RawVideoPipelineConfig make_effective_pipeline_config(const ManagedStreamState &state,
@@ -557,7 +631,7 @@ namespace video_server
                 return true;
             }
 
-            bool process_stream(const std::string &stream_id)
+            StreamStepResult process_stream(const std::string &stream_id)
             {
                 StreamOutputConfig output_config;
                 PendingFrame pending;
@@ -566,20 +640,20 @@ namespace video_server
                     auto it = streams_.find(stream_id);
                     if (it == streams_.end() || !it->second.pending_frame.has_value())
                     {
-                        return true;
+                        return StreamStepResult::Idle;
                     }
 
                     const auto output_config_opt = server_.get_stream_output_config(stream_id);
                     if (!output_config_opt.has_value())
                     {
-                        return false;
+                        return StreamStepResult::Failed;
                     }
                     output_config = *output_config_opt;
 
                     if (output_config.output_fps > 0.0 && it->second.next_due_timestamp_ns > 0 &&
                         it->second.pending_frame->timestamp_ns < it->second.next_due_timestamp_ns)
                     {
-                        return true;
+                        return StreamStepResult::Idle;
                     }
 
                     pending = std::move(*it->second.pending_frame);
@@ -600,7 +674,7 @@ namespace video_server
                 if (!apply_display_transform(pending.view(), output_config, transformed))
                 {
                     server_.note_frame_dropped(stream_id);
-                    return true;
+                    return StreamStepResult::Progressed;
                 }
 
                 {
@@ -608,11 +682,11 @@ namespace video_server
                     auto it = streams_.find(stream_id);
                     if (it == streams_.end())
                     {
-                        return false;
+                        return StreamStepResult::Failed;
                     }
                     if (!ensure_pipeline(stream_id, it->second, output_config, transformed.width, transformed.height))
                     {
-                        return false;
+                        return StreamStepResult::Failed;
                     }
 
                     const VideoFrameView transformed_view{
@@ -627,12 +701,16 @@ namespace video_server
                     if (!it->second.pipeline->push_frame(transformed_view, &error))
                     {
                         spdlog::error("managed pipeline encode failed for {}: {}", stream_id, error);
-                        return false;
+                        return StreamStepResult::Failed;
                     }
                 }
 
-                return server_.publish_transformed_frame(stream_id, transformed.rgb, transformed.width, transformed.height,
-                                                         pending.timestamp_ns, pending.frame_id);
+                if (!server_.publish_transformed_frame(stream_id, transformed.rgb, transformed.width, transformed.height,
+                                                       pending.timestamp_ns, pending.frame_id))
+                {
+                    return StreamStepResult::Failed;
+                }
+                return StreamStepResult::Progressed;
             }
 
             void worker_loop()
@@ -643,6 +721,10 @@ namespace video_server
                     {
                         break;
                     }
+                    if (!config_.webrtc.enable_http_api)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(std::max<uint32_t>(1, config_.http_poll_timeout_ms)));
+                    }
                 }
             }
 
@@ -650,9 +732,11 @@ namespace video_server
             WebRtcVideoServer server_;
             mutable std::mutex mutex_;
             std::unordered_map<std::string, ManagedStreamState> streams_;
+            std::vector<std::string> stream_order_;
             std::atomic<bool> stop_requested_{false};
             std::thread worker_thread_;
             bool started_{false};
+            size_t next_stream_index_{0};
         };
 
     } // namespace
@@ -661,6 +745,8 @@ namespace video_server
     {
         const toml::table table = toml::parse_file(config_path);
         ManagedVideoServerConfig config;
+        bool saw_top_level_http_poll_timeout = false;
+        bool saw_nested_http_poll_timeout = false;
 
         if (const auto execution_mode = table_value<std::string>(table, "execution_mode"))
         {
@@ -671,7 +757,11 @@ namespace video_server
             }
             config.execution_mode = *parsed;
         }
-        config.http_poll_timeout_ms = table["http_poll_timeout_ms"].value_or(config.http_poll_timeout_ms);
+        if (const auto value = table_value<uint32_t>(table, "http_poll_timeout_ms"))
+        {
+            config.http_poll_timeout_ms = *value;
+            saw_top_level_http_poll_timeout = true;
+        }
         config.max_streams_per_step = table["max_streams_per_step"].value_or(config.max_streams_per_step);
 
         if (const auto *webrtc = table["webrtc"].as_table())
@@ -696,6 +786,15 @@ namespace video_server
             {
                 config.webrtc.enable_runtime_config_api = *value;
             }
+            if (const auto value = table_value<std::string>(*webrtc, "execution_mode"))
+            {
+                const auto parsed = parse_execution_mode(*value);
+                if (!parsed.has_value())
+                {
+                    throw std::runtime_error("invalid webrtc.execution_mode: " + *value);
+                }
+                config.webrtc.execution_mode = *parsed;
+            }
             if (const auto value = table_value<bool>(*webrtc, "allow_unsafe_public_routes"))
             {
                 config.webrtc.allow_unsafe_public_routes = *value;
@@ -708,10 +807,76 @@ namespace video_server
             {
                 config.webrtc.shared_key = *value;
             }
+            config.webrtc.ip_allowlist = parse_string_array(*webrtc, "ip_allowlist");
+            config.webrtc.cors_allowed_origins = parse_string_array(*webrtc, "cors_allowed_origins");
             if (const auto value = table_value<size_t>(*webrtc, "max_http_request_bytes"))
             {
                 config.webrtc.max_http_request_bytes = *value;
             }
+            if (const auto value = table_value<size_t>(*webrtc, "max_json_body_bytes"))
+            {
+                config.webrtc.max_json_body_bytes = *value;
+            }
+            if (const auto value = table_value<size_t>(*webrtc, "max_signaling_sdp_bytes"))
+            {
+                config.webrtc.max_signaling_sdp_bytes = *value;
+            }
+            if (const auto value = table_value<size_t>(*webrtc, "max_signaling_candidate_bytes"))
+            {
+                config.webrtc.max_signaling_candidate_bytes = *value;
+            }
+            if (const auto value = table_value<size_t>(*webrtc, "max_pending_candidates_per_stream"))
+            {
+                config.webrtc.max_pending_candidates_per_stream = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "signaling_rate_limit_window_seconds"))
+            {
+                config.webrtc.signaling_rate_limit_window_seconds = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "signaling_rate_limit_max_requests"))
+            {
+                config.webrtc.signaling_rate_limit_max_requests = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "config_rate_limit_window_seconds"))
+            {
+                config.webrtc.config_rate_limit_window_seconds = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "config_rate_limit_max_requests"))
+            {
+                config.webrtc.config_rate_limit_max_requests = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "debug_rate_limit_window_seconds"))
+            {
+                config.webrtc.debug_rate_limit_window_seconds = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "debug_rate_limit_max_requests"))
+            {
+                config.webrtc.debug_rate_limit_max_requests = *value;
+            }
+            if (const auto value = table_value<uint32_t>(*webrtc, "http_poll_timeout_ms"))
+            {
+                config.webrtc.http_poll_timeout_ms = *value;
+                saw_nested_http_poll_timeout = true;
+            }
+            if (const auto value = table_value<size_t>(*webrtc, "max_http_connections_per_step"))
+            {
+                config.webrtc.max_http_connections_per_step = *value;
+            }
+        }
+
+        if (saw_top_level_http_poll_timeout && saw_nested_http_poll_timeout &&
+            config.http_poll_timeout_ms != config.webrtc.http_poll_timeout_ms)
+        {
+            throw std::runtime_error(
+                "http_poll_timeout_ms and webrtc.http_poll_timeout_ms must match when both are provided");
+        }
+        if (saw_top_level_http_poll_timeout && !saw_nested_http_poll_timeout)
+        {
+            config.webrtc.http_poll_timeout_ms = config.http_poll_timeout_ms;
+        }
+        else if (!saw_top_level_http_poll_timeout && saw_nested_http_poll_timeout)
+        {
+            config.http_poll_timeout_ms = config.webrtc.http_poll_timeout_ms;
         }
 
         if (const auto *streams = table["streams"].as_array())

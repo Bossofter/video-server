@@ -47,6 +47,8 @@ During `step()`, the managed server:
 
 This keeps debug/latest-frame output aligned with encoded output.
 
+When a managed config sets `max_streams_per_step`, that budget applies to streams that were actually progressed during the step. Streams that are idle or not yet due are skipped without consuming the budget, and the starting point rotates so ready streams are not starved by iteration order.
+
 ### Encoded access units
 
 Encoded H.264 data is stored as the latest immutable access-unit snapshot per stream. The WebRTC sender consumes those snapshots and packetizes them for browser delivery.
