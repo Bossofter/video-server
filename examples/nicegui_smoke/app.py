@@ -29,7 +29,7 @@ DEFAULT_SMOKE_BINARY = ROOT / 'build' / 'video_server_nicegui_smoke_server'
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='NiceGUI smoke harness for the video-server WebRTC H264 path.')
-    parser.add_argument('--video-server-url', default='http://0.0.0.0:8080', help='Base URL for the running video server.')
+    parser.add_argument('--video-server-url', default='http://127.0.0.1:8080', help='Base URL for the running video server.')
     parser.add_argument('--stream-id', default='synthetic-h264', help='Synthetic stream id to consume.')
     parser.add_argument('--stream', action='append', default=[], help='Repeatable multi-stream demo spec: id:width:height:fps[:label].')
     parser.add_argument('--multi-stream-demo', action='store_true', help='Launch the default alpha/bravo/charlie multi-stream demo set.')
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--ui-port', type=int, default=8090, help='NiceGUI port.')
     parser.add_argument('--start-server', action='store_true', help='Launch the smoke C++ server executable automatically.')
     parser.add_argument('--smoke-binary', default=str(DEFAULT_SMOKE_BINARY), help='Path to the smoke server executable.')
-    parser.add_argument('--server-host', default='0.0.0.0', help='Host to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--server-host', default='127.0.0.1', help='Host to pass to the smoke server when --start-server is used.')
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
     parser.add_argument('--lan-only', action='store_true', help='Enable LAN smoke mode: allow remote signaling/config/debug access on the launched smoke server.')
     parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
@@ -1663,7 +1663,7 @@ PAGE_HTML = """
         </div>
         <button id="close-settings" class="toolbar-button small">Close</button>
       </div>
-      <label>Server URL<input id="config-server-url" type="text" placeholder="http://0.0.0.0:8080"></label>
+      <label>Server URL<input id="config-server-url" type="text" placeholder="http://127.0.0.1:8080"></label>
       <label>Stream ID<input id="config-stream-id" type="text" placeholder="synthetic-h264"></label>
       <label>Session poll interval (ms)<input id="config-session-poll-ms" type="number" min="200" step="100"></label>
       <label>Log filter
