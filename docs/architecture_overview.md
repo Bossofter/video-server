@@ -6,6 +6,13 @@ This project has a simple top-level shape:
 raw frames or H.264 access units
             |
             v
+  Managed step / execution policy
+            |
+            +--> HTTP/WebRTC signaling pump
+            +--> output FPS cadence decision
+            +--> display transform
+            +--> H.264 encode
+            v
       VideoServerCore
             |
             +--> latest transformed RGB snapshot
@@ -23,32 +30,24 @@ raw frames or H.264 access units
 
 ## Main Pieces
 
-### Raw frame ingestion
+### Managed raw frame ingestion
 
-Producers can push `VideoFrameView` frames into the server. The core validates the stream, validates the frame shape, applies the active `StreamOutputConfig`, and stores the latest transformed RGB snapshot.
+The preferred path is a managed server with an execution policy. Producers push `VideoFrameView` frames ad hoc, and `step()` progresses the server. In `ManualStep`, no internal worker thread is required.
 
 ### Filter and output stage
 
-The transform stage applies the current per-stream output settings:
+During `step()`, the managed server:
 
-- display mode
-- mirroring
-- rotation
-- palette range
-- output resize
-- output FPS throttling
+- services pending HTTP/signaling work
+- checks per-stream output timing
+- picks the latest pending raw frame for ready streams
+- applies the current `StreamOutputConfig`
+- publishes the transformed RGB result as the canonical latest-frame snapshot
+- encodes H.264 from that same transformed result
 
-These settings affect the next admitted frame for that stream.
+This keeps debug/latest-frame output aligned with encoded output.
 
-### Raw -> H.264 pipeline
-
-For browser playback, the repo includes a raw-to-H.264 pipeline:
-
-```text
-raw input -> transform result -> H.264 encoder -> Annex-B access units -> push_access_unit(...)
-```
-
-The synthetic smoke server uses this path today.
+When a managed config sets `max_streams_per_step`, that budget applies to streams that were actually progressed during the step. Streams that are idle or not yet due are skipped without consuming the budget, and the starting point rotates so ready streams are not starved by iteration order.
 
 ### Encoded access units
 

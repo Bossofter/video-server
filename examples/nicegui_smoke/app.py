@@ -29,7 +29,7 @@ DEFAULT_SMOKE_BINARY = ROOT / 'build' / 'video_server_nicegui_smoke_server'
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='NiceGUI smoke harness for the video-server WebRTC H264 path.')
-    parser.add_argument('--video-server-url', default='http://0.0.0.0:8080', help='Base URL for the running video server.')
+    parser.add_argument('--video-server-url', default='http://127.0.0.1:8080', help='Base URL for the running video server.')
     parser.add_argument('--stream-id', default='synthetic-h264', help='Synthetic stream id to consume.')
     parser.add_argument('--stream', action='append', default=[], help='Repeatable multi-stream demo spec: id:width:height:fps[:label].')
     parser.add_argument('--multi-stream-demo', action='store_true', help='Launch the default alpha/bravo/charlie multi-stream demo set.')
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--ui-port', type=int, default=8090, help='NiceGUI port.')
     parser.add_argument('--start-server', action='store_true', help='Launch the smoke C++ server executable automatically.')
     parser.add_argument('--smoke-binary', default=str(DEFAULT_SMOKE_BINARY), help='Path to the smoke server executable.')
-    parser.add_argument('--server-host', default='0.0.0.0', help='Host to pass to the smoke server when --start-server is used.')
+    parser.add_argument('--server-host', default='127.0.0.1', help='Host to pass to the smoke server when --start-server is used.')
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
     parser.add_argument('--lan-only', action='store_true', help='Enable LAN smoke mode: allow remote signaling/config/debug access on the launched smoke server.')
     parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
@@ -119,13 +119,27 @@ def patch_nicegui_build_response() -> None:
 patch_nicegui_build_response()
 
 
-def proxy_target_url(base: str, path: str) -> str:
+def proxy_target_url(base: str, path: str, request_host: str = '') -> str:
     parsed = urlparse(base)
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
         raise ValueError(f'invalid proxy base URL: {base!r}')
     if not path.startswith('/api/video/'):
         raise ValueError(f'invalid proxy path: {path!r}')
-    return urljoin(base.rstrip('/') + '/', path.lstrip('/'))
+
+    target_host = (parsed.hostname or '').strip().lower()
+    normalized_request_host = request_host.strip().lower()
+    if normalized_request_host.startswith('[') and normalized_request_host.endswith(']'):
+        normalized_request_host = normalized_request_host[1:-1]
+
+    if normalized_request_host and target_host == normalized_request_host and target_host not in {
+        '127.0.0.1',
+        'localhost',
+        '::1',
+    }:
+        loopback_netloc = f'127.0.0.1:{parsed.port}' if parsed.port else '127.0.0.1'
+        parsed = parsed._replace(netloc=loopback_netloc)
+
+    return urljoin(parsed.geturl().rstrip('/') + '/', path.lstrip('/'))
 
 
 @app.api_route('/_video_proxy/{full_path:path}', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
@@ -135,7 +149,7 @@ async def video_proxy(request: Request, full_path: str) -> Response:
     if request.method == 'OPTIONS':
         return Response(status_code=204)
     try:
-        target = proxy_target_url(base, path)
+        target = proxy_target_url(base, path, request.url.hostname or '')
     except ValueError as exc:
         return Response(str(exc), status_code=400, media_type='text/plain')
 
@@ -179,10 +193,15 @@ def start_smoke_server() -> subprocess.Popen[str]:
             f'Smoke server binary not found: {smoke_binary}. Build the repo first with ./build.sh.'
         )
 
+    explicit_server_host = has_cli_flag('--server-host')
+    effective_server_host = ARGS.server_host
+    if ARGS.lan_only and not explicit_server_host:
+        effective_server_host = '0.0.0.0'
+
     cmd = [
         str(smoke_binary),
         '--host',
-        ARGS.server_host,
+        effective_server_host,
         '--port',
         str(ARGS.server_port),
     ]
@@ -215,7 +234,7 @@ def start_smoke_server() -> subprocess.Popen[str]:
     if ARGS.shared_key:
         cmd.extend(['--shared-key', ARGS.shared_key])
 
-    probe_host = ARGS.server_host
+    probe_host = effective_server_host
     if probe_host in ('0.0.0.0', '::', ''):
         probe_host = '127.0.0.1'
     try:
@@ -239,7 +258,7 @@ def start_smoke_server() -> subprocess.Popen[str]:
         if process.poll() is not None:
             raise RuntimeError(
                 f'Smoke server exited before becoming ready (exit code {process.returncode}). '
-                f'Check whether {ARGS.server_host}:{ARGS.server_port} is already in use.'
+                f'Check whether {effective_server_host}:{ARGS.server_port} is already in use.'
             )
         try:
             with urllib.request.urlopen(readiness_url, timeout=0.5) as response:
@@ -1663,7 +1682,7 @@ PAGE_HTML = """
         </div>
         <button id="close-settings" class="toolbar-button small">Close</button>
       </div>
-      <label>Server URL<input id="config-server-url" type="text" placeholder="http://0.0.0.0:8080"></label>
+      <label>Server URL<input id="config-server-url" type="text" placeholder="http://127.0.0.1:8080"></label>
       <label>Stream ID<input id="config-stream-id" type="text" placeholder="synthetic-h264"></label>
       <label>Session poll interval (ms)<input id="config-session-poll-ms" type="number" min="200" step="100"></label>
       <label>Log filter

@@ -52,19 +52,47 @@ namespace video_server
         ~HttpApiServer();
 
         /**
-         * @brief Starts the server loop with the provided request handler.
+         * @brief Opens the listening socket with the provided request handler.
          *
          * @param handler Request handler callback.
          * @return True when startup succeeded, false otherwise.
          */
-        bool start(Handler handler);
+        bool open(Handler handler);
+
+        /**
+         * @brief Starts the threaded server loop with the provided request handler.
+         *
+         * @param handler Request handler callback.
+         * @param poll_timeout_ms Poll timeout used by the worker loop.
+         * @return True when startup succeeded, false otherwise.
+         */
+        bool start(Handler handler, int poll_timeout_ms = 200);
+
+        /**
+         * @brief Services up to `max_connections` accepted sockets once.
+         *
+         * @param timeout_ms Poll timeout for readiness.
+         * @param max_connections Maximum accepted sockets to service during this call.
+         * @return True when the pump completed without fatal socket failure.
+         */
+        bool pump_once(int timeout_ms, size_t max_connections = 1);
+
+        /**
+         * @brief Returns true when the listening socket is open.
+         */
+        bool is_open() const;
+
+        /**
+         * @brief Closes the listening socket without managing the worker thread.
+         */
+        void close();
 
         /** @brief Stops the server loop and joins the worker thread. */
         void stop();
 
     private:
         /** @brief Accept loop for incoming connections. */
-        void run_loop();
+        void run_loop(int poll_timeout_ms);
         /**
          * @brief Handles one connected client.
          *

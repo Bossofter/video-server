@@ -1,9 +1,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
-#include <functional>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -14,9 +13,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "video_server/raw_video_pipeline.h"
-#include "video_server/webrtc_video_server.h"
-#include "../../src/transforms/display_transform.h"
+#include "video_server/managed_video_server.h"
 #include "../../src/webrtc/logging_utils.h"
 #include "../../src/testing/synthetic_frame_generator.h"
 
@@ -37,8 +34,9 @@ namespace
 
     struct Options
     {
-        std::string host{"0.0.0.0"};
-        uint16_t port{8080};
+        std::string config_path{"examples/nicegui_smoke/smoke_server.toml"};
+        std::string host;
+        uint16_t port{0};
         bool enable_debug_api{false};
         bool lan_only{false};
         std::string shared_key;
@@ -46,6 +44,20 @@ namespace
         double duration_seconds{0.0};
         double stats_interval_seconds{5.0};
         bool print_observability_summary{false};
+    };
+
+    struct RunningStream
+    {
+        video_server::StreamConfig config;
+        video_server::SyntheticFrameGenerator generator;
+        Clock::duration frame_interval;
+        Clock::time_point next_frame_at;
+
+        RunningStream(const video_server::StreamConfig &stream_config, Clock::time_point start_time)
+            : config(stream_config),
+              generator(config),
+              frame_interval(std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / config.nominal_fps))),
+              next_frame_at(start_time) {}
     };
 
     bool parse_uint16(const char *value, uint16_t &out)
@@ -130,7 +142,7 @@ namespace
     void print_usage(const char *argv0)
     {
         spdlog::info(
-            "Usage: {} [--host HOST] [--port PORT] [--enable-debug-api] [--lan-only] [--shared-key TOKEN] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
+            "Usage: {} [--config PATH] [--host HOST] [--port PORT] [--enable-debug-api] [--lan-only] [--shared-key TOKEN] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
             argv0);
     }
 
@@ -155,7 +167,14 @@ namespace
                 return argv[++i];
             };
 
-            if (arg == "--host")
+            if (arg == "--config")
+            {
+                const char *value = require_value("--config");
+                if (!value)
+                    return std::nullopt;
+                options.config_path = value;
+            }
+            else if (arg == "--host")
             {
                 const char *value = require_value("--host");
                 if (!value)
@@ -259,49 +278,30 @@ namespace
             }
         }
 
-        if (options.streams.empty())
+        if (options.streams.empty() && (legacy_stream_id.has_value() || legacy_width.has_value() || legacy_height.has_value() ||
+                                        legacy_fps.has_value()))
         {
-            StreamSpec legacy{legacy_stream_id.value_or("synthetic-h264"),
-                              "NiceGUI smoke synthetic H264 stream",
-                              legacy_width.value_or(640),
-                              legacy_height.value_or(360),
-                              legacy_fps.value_or(30.0)};
-            options.streams.push_back(std::move(legacy));
+            options.streams.push_back(StreamSpec{legacy_stream_id.value_or("synthetic-h264"),
+                                                 "NiceGUI smoke synthetic H264 stream",
+                                                 legacy_width.value_or(640),
+                                                 legacy_height.value_or(360),
+                                                 legacy_fps.value_or(30.0),
+                                                 video_server::VideoPixelFormat::GRAY8});
         }
 
         return options;
     }
 
-    struct RunningStream
+    std::vector<video_server::StreamConfig> to_stream_configs(const std::vector<StreamSpec> &streams)
     {
-        video_server::StreamConfig config;
-        video_server::SyntheticFrameGenerator generator;
-        video_server::RawVideoPipelineConfig pipeline_config;
-        std::unique_ptr<video_server::IRawVideoPipeline> pipeline;
-        std::thread frame_thread;
-        std::string pipeline_error;
-        uint64_t pipeline_config_generation{0};
-
-        explicit RunningStream(const StreamSpec &spec)
-            : config{spec.stream_id, spec.label, spec.width, spec.height, spec.fps, spec.pixel_format},
-              generator(config) {}
-    };
-
-    video_server::RawVideoPipelineConfig make_pipeline_config(const RunningStream &stream,
-                                                              const video_server::StreamOutputConfig &output_config,
-                                                              uint32_t width,
-                                                              uint32_t height)
-    {
-        video_server::RawVideoPipelineConfig config;
-        config.input_width = width;
-        config.input_height = height;
-        config.input_pixel_format = video_server::VideoPixelFormat::RGB24;
-        config.input_fps = stream.config.nominal_fps;
-        if (output_config.output_fps > 0.0)
+        std::vector<video_server::StreamConfig> configs;
+        configs.reserve(streams.size());
+        for (const auto &stream : streams)
         {
-            config.output_fps = output_config.output_fps;
+            configs.push_back(video_server::StreamConfig{
+                stream.stream_id, stream.label, stream.width, stream.height, stream.fps, stream.pixel_format});
         }
-        return config;
+        return configs;
     }
 
 } // namespace
@@ -316,164 +316,134 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    auto server_config = video_server::WebRtcVideoServerConfig{};
-    server_config.http_host = options->host;
-    server_config.http_port = options->port;
-    server_config.enable_http_api = true;
-    server_config.enable_debug_api = options->enable_debug_api;
-    if (options->lan_only)
+    video_server::ManagedVideoServerConfig config;
+    try
     {
-        server_config.allow_unsafe_public_routes = true;
-        server_config.cors_allowed_origins = {"*"};
+        config = video_server::load_managed_video_server_config(options->config_path);
     }
-    if (!options->shared_key.empty())
+    catch (const std::exception &ex)
     {
-        server_config.enable_shared_key_auth = true;
-        server_config.shared_key = options->shared_key;
-    }
-    video_server::WebRtcVideoServer server(server_config);
-
-    std::vector<std::unique_ptr<RunningStream>> streams;
-    streams.reserve(options->streams.size());
-    for (const auto &spec : options->streams)
-    {
-        streams.push_back(std::make_unique<RunningStream>(spec));
-        if (!server.register_stream(streams.back()->config))
-        {
-            spdlog::error("Failed to register stream: {}", streams.back()->config.stream_id);
-            return 1;
-        }
-    }
-
-    if (!server.start())
-    {
-        spdlog::error("Failed to start WebRTC video server");
+        spdlog::error("Failed to load managed server config '{}': {}", options->config_path, ex.what());
         return 1;
     }
 
-    std::atomic<bool> stop_requested{false};
-    const auto run_started_at = Clock::now();
-
-    for (auto &stream : streams)
+    config.execution_mode = video_server::ExecutionMode::ManualStep;
+    if (!options->host.empty())
     {
-        stream->frame_thread = std::thread([&server, &stop_requested, stream = stream.get()]()
-                                           {
-      const auto frame_interval = std::chrono::duration<double>(1.0 / stream->config.nominal_fps);
-      while (!stop_requested.load()) {
-        const auto raw_frame = stream->generator.next_frame();
-        if (!server.push_frame(stream->config.stream_id, raw_frame)) {
-          spdlog::warn("Failed to push synthetic frame for {}", stream->config.stream_id);
-        }
-
-        const auto output_config = server.get_stream_output_config(stream->config.stream_id);
-        if (!output_config.has_value()) {
-          spdlog::error("Failed to load stream output config for {}", stream->config.stream_id);
-          stop_requested = true;
-          break;
-        }
-
-        video_server::RgbImage transformed;
-        if (!video_server::apply_display_transform(raw_frame, *output_config, transformed)) {
-          spdlog::error("Failed to apply display transform for {} generation={}", stream->config.stream_id,
-                        output_config->config_generation);
-          stop_requested = true;
-          break;
-        }
-
-        if (!stream->pipeline || stream->pipeline_config_generation != output_config->config_generation) {
-          if (stream->pipeline) {
-            stream->pipeline->stop();
-            stream->pipeline.reset();
-          }
-          stream->pipeline_config = make_pipeline_config(*stream, *output_config, transformed.width, transformed.height);
-          stream->pipeline = video_server::make_raw_to_h264_pipeline_for_server(stream->config.stream_id, stream->pipeline_config, server);
-          if (!stream->pipeline->start(&stream->pipeline_error)) {
-            spdlog::error("Failed to start raw-to-H264 pipeline for {} generation={}: {}", stream->config.stream_id,
-                          output_config->config_generation, stream->pipeline_error);
-            stop_requested = true;
-            break;
-          }
-          stream->pipeline_config_generation = output_config->config_generation;
-          spdlog::info(
-              "[smoke-server] restarted encoded pipeline stream={} generation={} transformed={}x{} output_fps={}",
-              stream->config.stream_id, stream->pipeline_config_generation, transformed.width, transformed.height,
-              output_config->output_fps);
-        }
-
-        const video_server::VideoFrameView transformed_frame{
-            transformed.rgb.data(), transformed.width, transformed.height, transformed.width * 3u,
-            video_server::VideoPixelFormat::RGB24, raw_frame.timestamp_ns, raw_frame.frame_id};
-        if (!stream->pipeline->push_frame(transformed_frame, &stream->pipeline_error)) {
-          spdlog::error("Failed to push transformed frame into H264 pipeline for {} generation={}: {}",
-                        stream->config.stream_id, stream->pipeline_config_generation, stream->pipeline_error);
-          stop_requested = true;
-          break;
-        }
-
-        std::this_thread::sleep_for(frame_interval);
-      } });
-
-        spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps input={}", stream->config.stream_id,
-                     stream->config.label, stream->config.width, stream->config.height, stream->config.nominal_fps,
-                     video_server::to_string(stream->config.input_pixel_format));
+        config.webrtc.http_host = options->host;
+    }
+    if (options->port != 0)
+    {
+        config.webrtc.http_port = options->port;
+    }
+    if (options->enable_debug_api)
+    {
+        config.webrtc.enable_debug_api = true;
+    }
+    if (options->lan_only)
+    {
+        config.webrtc.allow_unsafe_public_routes = true;
+        config.webrtc.cors_allowed_origins = {"*"};
+    }
+    if (!options->shared_key.empty())
+    {
+        config.webrtc.enable_shared_key_auth = true;
+        config.webrtc.shared_key = options->shared_key;
+    }
+    if (!options->streams.empty())
+    {
+        config.streams = to_stream_configs(options->streams);
     }
 
-    spdlog::info("[smoke-server] started HTTP/WebRTC server on http://{}:{} with {} stream(s)", options->host,
-                 options->port, streams.size());
-    if (options->duration_seconds > 0.0)
+    auto server = video_server::CreateManagedVideoServer(config);
+    if (!server->start())
     {
-        spdlog::info("[smoke-server] soak mode active for {:.2f}s (summary={}, stats every {:.2f}s)",
-                     options->duration_seconds, options->print_observability_summary, options->stats_interval_seconds);
-        auto next_stats_at = run_started_at + std::chrono::duration<double>(options->stats_interval_seconds);
-        const auto stop_at = run_started_at + std::chrono::duration<double>(options->duration_seconds);
-        while (!stop_requested.load() && Clock::now() < stop_at)
+        spdlog::error("Failed to start managed WebRTC video server");
+        return 1;
+    }
+
+    const auto run_started_at = Clock::now();
+    std::vector<RunningStream> streams;
+    streams.reserve(config.streams.size());
+    for (const auto &stream_config : config.streams)
+    {
+        streams.emplace_back(stream_config, run_started_at);
+        spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps input={}", stream_config.stream_id,
+                     stream_config.label, stream_config.width, stream_config.height, stream_config.nominal_fps,
+                     video_server::to_string(stream_config.input_pixel_format));
+    }
+
+    spdlog::info("[smoke-server] started managed HTTP/WebRTC server on http://{}:{} with {} stream(s) config={}",
+                 config.webrtc.http_host, config.webrtc.http_port, streams.size(), options->config_path);
+
+    std::atomic<bool> stop_requested{false};
+    std::thread stdin_thread;
+    if (options->duration_seconds <= 0.0)
+    {
+        stdin_thread = std::thread([&stop_requested]()
+                                   {
+                                       spdlog::info("[smoke-server] press ENTER to stop");
+                                       std::string line;
+                                       std::getline(std::cin, line);
+                                       stop_requested = true;
+                                   });
+    }
+
+    auto next_stats_at = run_started_at + std::chrono::duration<double>(options->stats_interval_seconds);
+    const auto stop_at = options->duration_seconds > 0.0
+                             ? run_started_at + std::chrono::duration<double>(options->duration_seconds)
+                             : Clock::time_point::max();
+
+    while (!stop_requested.load() && Clock::now() < stop_at)
+    {
+        const auto now = Clock::now();
+        for (auto &stream : streams)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (options->print_observability_summary && Clock::now() >= next_stats_at)
+            while (stream.next_frame_at <= now)
             {
-                const auto snapshot = server.get_debug_snapshot();
-                spdlog::info("[smoke-server] observability summary streams={} active_sessions={}", snapshot.stream_count,
-                             snapshot.active_session_count);
-                for (const auto &stream : snapshot.streams)
+                const auto raw_frame = stream.generator.next_frame();
+                if (!server->push_frame(stream.config.stream_id, raw_frame))
                 {
-                    const auto &session = stream.current_session;
-                    spdlog::info(
-                        "[smoke-server] stream={} raw={} encoded={} au={} sender={} packets={} startup_injections={} track_closed={}",
-                        stream.stream_id, stream.latest_raw_frame_available, stream.latest_encoded_access_unit_available,
-                        stream.total_access_units_received, session ? session->sender_state : std::string("no-session"),
-                        session ? session->counters.packets_sent_after_track_open : 0,
-                        session ? session->counters.startup_sequence_injections : 0,
-                        session ? session->counters.track_closed_events : 0);
+                    spdlog::warn("Failed to push synthetic frame for {}", stream.config.stream_id);
                 }
-                next_stats_at = Clock::now() + std::chrono::duration<double>(options->stats_interval_seconds);
+                stream.next_frame_at += stream.frame_interval;
             }
         }
-        stop_requested = true;
-    }
-    else
-    {
-        spdlog::info("[smoke-server] press ENTER to stop");
-        std::string line;
-        std::getline(std::cin, line);
-        stop_requested = true;
-    }
 
-    for (auto &stream : streams)
-    {
-        if (stream->frame_thread.joinable())
+        if (!server->step())
         {
-            stream->frame_thread.join();
+            spdlog::error("Managed server step failed");
+            stop_requested = true;
+            break;
+        }
+
+        if (options->print_observability_summary && Clock::now() >= next_stats_at)
+        {
+            const auto snapshot = server->get_debug_snapshot();
+            spdlog::info("[smoke-server] observability summary streams={} active_sessions={}", snapshot.stream_count,
+                         snapshot.active_session_count);
+            for (const auto &stream : snapshot.streams)
+            {
+                const auto &session = stream.current_session;
+                spdlog::info(
+                    "[smoke-server] stream={} raw={} encoded={} au={} sender={} packets={} startup_injections={} track_closed={}",
+                    stream.stream_id, stream.latest_raw_frame_available, stream.latest_encoded_access_unit_available,
+                    stream.total_access_units_received, session ? session->sender_state : std::string("no-session"),
+                    session ? session->counters.packets_sent_after_track_open : 0,
+                    session ? session->counters.startup_sequence_injections : 0,
+                    session ? session->counters.track_closed_events : 0);
+            }
+            next_stats_at = Clock::now() + std::chrono::duration<double>(options->stats_interval_seconds);
         }
     }
-    for (auto &stream : streams)
+
+    stop_requested = true;
+    if (stdin_thread.joinable())
     {
-        if (stream->pipeline)
-        {
-            stream->pipeline->stop();
-        }
+        stdin_thread.detach();
     }
 
-    server.stop();
+    server->stop();
     spdlog::info("[smoke-server] stopped");
     return 0;
 }

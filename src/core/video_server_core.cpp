@@ -91,51 +91,9 @@ namespace video_server
     {
         StreamConfig config_snapshot;
         StreamOutputConfig output_config_snapshot;
-
+        if (!validate_raw_frame_input(stream_id, frame, &config_snapshot, &output_config_snapshot))
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = streams_.find(stream_id);
-            if (it == streams_.end())
-            {
-                return false;
-            }
-            config_snapshot = it->second.info.config;
-            output_config_snapshot = it->second.info.output_config;
-        }
-
-        auto mark_drop = [&]()
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = streams_.find(stream_id);
-            if (it != streams_.end())
-            {
-                ++it->second.info.frames_dropped;
-            }
-        };
-
-        if (frame.data == nullptr || frame.width == 0 || frame.height == 0)
-        {
-            mark_drop();
-            return false;
-        }
-
-        if (frame.width != config_snapshot.width || frame.height != config_snapshot.height ||
-            frame.pixel_format != config_snapshot.input_pixel_format)
-        {
-            mark_drop();
-            return false;
-        }
-
-        if (!is_supported_input_pixel_format(frame.pixel_format))
-        {
-            mark_drop();
-            return false;
-        }
-
-        const uint32_t expected_stride = frame.width * bytes_per_pixel(frame.pixel_format);
-        if (frame.stride_bytes < expected_stride)
-        {
-            mark_drop();
+            note_frame_dropped(stream_id);
             return false;
         }
 
@@ -166,39 +124,12 @@ namespace video_server
         RgbImage transformed;
         if (!apply_display_transform(frame, output_config_snapshot, transformed))
         {
-            mark_drop();
+            note_frame_dropped(stream_id);
             return false;
         }
 
-        auto published_frame = std::make_shared<LatestFrame>();
-        published_frame->bytes = std::move(transformed.rgb);
-        published_frame->width = transformed.width;
-        published_frame->height = transformed.height;
-        published_frame->pixel_format = VideoPixelFormat::RGB24;
-        published_frame->timestamp_ns = frame.timestamp_ns;
-        published_frame->frame_id = frame.frame_id;
-        published_frame->valid = true;
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = streams_.find(stream_id);
-            if (it == streams_.end())
-            {
-                return false;
-            }
-
-            StreamState &stream = it->second;
-            VideoStreamInfo &info = stream.info;
-            stream.latest_frame = published_frame;
-
-            ++info.frames_transformed;
-            info.last_output_timestamp_ns = frame.timestamp_ns;
-            info.last_frame_timestamp_ns = frame.timestamp_ns;
-            info.last_frame_id = frame.frame_id;
-            info.has_latest_frame = true;
-        }
-
-        return true;
+        return publish_transformed_frame(stream_id, std::move(transformed.rgb), transformed.width, transformed.height,
+                                         frame.timestamp_ns, frame.frame_id);
     }
 
     bool VideoServerCore::push_access_unit(const std::string &stream_id,
@@ -244,6 +175,119 @@ namespace video_server
         info.last_encoded_size_bytes = access_unit.size_bytes;
         info.last_encoded_keyframe = access_unit.keyframe;
         info.last_encoded_codec_config = access_unit.codec_config;
+        return true;
+    }
+
+    bool VideoServerCore::validate_raw_frame_input(const std::string &stream_id,
+                                                   const VideoFrameView &frame,
+                                                   StreamConfig *config_out,
+                                                   StreamOutputConfig *output_config_out) const
+    {
+        StreamConfig config_snapshot;
+        StreamOutputConfig output_config_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = streams_.find(stream_id);
+            if (it == streams_.end())
+            {
+                return false;
+            }
+            config_snapshot = it->second.info.config;
+            output_config_snapshot = it->second.info.output_config;
+        }
+
+        if (frame.data == nullptr || frame.width == 0 || frame.height == 0)
+        {
+            return false;
+        }
+
+        if (frame.width != config_snapshot.width || frame.height != config_snapshot.height ||
+            frame.pixel_format != config_snapshot.input_pixel_format)
+        {
+            return false;
+        }
+
+        if (!is_supported_input_pixel_format(frame.pixel_format))
+        {
+            return false;
+        }
+
+        const uint32_t expected_stride = frame.width * bytes_per_pixel(frame.pixel_format);
+        if (frame.stride_bytes < expected_stride)
+        {
+            return false;
+        }
+
+        if (config_out != nullptr)
+        {
+            *config_out = config_snapshot;
+        }
+        if (output_config_out != nullptr)
+        {
+            *output_config_out = output_config_snapshot;
+        }
+        return true;
+    }
+
+    bool VideoServerCore::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(stream_id);
+        if (it == streams_.end())
+        {
+            return false;
+        }
+
+        ++it->second.info.frames_received;
+        it->second.info.last_input_timestamp_ns = timestamp_ns;
+        return true;
+    }
+
+    bool VideoServerCore::note_frame_dropped(const std::string &stream_id)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(stream_id);
+        if (it == streams_.end())
+        {
+            return false;
+        }
+
+        ++it->second.info.frames_dropped;
+        return true;
+    }
+
+    bool VideoServerCore::publish_transformed_frame(const std::string &stream_id,
+                                                    std::vector<uint8_t> rgb_bytes,
+                                                    uint32_t width,
+                                                    uint32_t height,
+                                                    uint64_t timestamp_ns,
+                                                    uint64_t frame_id)
+    {
+        auto published_frame = std::make_shared<LatestFrame>();
+        published_frame->bytes = std::move(rgb_bytes);
+        published_frame->width = width;
+        published_frame->height = height;
+        published_frame->pixel_format = VideoPixelFormat::RGB24;
+        published_frame->timestamp_ns = timestamp_ns;
+        published_frame->frame_id = frame_id;
+        published_frame->valid = true;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(stream_id);
+        if (it == streams_.end())
+        {
+            return false;
+        }
+
+        StreamState &stream = it->second;
+        VideoStreamInfo &info = stream.info;
+        stream.latest_frame = published_frame;
+
+        ++info.frames_transformed;
+        info.last_output_timestamp_ns = timestamp_ns;
+        info.last_frame_timestamp_ns = timestamp_ns;
+        info.last_frame_id = frame_id;
+        info.has_latest_frame = true;
         return true;
     }
 

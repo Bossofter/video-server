@@ -82,6 +82,55 @@ namespace video_server
         bool push_access_unit(const std::string &stream_id, const EncodedAccessUnitView &access_unit) override;
 
         /**
+         * @brief Validates a raw input frame against the registered stream contract.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param frame Raw frame view to validate.
+         * @param config_out Optional destination for the registered stream config.
+         * @param output_config_out Optional destination for the active output config.
+         * @return True when the frame matches the stream contract, false otherwise.
+         */
+        bool validate_raw_frame_input(const std::string &stream_id,
+                                      const VideoFrameView &frame,
+                                      StreamConfig *config_out = nullptr,
+                                      StreamOutputConfig *output_config_out = nullptr) const;
+
+        /**
+         * @brief Records that one valid raw input frame was received for the stream.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param timestamp_ns Frame timestamp in nanoseconds.
+         * @return True when the stream exists, false otherwise.
+         */
+        bool note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
+
+        /**
+         * @brief Records that one raw frame was dropped for the stream.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @return True when the stream exists, false otherwise.
+         */
+        bool note_frame_dropped(const std::string &stream_id);
+
+        /**
+         * @brief Publishes a transformed RGB latest-frame snapshot for one stream.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param rgb_bytes RGB24 payload.
+         * @param width Transformed frame width.
+         * @param height Transformed frame height.
+         * @param timestamp_ns Source timestamp in nanoseconds.
+         * @param frame_id Source frame identifier.
+         * @return True when the frame was published, false otherwise.
+         */
+        bool publish_transformed_frame(const std::string &stream_id,
+                                       std::vector<uint8_t> rgb_bytes,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint64_t timestamp_ns,
+                                       uint64_t frame_id);
+
+        /**
          * @brief Returns a snapshot of every registered stream.
          *
          * @return Stream info records for all registered streams.

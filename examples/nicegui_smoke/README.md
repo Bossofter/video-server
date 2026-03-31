@@ -30,13 +30,13 @@ Open:
 http://<smoke-host-lan-ip>:8090/
 ```
 
-The smoke harness now binds both the NiceGUI app and the synthetic WebRTC server to `0.0.0.0` by default so a second machine on the same LAN can open the page. When the browser loads a loopback or wildcard `--video-server-url`, the page rewrites it to the hostname it was opened with so `0.0.0.0` does not leak into browser fetches. Use `--lan-only` when you want the launched synthetic smoke server to allow remote signaling/config/debug access from the LAN.
+The smoke harness keeps the NiceGUI app on `0.0.0.0`, but the launched synthetic WebRTC server now defaults to `127.0.0.1` so local signaling works with the repo's safe security defaults. When `--lan-only` is set, the harness automatically widens the launched smoke-server bind to `0.0.0.0` unless you explicitly override `--server-host`.
 
 If you enable shared-key protection on the server, launch the harness with `--shared-key YOUR_TOKEN`. When `--start-server` is used, the harness passes the same token to the smoke server and includes `Authorization: Bearer YOUR_TOKEN` on signaling, config, and debug requests. `--debug` also enables the smoke server's debug endpoint explicitly, which now defaults to disabled.
 
 ## Default multi-stream demo set
 
-By default, the smoke harness now launches a three-stream demo unless you explicitly pass single-stream sizing/id flags. `--multi-stream-demo` selects the same default set explicitly:
+By default, the smoke harness launches the managed smoke server with `examples/nicegui_smoke/smoke_server.toml`. That file defines the default three-stream demo. `--multi-stream-demo` selects the same set explicitly:
 
 - `alpha`: `640x360 @ 30 fps` with the sweep-style synthetic pattern generated as `GRAY8` so grayscale/palette config changes have a known-good demo stream
 - `bravo`: `1280x720 @ 30 fps` with the orbit-style synthetic pattern
@@ -86,7 +86,7 @@ If you already launched the smoke server yourself:
 
 ```bash
 ./build/video_server_nicegui_smoke_server --multi-stream-demo
-python examples/nicegui_smoke/app.py --video-server-url http://0.0.0.0:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
+python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
 ```
 
 ## Caveats

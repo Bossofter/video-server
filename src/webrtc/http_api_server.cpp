@@ -154,10 +154,10 @@ namespace video_server
         : host_(std::move(host)), port_(port), max_request_bytes_(max_request_bytes) {}
     HttpApiServer::~HttpApiServer() { stop(); }
 
-    bool HttpApiServer::start(Handler handler)
+    bool HttpApiServer::open(Handler handler)
     {
         ensure_default_logging_config();
-        if (running_)
+        if (running_ || listen_fd_ >= 0)
         {
             return false;
         }
@@ -205,92 +205,128 @@ namespace video_server
         }
 
         listen_fd_ = bound_fd;
-        running_ = true;
-        server_thread_ = std::thread([this]()
-                                     { run_loop(); });
         return true;
     }
 
-    void HttpApiServer::stop()
+    bool HttpApiServer::start(Handler handler, int poll_timeout_ms)
     {
-        if (!running_)
+        if (!open(std::move(handler)))
         {
-            return;
+            return false;
         }
 
-        running_ = false;
+        running_ = true;
+        server_thread_ = std::thread([this, poll_timeout_ms]()
+                                     { run_loop(poll_timeout_ms); });
+        return true;
+    }
 
+    bool HttpApiServer::pump_once(int timeout_ms, size_t max_connections)
+    {
+        if (listen_fd_ >= 0)
+        {
+            const int local_listen_fd = listen_fd_;
+            fd_set read_set;
+            FD_ZERO(&read_set);
+            FD_SET(local_listen_fd, &read_set);
+
+            timeval timeout{};
+            if (timeout_ms > 0)
+            {
+                timeout.tv_sec = timeout_ms / 1000;
+                timeout.tv_usec = static_cast<suseconds_t>((timeout_ms % 1000) * 1000);
+            }
+
+            const int ready = ::select(local_listen_fd + 1, &read_set, nullptr, nullptr, timeout_ms >= 0 ? &timeout : nullptr);
+            if (ready < 0)
+            {
+                if (errno == EINTR)
+                {
+                    return true;
+                }
+                return false;
+            }
+            if (ready == 0)
+            {
+                return true;
+            }
+
+            size_t accepted = 0;
+            while (accepted < max_connections)
+            {
+                sockaddr_storage client_addr{};
+                socklen_t client_addr_len = sizeof(client_addr);
+                const int client_fd = ::accept(local_listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
+                if (client_fd < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        return true;
+                    }
+                    return false;
+                }
+
+                char host_buffer[NI_MAXHOST] = {};
+                std::string remote_address = "unknown";
+                if (::getnameinfo(reinterpret_cast<const sockaddr *>(&client_addr), client_addr_len, host_buffer,
+                                  sizeof(host_buffer), nullptr, 0, NI_NUMERICHOST) == 0)
+                {
+                    remote_address = host_buffer;
+                }
+
+                handle_client(client_fd, remote_address);
+                ::close(client_fd);
+                ++accepted;
+
+                timeval immediate_timeout{};
+                fd_set immediate_read_set;
+                FD_ZERO(&immediate_read_set);
+                FD_SET(local_listen_fd, &immediate_read_set);
+                const int more_ready = ::select(local_listen_fd + 1, &immediate_read_set, nullptr, nullptr, &immediate_timeout);
+                if (more_ready <= 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    bool HttpApiServer::is_open() const { return listen_fd_ >= 0; }
+
+    void HttpApiServer::close()
+    {
         if (listen_fd_ >= 0)
         {
             ::shutdown(listen_fd_, SHUT_RDWR);
             ::close(listen_fd_);
             listen_fd_ = -1;
         }
+    }
 
+    void HttpApiServer::stop()
+    {
+        running_ = false;
+        close();
         if (server_thread_.joinable())
         {
             server_thread_.join();
         }
     }
 
-    void HttpApiServer::run_loop()
+    void HttpApiServer::run_loop(int poll_timeout_ms)
     {
         while (running_)
         {
-            const int local_listen_fd = listen_fd_;
-            if (local_listen_fd < 0)
+            if (!pump_once(poll_timeout_ms))
             {
                 break;
             }
-
-            fd_set read_set;
-            FD_ZERO(&read_set);
-            FD_SET(local_listen_fd, &read_set);
-
-            timeval timeout{};
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 200000;
-
-            const int ready = ::select(local_listen_fd + 1, &read_set, nullptr, nullptr, &timeout);
-            if (!running_)
-            {
-                break;
-            }
-            if (ready < 0)
-            {
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                break;
-            }
-            if (ready == 0)
-            {
-                continue;
-            }
-
-            sockaddr_storage client_addr{};
-            socklen_t client_addr_len = sizeof(client_addr);
-            const int client_fd = ::accept(local_listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
-            if (client_fd < 0)
-            {
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                continue;
-            }
-
-            char host_buffer[NI_MAXHOST] = {};
-            std::string remote_address = "unknown";
-            if (::getnameinfo(reinterpret_cast<const sockaddr *>(&client_addr), client_addr_len, host_buffer, sizeof(host_buffer),
-                              nullptr, 0, NI_NUMERICHOST) == 0)
-            {
-                remote_address = host_buffer;
-            }
-
-            handle_client(client_fd, remote_address);
-            ::close(client_fd);
         }
     }
 

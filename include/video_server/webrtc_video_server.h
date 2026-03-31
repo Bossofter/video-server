@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "video_server/observability.h"
 #include "video_server/video_server.h"
@@ -36,6 +37,9 @@ namespace video_server
         uint32_t config_rate_limit_max_requests{20};      /**< Maximum config requests per rate-limit window. */
         uint32_t debug_rate_limit_window_seconds{10};     /**< Debug rate-limit window in seconds. */
         uint32_t debug_rate_limit_max_requests{60};       /**< Maximum debug requests per rate-limit window. */
+        ExecutionMode execution_mode{ExecutionMode::WorkerThread}; /**< Execution policy for HTTP progression. */
+        uint32_t http_poll_timeout_ms{200};                         /**< Poll timeout used by HTTP worker or stepped pump. */
+        size_t max_http_connections_per_step{1};                   /**< Maximum accepted connections serviced per step. */
     };
 
     /**
@@ -73,6 +77,13 @@ namespace video_server
         bool start();
 
         /**
+         * @brief Progresses owned HTTP/network work once when using stepped execution.
+         *
+         * @return True when progression succeeded, false on fatal error.
+         */
+        bool step();
+
+        /**
          * @brief Stops the server and releases active sessions.
          */
         void stop();
@@ -86,6 +97,55 @@ namespace video_server
         bool set_stream_output_config(const std::string &stream_id,
                                       const StreamOutputConfig &output_config) override;
         std::optional<StreamOutputConfig> get_stream_output_config(const std::string &stream_id) const override;
+
+        /**
+         * @brief Validates a raw input frame against the registered stream contract.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param frame Raw frame view to validate.
+         * @param config_out Optional destination for the registered stream config.
+         * @param output_config_out Optional destination for the active output config.
+         * @return True when the frame matches the stream contract, false otherwise.
+         */
+        bool validate_raw_frame_input(const std::string &stream_id,
+                                      const VideoFrameView &frame,
+                                      StreamConfig *config_out = nullptr,
+                                      StreamOutputConfig *output_config_out = nullptr) const;
+
+        /**
+         * @brief Records receipt of one valid raw input frame.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param timestamp_ns Frame timestamp in nanoseconds.
+         * @return True when the stream exists, false otherwise.
+         */
+        bool note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
+
+        /**
+         * @brief Records that one raw frame was dropped for the stream.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @return True when the stream exists, false otherwise.
+         */
+        bool note_frame_dropped(const std::string &stream_id);
+
+        /**
+         * @brief Publishes a transformed RGB frame as the canonical latest-frame snapshot.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param rgb_bytes RGB24 frame payload.
+         * @param width Transformed frame width.
+         * @param height Transformed frame height.
+         * @param timestamp_ns Source frame timestamp in nanoseconds.
+         * @param frame_id Source frame identifier.
+         * @return True when the transformed frame was published, false otherwise.
+         */
+        bool publish_transformed_frame(const std::string &stream_id,
+                                       std::vector<uint8_t> rgb_bytes,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint64_t timestamp_ns,
+                                       uint64_t frame_id);
 
         /**
          * @brief Handles a synthetic HTTP request without opening a socket, for tests.

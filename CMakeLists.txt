@@ -48,6 +48,7 @@ endif()
 
 if(ENABLE_WEBRTC_BACKEND)
   find_package(spdlog CONFIG REQUIRED)
+  find_package(tomlplusplus CONFIG REQUIRED)
   find_package(OpenSSL REQUIRED)
   find_package(LibDataChannel CONFIG REQUIRED)
   find_package(LibJuice CONFIG REQUIRED)
@@ -68,6 +69,7 @@ if(ENABLE_WEBRTC_BACKEND)
   endif()
 
   add_library(video_server_webrtc
+    src/webrtc/managed_video_server.cpp
     src/webrtc/webrtc_video_server.cpp
     src/webrtc/webrtc_stream.cpp
     src/webrtc/signaling_server.cpp
@@ -100,6 +102,7 @@ if(ENABLE_WEBRTC_BACKEND)
     PUBLIC
       video_server_core
       spdlog::spdlog
+      tomlplusplus::tomlplusplus
       OpenSSL::SSL
       OpenSSL::Crypto
       LibDataChannel::LibDataChannel
@@ -159,6 +162,7 @@ if(BUILD_TESTING)
     tests/test_synthetic.cpp
     tests/test_video_types.cpp
     tests/test_pipeline.cpp
+    tests/test_managed_server.cpp
     tests/test_raw_pipeline.cpp
     tests/test_webrtc_http.cpp
     tests/test_webrtc_stream.cpp
