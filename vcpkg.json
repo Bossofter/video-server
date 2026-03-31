@@ -19,6 +19,7 @@
         "libjuice",
         "openssl",
         "libsrtp",
-        "spdlog"
+        "spdlog",
+        "tomlplusplus"
     ]
 }

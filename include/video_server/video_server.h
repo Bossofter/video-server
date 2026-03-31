@@ -14,6 +14,16 @@ namespace video_server
 {
 
     /**
+     * @brief Execution policy used by stepped and managed server implementations.
+     */
+    enum class ExecutionMode
+    {
+        ManualStep,  /**< Caller drives all progression explicitly via `step()`. */
+        InlineOnPush,/**< Raw-frame ingestion also progresses the stream inline. */
+        WorkerThread /**< Internal worker thread progresses owned subsystems. */
+    };
+
+    /**
      * @brief Common video server interface used by the core and WebRTC-backed implementations.
      */
     class IVideoServer

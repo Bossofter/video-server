@@ -36,7 +36,7 @@ If you enable shared-key protection on the server, launch the harness with `--sh
 
 ## Default multi-stream demo set
 
-By default, the smoke harness now launches a three-stream demo unless you explicitly pass single-stream sizing/id flags. `--multi-stream-demo` selects the same default set explicitly:
+By default, the smoke harness launches the managed smoke server with `examples/nicegui_smoke/smoke_server.toml`. That file defines the default three-stream demo. `--multi-stream-demo` selects the same set explicitly:
 
 - `alpha`: `640x360 @ 30 fps` with the sweep-style synthetic pattern generated as `GRAY8` so grayscale/palette config changes have a known-good demo stream
 - `bravo`: `1280x720 @ 30 fps` with the orbit-style synthetic pattern

@@ -761,8 +761,23 @@ namespace video_server
             {
                 return true;
             }
-            return http_server_->start([this](const HttpRequest &request)
-                                       { return this->handle_http(request); });
+            auto handler = [this](const HttpRequest &request)
+            { return this->handle_http(request); };
+            if (config_.execution_mode == ExecutionMode::WorkerThread)
+            {
+                return http_server_->start(std::move(handler), static_cast<int>(config_.http_poll_timeout_ms));
+            }
+            return http_server_->open(std::move(handler));
+        }
+
+        bool step()
+        {
+            if (!http_server_ || !http_server_->is_open() || config_.execution_mode == ExecutionMode::WorkerThread)
+            {
+                return true;
+            }
+            return http_server_->pump_once(static_cast<int>(config_.http_poll_timeout_ms),
+                                           std::max<size_t>(1, config_.max_http_connections_per_step));
         }
 
         void stop()
@@ -772,6 +787,21 @@ namespace video_server
             {
                 http_server_->stop();
             }
+        }
+
+        bool publish_transformed_frame(const std::string &stream_id,
+                                       std::vector<uint8_t> rgb_bytes,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint64_t timestamp_ns,
+                                       uint64_t frame_id)
+        {
+            if (!core_.publish_transformed_frame(stream_id, std::move(rgb_bytes), width, height, timestamp_ns, frame_id))
+            {
+                return false;
+            }
+            signaling_.on_latest_frame(stream_id, core_.get_latest_frame_for_stream(stream_id));
+            return true;
         }
 
         ServerDebugSnapshot get_debug_snapshot() const
@@ -1545,6 +1575,7 @@ namespace video_server
     WebRtcVideoServer::~WebRtcVideoServer() = default;
 
     bool WebRtcVideoServer::start() { return impl_->start(); }
+    bool WebRtcVideoServer::step() { return impl_->step(); }
     void WebRtcVideoServer::stop() { impl_->stop(); }
 
     bool WebRtcVideoServer::register_stream(const StreamConfig &config) { return impl_->core_.register_stream(config); }
@@ -1593,6 +1624,34 @@ namespace video_server
         const std::string &stream_id) const
     {
         return impl_->core_.get_stream_output_config(stream_id);
+    }
+
+    bool WebRtcVideoServer::validate_raw_frame_input(const std::string &stream_id,
+                                                     const VideoFrameView &frame,
+                                                     StreamConfig *config_out,
+                                                     StreamOutputConfig *output_config_out) const
+    {
+        return impl_->core_.validate_raw_frame_input(stream_id, frame, config_out, output_config_out);
+    }
+
+    bool WebRtcVideoServer::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
+    {
+        return impl_->core_.note_frame_received(stream_id, timestamp_ns);
+    }
+
+    bool WebRtcVideoServer::note_frame_dropped(const std::string &stream_id)
+    {
+        return impl_->core_.note_frame_dropped(stream_id);
+    }
+
+    bool WebRtcVideoServer::publish_transformed_frame(const std::string &stream_id,
+                                                      std::vector<uint8_t> rgb_bytes,
+                                                      uint32_t width,
+                                                      uint32_t height,
+                                                      uint64_t timestamp_ns,
+                                                      uint64_t frame_id)
+    {
+        return impl_->publish_transformed_frame(stream_id, std::move(rgb_bytes), width, height, timestamp_ns, frame_id);
     }
 
     ServerDebugSnapshot WebRtcVideoServer::get_debug_snapshot() const { return impl_->get_debug_snapshot(); }

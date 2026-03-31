@@ -75,9 +75,9 @@ Terminal 1:
 
 ```bash
 ./build/video_server_nicegui_smoke_server \
+  --config examples/nicegui_smoke/smoke_server.toml \
   --host 127.0.0.1 \
-  --port 8080 \
-  --multi-stream-demo
+  --port 8080
 ```
 
 Terminal 2:
@@ -128,6 +128,7 @@ Notes:
 
 - the NiceGUI app binds to `0.0.0.0` by default
 - the smoke server also binds to `0.0.0.0` when started from the harness by default
+- the smoke server loads `examples/nicegui_smoke/smoke_server.toml` by default and then applies CLI overrides
 - `--lan-only` enables remote signaling, runtime config, and debug access for LAN smoke testing
 - do not use this mode as a production security model
 

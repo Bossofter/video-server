@@ -1,0 +1,43 @@
+execution_mode = "manual_step"
+http_poll_timeout_ms = 5
+
+[webrtc]
+http_host = "127.0.0.1"
+http_port = 8080
+enable_http_api = true
+enable_debug_api = false
+enable_runtime_config_api = true
+allow_unsafe_public_routes = false
+enable_shared_key_auth = false
+
+[[streams]]
+stream_id = "alpha"
+label = "Synthetic demo alpha sweep grayscale"
+width = 640
+height = 360
+nominal_fps = 30.0
+input_pixel_format = "GRAY8"
+
+[[streams]]
+stream_id = "bravo"
+label = "Synthetic demo bravo orbit"
+width = 1280
+height = 720
+nominal_fps = 30.0
+input_pixel_format = "RGB24"
+
+[[streams]]
+stream_id = "charlie"
+label = "Synthetic demo charlie checker"
+width = 320
+height = 240
+nominal_fps = 30.0
+input_pixel_format = "RGB24"
+
+[default_raw_pipelines.default]
+encoder = "automatic"
+encoder_preset = "ultrafast"
+encoder_tune = "zerolatency"
+encoder_profile = "baseline"
+repeat_headers = true
+emit_access_unit_delimiters = true

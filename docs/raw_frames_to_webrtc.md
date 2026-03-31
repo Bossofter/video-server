@@ -31,6 +31,8 @@ your raw frames
 
 The producer-facing interfaces are:
 
+- `ManagedVideoServerConfig`
+- `IManagedVideoServer`
 - `StreamConfig`
 - `VideoFrameView`
 - `EncodedAccessUnitView`
@@ -39,60 +41,39 @@ The producer-facing interfaces are:
 
 Relevant headers:
 
+- `include/video_server/managed_video_server.h`
 - `include/video_server/video_server.h`
 - `include/video_server/stream_config.h`
 - `include/video_server/video_frame_view.h`
 - `include/video_server/raw_video_pipeline.h`
 - `include/video_server/webrtc_video_server.h`
 
-## Integration Path For Raw Frames
+## Preferred Integration Path
 
-The normal raw-frame path is:
+The preferred producer-facing path is now:
 
-1. Create a `WebRtcVideoServer`.
-2. Start it.
-3. Register a stream with width, height, fps, and pixel format.
-4. Create a raw-to-H.264 pipeline bound to that stream.
-5. Push raw frames into the server for transform/observability.
-6. Push the same raw frames, or the transformed result you intend to encode, into the pipeline.
-7. Let the browser connect through the signaling API or the NiceGUI harness.
+1. Load a `ManagedVideoServerConfig` from TOML.
+2. Create an `IManagedVideoServer`.
+3. Start it.
+4. Push raw frames ad hoc with `push_frame(...)`.
+5. Call `step()` from your own loop.
+
+`step()` owns:
+
+- stepped HTTP/WebRTC signaling progress
+- per-stream output FPS cadence decisions
+- transform/filter application
+- raw-to-H.264 encode
+- forwarding encoded output into the existing WebRTC delivery path
 
 ## Minimal Example
 
 ```cpp
-#include "video_server/raw_video_pipeline.h"
-#include "video_server/stream_config.h"
+#include "video_server/managed_video_server.h"
 #include "video_server/video_frame_view.h"
-#include "video_server/webrtc_video_server.h"
 
-video_server::WebRtcVideoServerConfig server_cfg;
-server_cfg.http_host = "127.0.0.1";
-server_cfg.http_port = 8080;
-
-video_server::WebRtcVideoServer server(server_cfg);
-server.start();
-
-video_server::StreamConfig stream_cfg;
-stream_cfg.stream_id = "camera-1";
-stream_cfg.label = "Camera 1";
-stream_cfg.width = 1280;
-stream_cfg.height = 720;
-stream_cfg.nominal_fps = 30.0;
-stream_cfg.input_pixel_format = video_server::VideoPixelFormat::RGB24;
-
-server.register_stream(stream_cfg);
-
-video_server::RawVideoPipelineConfig pipeline_cfg;
-pipeline_cfg.input_width = 1280;
-pipeline_cfg.input_height = 720;
-pipeline_cfg.input_pixel_format = video_server::VideoPixelFormat::RGB24;
-pipeline_cfg.input_fps = 30.0;
-
-auto pipeline = video_server::make_raw_to_h264_pipeline_for_server(
-    "camera-1", pipeline_cfg, server);
-
-std::string error;
-pipeline->start(&error);
+auto server = video_server::CreateManagedVideoServer("video_server.toml");
+server->start();
 
 // In your frame loop:
 video_server::VideoFrameView frame{
@@ -105,18 +86,40 @@ video_server::VideoFrameView frame{
     frame_id,
 };
 
-server.push_frame("camera-1", frame);
-pipeline->push_frame(frame, &error);
+server->push_frame("camera-1", frame);
+server->step();
 ```
 
-## Why Push To Both
+## Config File Sketch
 
-In the current architecture:
+```toml
+execution_mode = "manual_step"
+http_poll_timeout_ms = 5
+
+[webrtc]
+http_host = "127.0.0.1"
+http_port = 8080
+
+[[streams]]
+stream_id = "camera-1"
+label = "Camera 1"
+width = 1280
+height = 720
+nominal_fps = 30.0
+input_pixel_format = "RGB24"
+
+[default_raw_pipelines.default]
+encoder = "automatic"
+```
+
+## Lower-Level Split Path
+
+The older split path still exists when you want direct control over raw-frame publication and encoder ownership:
 
 - `server.push_frame(...)` updates core stream state, transformed latest-frame snapshots, and frame/debug observability
 - `pipeline->push_frame(...)` performs raw-to-H.264 encoding and forwards encoded units into `push_access_unit(...)`
 
-That split is deliberate. The raw frame path and encoded delivery path stay separate.
+The managed server wraps that lower-level behavior into one stepped progression loop.
 
 ## Choosing The Input Format
 
