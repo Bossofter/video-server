@@ -119,13 +119,27 @@ def patch_nicegui_build_response() -> None:
 patch_nicegui_build_response()
 
 
-def proxy_target_url(base: str, path: str) -> str:
+def proxy_target_url(base: str, path: str, request_host: str = '') -> str:
     parsed = urlparse(base)
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
         raise ValueError(f'invalid proxy base URL: {base!r}')
     if not path.startswith('/api/video/'):
         raise ValueError(f'invalid proxy path: {path!r}')
-    return urljoin(base.rstrip('/') + '/', path.lstrip('/'))
+
+    target_host = (parsed.hostname or '').strip().lower()
+    normalized_request_host = request_host.strip().lower()
+    if normalized_request_host.startswith('[') and normalized_request_host.endswith(']'):
+        normalized_request_host = normalized_request_host[1:-1]
+
+    if normalized_request_host and target_host == normalized_request_host and target_host not in {
+        '127.0.0.1',
+        'localhost',
+        '::1',
+    }:
+        loopback_netloc = f'127.0.0.1:{parsed.port}' if parsed.port else '127.0.0.1'
+        parsed = parsed._replace(netloc=loopback_netloc)
+
+    return urljoin(parsed.geturl().rstrip('/') + '/', path.lstrip('/'))
 
 
 @app.api_route('/_video_proxy/{full_path:path}', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
@@ -135,7 +149,7 @@ async def video_proxy(request: Request, full_path: str) -> Response:
     if request.method == 'OPTIONS':
         return Response(status_code=204)
     try:
-        target = proxy_target_url(base, path)
+        target = proxy_target_url(base, path, request.url.hostname or '')
     except ValueError as exc:
         return Response(str(exc), status_code=400, media_type='text/plain')
 
