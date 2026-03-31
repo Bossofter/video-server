@@ -128,7 +128,8 @@ Notes:
 
 - the NiceGUI app binds to `0.0.0.0` by default
 - the smoke server binds to `127.0.0.1` by default when started from the harness
-- use `--server-host 0.0.0.0` and a matching non-loopback `--video-server-url` only when you intentionally want LAN access
+- `--lan-only` automatically widens the launched smoke server bind to `0.0.0.0` unless you explicitly pass `--server-host`
+- use an explicit non-loopback `--server-host` and matching non-loopback `--video-server-url` only when you intentionally want LAN access
 - the smoke server loads `examples/nicegui_smoke/smoke_server.toml` by default and then applies CLI overrides
 - `--lan-only` enables remote signaling, runtime config, and debug access for LAN smoke testing
 - do not use this mode as a production security model

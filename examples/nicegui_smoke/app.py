@@ -179,10 +179,15 @@ def start_smoke_server() -> subprocess.Popen[str]:
             f'Smoke server binary not found: {smoke_binary}. Build the repo first with ./build.sh.'
         )
 
+    explicit_server_host = has_cli_flag('--server-host')
+    effective_server_host = ARGS.server_host
+    if ARGS.lan_only and not explicit_server_host:
+        effective_server_host = '0.0.0.0'
+
     cmd = [
         str(smoke_binary),
         '--host',
-        ARGS.server_host,
+        effective_server_host,
         '--port',
         str(ARGS.server_port),
     ]
@@ -215,7 +220,7 @@ def start_smoke_server() -> subprocess.Popen[str]:
     if ARGS.shared_key:
         cmd.extend(['--shared-key', ARGS.shared_key])
 
-    probe_host = ARGS.server_host
+    probe_host = effective_server_host
     if probe_host in ('0.0.0.0', '::', ''):
         probe_host = '127.0.0.1'
     try:
@@ -239,7 +244,7 @@ def start_smoke_server() -> subprocess.Popen[str]:
         if process.poll() is not None:
             raise RuntimeError(
                 f'Smoke server exited before becoming ready (exit code {process.returncode}). '
-                f'Check whether {ARGS.server_host}:{ARGS.server_port} is already in use.'
+                f'Check whether {effective_server_host}:{ARGS.server_port} is already in use.'
             )
         try:
             with urllib.request.urlopen(readiness_url, timeout=0.5) as response:

@@ -30,7 +30,7 @@ Open:
 http://<smoke-host-lan-ip>:8090/
 ```
 
-The smoke harness keeps the NiceGUI app on `0.0.0.0`, but the launched synthetic WebRTC server now defaults to `127.0.0.1` so local signaling works with the repo's safe security defaults. Use `--lan-only` together with an explicit non-loopback `--server-host` and matching `--video-server-url` when you want LAN access.
+The smoke harness keeps the NiceGUI app on `0.0.0.0`, but the launched synthetic WebRTC server now defaults to `127.0.0.1` so local signaling works with the repo's safe security defaults. When `--lan-only` is set, the harness automatically widens the launched smoke-server bind to `0.0.0.0` unless you explicitly override `--server-host`.
 
 If you enable shared-key protection on the server, launch the harness with `--shared-key YOUR_TOKEN`. When `--start-server` is used, the harness passes the same token to the smoke server and includes `Authorization: Bearer YOUR_TOKEN` on signaling, config, and debug requests. `--debug` also enables the smoke server's debug endpoint explicitly, which now defaults to disabled.
 
