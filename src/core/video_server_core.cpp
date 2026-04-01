@@ -60,7 +60,7 @@ namespace video_server
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (config.stream_id.empty() || config.width == 0 || config.height == 0 || config.nominal_fps <= 0.0 ||
-            !is_supported_input_pixel_format(config.input_pixel_format))
+            !is_supported_input_pixel_format(config.input_pixel_format) || config.max_subscribers == 0)
         {
             return false;
         }

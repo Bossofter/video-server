@@ -214,6 +214,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
         out << "height = 240\n";
         out << "nominal_fps = 30.0\n";
         out << "input_pixel_format = \"GRAY8\"\n";
+        out << "max_subscribers = 4\n";
         out << "\n[default_raw_pipelines.default]\n";
         out << "encoder = \"libx264\"\n";
         out << "encoder_preset = \"veryfast\"\n";
@@ -249,9 +250,30 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     ASSERT_EQ(config.streams.size(), 1u);
     EXPECT_EQ(config.streams.front().stream_id, "alpha");
     EXPECT_EQ(config.streams.front().input_pixel_format, video_server::VideoPixelFormat::GRAY8);
+    EXPECT_EQ(config.streams.front().max_subscribers, 4u);
     ASSERT_TRUE(config.default_raw_pipelines.find("default") != config.default_raw_pipelines.end());
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder, video_server::RawH264Encoder::LibX264);
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_preset, "veryfast");
 
+    std::remove(path.c_str());
+}
+
+TEST(ManagedVideoServerTest, RejectsTomlConfigWithZeroMaxSubscribers)
+{
+    const std::string path = "/tmp/video_server_managed_config_invalid_max_subscribers.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"alpha\"\n";
+        out << "label = \"Alpha\"\n";
+        out << "width = 320\n";
+        out << "height = 240\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"GRAY8\"\n";
+        out << "max_subscribers = 0\n";
+    }
+
+    EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
     std::remove(path.c_str());
 }

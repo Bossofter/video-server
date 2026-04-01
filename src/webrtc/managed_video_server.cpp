@@ -140,6 +140,19 @@ namespace video_server
                 throw std::runtime_error("invalid stream input_pixel_format: " + pixel_format_value);
             }
             stream.input_pixel_format = *pixel_format;
+            if (const auto *max_subscribers_node = table.get("max_subscribers"))
+            {
+                const auto max_subscribers = max_subscribers_node->value<uint32_t>();
+                if (!max_subscribers.has_value())
+                {
+                    throw std::runtime_error("stream max_subscribers must be an integer");
+                }
+                if (*max_subscribers == 0)
+                {
+                    throw std::runtime_error("stream max_subscribers must be >= 1");
+                }
+                stream.max_subscribers = *max_subscribers;
+            }
             return stream;
         }
 

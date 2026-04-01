@@ -6,6 +6,7 @@ The repo provides:
 
 - a producer-facing API for registering streams and pushing frames
 - a raw -> H.264 -> WebRTC delivery path
+- multi-recipient WebRTC fanout with per-stream subscriber caps
 - per-stream runtime output configuration
 - a lightweight HTTP and signaling surface
 - example harnesses for browser, LAN, and soak validation

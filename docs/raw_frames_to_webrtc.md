@@ -64,7 +64,7 @@ The preferred producer-facing path is now:
 - per-stream output FPS cadence decisions
 - transform/filter application
 - raw-to-H.264 encode
-- forwarding encoded output into the existing WebRTC delivery path
+- forwarding one encoded output stream into the WebRTC fanout path for all active recipients
 
 When `max_streams_per_step` is set, it limits streams that were actually progressed during that call to `step()`. Idle or not-due streams do not consume the budget.
 
@@ -110,6 +110,7 @@ width = 1280
 height = 720
 nominal_fps = 30.0
 input_pixel_format = "RGB24"
+max_subscribers = 4
 
 [default_raw_pipelines.default]
 encoder = "automatic"
@@ -121,6 +122,7 @@ Notes:
 - `webrtc.execution_mode` must stay `manual_step` in the managed path because the managed server owns HTTP pumping explicitly
 - `http_poll_timeout_ms` is mirrored into `webrtc.http_poll_timeout_ms`; if both are supplied they must match
 - the managed TOML loader supports the full meaningful `WebRtcVideoServerConfig` HTTP/security/rate-limit surface
+- `max_subscribers` defaults to `1`, which preserves the old single-viewer behavior unless you opt into fanout
 
 ## Lower-Level Split Path
 
@@ -179,7 +181,7 @@ Useful checks:
 ```bash
 curl http://127.0.0.1:8080/api/video/streams
 curl http://127.0.0.1:8080/api/video/streams/camera-1
-curl http://127.0.0.1:8080/api/video/signaling/camera-1/session
+curl -H 'X-Video-Session-Id: session-1' http://127.0.0.1:8080/api/video/signaling/camera-1/session
 ```
 
 If debug is enabled:
@@ -204,9 +206,11 @@ See:
 
 Important current behavior:
 
-- one active WebRTC session slot per stream
-- a new offer replaces the previous session for that stream
-- old sessions are deactivated and should not continue sending
+- one stream can fan out to multiple concurrent WebRTC recipients
+- each recipient gets its own peer connection and track
+- encoded H.264 is produced once per stream and then fanned out to all active recipients
+- `max_subscribers` enforces the concurrent recipient cap per stream
+- the signaling `offer` response returns a `session_id`; multi-viewer clients should send that value back in `X-Video-Session-Id`
 
 See:
 
