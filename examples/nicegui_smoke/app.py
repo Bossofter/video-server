@@ -164,7 +164,7 @@ async def video_proxy(request: Request, full_path: str) -> Response:
             response_body = upstream.read()
             content_type = upstream.headers.get('Content-Type', 'application/octet-stream')
             response_headers = {}
-            for header_name in ('X-Video-Session-Id', 'Cache-Control'):
+            for header_name in ('X-Video-Session-Id', 'Cache-Control', 'Vary'):
                 header_value = upstream.headers.get(header_name)
                 if header_value:
                     response_headers[header_name] = header_value
@@ -172,7 +172,7 @@ async def video_proxy(request: Request, full_path: str) -> Response:
                             headers=response_headers)
     except urllib.error.HTTPError as exc:
         response_headers = {}
-        for header_name in ('X-Video-Session-Id', 'Cache-Control'):
+        for header_name in ('X-Video-Session-Id', 'Cache-Control', 'Vary'):
             header_value = exc.headers.get(header_name)
             if header_value:
                 response_headers[header_name] = header_value
@@ -980,6 +980,7 @@ window.videoSmokeHarness = (() => {{
   async function postCandidate(serverBase, streamId, candidate, sessionId='') {{
     const response = await fetch(apiProxyUrl(serverBase, `/api/video/signaling/${{streamId}}/candidate`), {{
       method: 'POST',
+      cache: 'no-store',
       headers: signalingHeaders('text/plain', sessionId),
       body: candidate,
     }});
@@ -1059,6 +1060,7 @@ window.videoSmokeHarness = (() => {{
     if (!streamId) return;
     try {{
       const sessionResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/session`), {{
+        cache: 'no-store',
         headers: signalingHeaders(null, state.sessionId),
       }});
       if (!sessionResponse.ok) {{
@@ -1102,6 +1104,7 @@ window.videoSmokeHarness = (() => {{
     if (state.observabilityAvailable === false) return;
     try {{
       const response = await fetch(apiProxyUrl(cfg.serverBase, '/api/video/debug/stats'), {{
+        cache: 'no-store',
         headers: authHeaders(),
       }});
       if (!response.ok) {{
@@ -1246,6 +1249,7 @@ window.videoSmokeHarness = (() => {{
       appendLog('signaling', 'posting SDP offer to server');
       const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/offer`), {{
         method: 'POST',
+        cache: 'no-store',
         headers: signalingHeaders('text/plain'),
         body: pc.localDescription.sdp,
       }});

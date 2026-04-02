@@ -1544,6 +1544,7 @@ namespace video_server
                                               json_escape(created_session_id) + "\"}",
                                           "application/json"};
                     response.headers["X-Video-Session-Id"] = created_session_id;
+                    response.headers["Cache-Control"] = "no-store";
                     return finalize(std::move(response));
                 }
                 if (request.method == "POST" && action == "answer")
@@ -1567,7 +1568,9 @@ namespace video_server
                         }
                         return finalize(json_error(error_message == "session not found" ? 404 : 400, error_message.c_str()));
                     }
-                    return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
+                    HttpResponse response{200, "{\"ok\":true}", "application/json"};
+                    response.headers["Cache-Control"] = "no-store";
+                    return finalize(std::move(response));
                 }
                 if (request.method == "POST" && action == "candidate")
                 {
@@ -1590,7 +1593,9 @@ namespace video_server
                         }
                         return finalize(json_error(error_message == "session not found" ? 404 : 400, error_message.c_str()));
                     }
-                    return finalize(HttpResponse{200, "{\"ok\":true}", "application/json"});
+                    HttpResponse response{200, "{\"ok\":true}", "application/json"};
+                    response.headers["Cache-Control"] = "no-store";
+                    return finalize(std::move(response));
                 }
                 if (request.method == "GET" && action == "session")
                 {
@@ -1601,6 +1606,8 @@ namespace video_server
                     }
                     HttpResponse response{200, signaling_session_json(*session), "application/json"};
                     response.headers["X-Video-Session-Id"] = session->session_id;
+                    response.headers["Cache-Control"] = "no-store";
+                    response.headers["Vary"] = "X-Video-Session-Id";
                     return finalize(std::move(response));
                 }
             }
