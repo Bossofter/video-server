@@ -35,6 +35,7 @@ width = 640
 height = 360
 nominal_fps = 30.0
 input_pixel_format = "GRAY8"
+max_subscribers = 4
 
 [[streams]]
 stream_id = "bravo"
@@ -43,6 +44,7 @@ width = 1280
 height = 720
 nominal_fps = 30.0
 input_pixel_format = "RGB24"
+max_subscribers = 4
 
 [[streams]]
 stream_id = "charlie"
@@ -51,6 +53,7 @@ width = 320
 height = 240
 nominal_fps = 30.0
 input_pixel_format = "RGB24"
+max_subscribers = 4
 
 [default_raw_pipelines.default]
 encoder = "automatic"

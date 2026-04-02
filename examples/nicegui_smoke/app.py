@@ -351,6 +351,7 @@ window.videoSmokeHarness = (() => {{
     sessionSummary: null,
     statsSummary: null,
     observabilitySummary: null,
+    observabilityAvailable: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
     sessionId: '',
@@ -914,6 +915,7 @@ window.videoSmokeHarness = (() => {{
     state.sessionSummary = null;
     state.statsSummary = null;
     state.observabilitySummary = null;
+    state.observabilityAvailable = null;
     state.selectedCodec = '';
     state.lastStatsAt = '';
     state.disconnectReason = reason;
@@ -1084,14 +1086,22 @@ window.videoSmokeHarness = (() => {{
   async function refreshObservability() {{
     const cfg = state.config;
     if (!cfg?.serverBase) return;
+    if (state.observabilityAvailable === false) return;
     try {{
       const response = await fetch(apiProxyUrl(cfg.serverBase, '/api/video/debug/stats'), {{
         headers: authHeaders(),
       }});
       if (!response.ok) {{
+        if (response.status === 404) {{
+          state.observabilityAvailable = false;
+          appendLog('session', 'observability disabled on backend; stopping debug stats polling');
+          updateSummary();
+          return;
+        }}
         appendLog('session', `observability poll failed: HTTP ${{response.status}}`);
         return;
       }}
+      state.observabilityAvailable = true;
       state.observabilitySummary = await response.json();
       updateSummary();
     }} catch (error) {{
