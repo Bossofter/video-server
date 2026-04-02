@@ -331,6 +331,16 @@ namespace video_server
             return trimmed;
         }
 
+        std::optional<std::string> signaling_session_id_from_path(const std::string &value)
+        {
+            const std::string trimmed = trim_ascii(value);
+            if (trimmed.empty())
+            {
+                return std::nullopt;
+            }
+            return trimmed;
+        }
+
         bool is_loopback_host(const std::string &host)
         {
             const std::string lower = lowercase_ascii(host);
@@ -1511,8 +1521,16 @@ namespace video_server
                 const std::string tail = request.path.substr(std::string("/api/video/signaling/").size());
                 const auto slash = tail.find('/');
                 const std::string stream_id = slash == std::string::npos ? tail : tail.substr(0, slash);
-                const std::string action = slash == std::string::npos ? "offer" : tail.substr(slash + 1);
-                const auto session_id = signaling_session_id_from_request(request);
+                const std::string action_and_session = slash == std::string::npos ? "offer" : tail.substr(slash + 1);
+                const auto action_slash = action_and_session.find('/');
+                const std::string action =
+                    action_slash == std::string::npos ? action_and_session : action_and_session.substr(0, action_slash);
+                const auto session_id_from_path =
+                    action_slash == std::string::npos
+                        ? std::optional<std::string>{}
+                        : signaling_session_id_from_path(action_and_session.substr(action_slash + 1));
+                const auto session_id =
+                    session_id_from_path.has_value() ? session_id_from_path : signaling_session_id_from_request(request);
 
                 if (request.method == "POST" && action == "offer")
                 {

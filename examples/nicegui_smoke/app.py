@@ -455,6 +455,10 @@ window.videoSmokeHarness = (() => {{
     }}
   }};
   const configUrl = (serverBase, streamId) => apiProxyUrl(serverBase, `/api/video/streams/${{encodeURIComponent(streamId)}}/config`);
+  const signalingPath = (streamId, action, sessionId='') => {{
+    const basePath = `/api/video/signaling/${{encodeURIComponent(streamId)}}/${{action}}`;
+    return sessionId ? `${{basePath}}/${{encodeURIComponent(sessionId)}}` : basePath;
+  }};
   const authHeaders = (contentType=null) => {{
     const headers = {{}};
     if (contentType) headers['Content-Type'] = contentType;
@@ -978,7 +982,7 @@ window.videoSmokeHarness = (() => {{
   }}
 
   async function postCandidate(serverBase, streamId, candidate, sessionId='') {{
-    const response = await fetch(apiProxyUrl(serverBase, `/api/video/signaling/${{streamId}}/candidate`), {{
+    const response = await fetch(apiProxyUrl(serverBase, signalingPath(streamId, 'candidate', sessionId)), {{
       method: 'POST',
       cache: 'no-store',
       headers: signalingHeaders('text/plain', sessionId),
@@ -1059,7 +1063,10 @@ window.videoSmokeHarness = (() => {{
     const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
     if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/session`), {{
+      const sessionResponse = await fetch(apiProxyUrl(
+        cfg.serverBase,
+        state.sessionId ? signalingPath(streamId, 'session', state.sessionId) : signalingPath(streamId, 'session')
+      ), {{
         cache: 'no-store',
         headers: signalingHeaders(null, state.sessionId),
       }});
@@ -1247,7 +1254,7 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
 
       appendLog('signaling', 'posting SDP offer to server');
-      const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/offer`), {{
+      const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, signalingPath(streamId, 'offer')), {{
         method: 'POST',
         cache: 'no-store',
         headers: signalingHeaders('text/plain'),

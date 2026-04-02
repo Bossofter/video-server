@@ -644,8 +644,7 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
                            {
     first_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
                                                         session_header_map(first_session_id));
-    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
-                                                         session_header_map(second_session_id));
+    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session/" + second_session_id);
     return first_session.status == 200 && second_session.status == 200 &&
            json_string_field(first_session.body, "session_id") == first_session_id &&
            json_string_field(second_session.body, "session_id") == second_session_id &&
@@ -684,8 +683,8 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     }
     if (!second_candidate.empty())
     {
-        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate", second_candidate,
-                                                      session_header_map(second_session_id))
+        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate/" + second_session_id,
+                                                      second_candidate)
                       .status,
                   200);
     }
@@ -703,8 +702,7 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     return !first_backend_candidate.empty(); }, 1000);
     wait_until([&]()
                {
-    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
-                                                         session_header_map(second_session_id));
+    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session/" + second_session_id);
     if (second_session.status != 200) {
       return false;
     }
