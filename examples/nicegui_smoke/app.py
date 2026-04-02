@@ -155,7 +155,7 @@ async def video_proxy(request: Request, full_path: str) -> Response:
 
     body = await request.body()
     outgoing = urllib.request.Request(target, data=body if request.method in {'POST', 'PUT'} else None, method=request.method)
-    for header_name in ('Authorization', 'Content-Type', 'X-Video-Server-Key'):
+    for header_name in ('Authorization', 'Content-Type', 'X-Video-Server-Key', 'X-Video-Session-Id'):
         header_value = request.headers.get(header_name)
         if header_value:
             outgoing.add_header(header_name, header_value)
@@ -163,9 +163,22 @@ async def video_proxy(request: Request, full_path: str) -> Response:
         with urllib.request.urlopen(outgoing, timeout=5.0) as upstream:
             response_body = upstream.read()
             content_type = upstream.headers.get('Content-Type', 'application/octet-stream')
-            return Response(content=response_body, status_code=upstream.status, media_type=content_type)
+            response_headers = {}
+            for header_name in ('X-Video-Session-Id', 'Cache-Control'):
+                header_value = upstream.headers.get(header_name)
+                if header_value:
+                    response_headers[header_name] = header_value
+            return Response(content=response_body, status_code=upstream.status, media_type=content_type,
+                            headers=response_headers)
     except urllib.error.HTTPError as exc:
-        return Response(content=exc.read(), status_code=exc.code, media_type=exc.headers.get('Content-Type', 'text/plain'))
+        response_headers = {}
+        for header_name in ('X-Video-Session-Id', 'Cache-Control'):
+            header_value = exc.headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
+        return Response(content=exc.read(), status_code=exc.code,
+                        media_type=exc.headers.get('Content-Type', 'text/plain'),
+                        headers=response_headers)
     except OSError as exc:
         return Response(str(exc), status_code=502, media_type='text/plain')
 
@@ -1323,6 +1336,10 @@ window.videoSmokeHarness = (() => {{
 
   async function copyLogs() {{
     const logText = byId('smoke-log')?.textContent || '';
+    if (!navigator.clipboard?.writeText) {{
+      appendLog('error', 'copy failed: clipboard API unavailable');
+      return;
+    }}
     await navigator.clipboard.writeText(logText);
     appendLog('ui', 'logs copied to clipboard');
   }}
