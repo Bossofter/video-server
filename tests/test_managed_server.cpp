@@ -258,6 +258,39 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     std::remove(path.c_str());
 }
 
+TEST(ManagedVideoServerTest, LoadsTomlConfigDefaultsMaxSubscribersAndSupportsPerStreamOverrides)
+{
+    const std::string path = "/tmp/video_server_managed_config_multi_stream_subscribers.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"alpha\"\n";
+        out << "label = \"Alpha\"\n";
+        out << "width = 320\n";
+        out << "height = 240\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"GRAY8\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"bravo\"\n";
+        out << "label = \"Bravo\"\n";
+        out << "width = 640\n";
+        out << "height = 360\n";
+        out << "nominal_fps = 15.0\n";
+        out << "input_pixel_format = \"RGB24\"\n";
+        out << "max_subscribers = 3\n";
+    }
+
+    const auto config = video_server::load_managed_video_server_config(path);
+    ASSERT_EQ(config.streams.size(), 2u);
+    EXPECT_EQ(config.streams[0].stream_id, "alpha");
+    EXPECT_EQ(config.streams[0].max_subscribers, 1u);
+    EXPECT_EQ(config.streams[1].stream_id, "bravo");
+    EXPECT_EQ(config.streams[1].max_subscribers, 3u);
+
+    std::remove(path.c_str());
+}
+
 TEST(ManagedVideoServerTest, RejectsTomlConfigWithZeroMaxSubscribers)
 {
     const std::string path = "/tmp/video_server_managed_config_invalid_max_subscribers.toml";
@@ -272,6 +305,26 @@ TEST(ManagedVideoServerTest, RejectsTomlConfigWithZeroMaxSubscribers)
         out << "nominal_fps = 30.0\n";
         out << "input_pixel_format = \"GRAY8\"\n";
         out << "max_subscribers = 0\n";
+    }
+
+    EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
+    std::remove(path.c_str());
+}
+
+TEST(ManagedVideoServerTest, RejectsTomlConfigWithNegativeMaxSubscribers)
+{
+    const std::string path = "/tmp/video_server_managed_config_negative_max_subscribers.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"alpha\"\n";
+        out << "label = \"Alpha\"\n";
+        out << "width = 320\n";
+        out << "height = 240\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"GRAY8\"\n";
+        out << "max_subscribers = -1\n";
     }
 
     EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
