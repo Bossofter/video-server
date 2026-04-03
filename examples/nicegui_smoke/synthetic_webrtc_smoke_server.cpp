@@ -30,6 +30,7 @@ namespace
         uint32_t height{0};
         double fps{0.0};
         video_server::VideoPixelFormat pixel_format{video_server::VideoPixelFormat::RGB24};
+        uint32_t max_subscribers{4};
     };
 
     struct Options
@@ -298,8 +299,10 @@ namespace
         configs.reserve(streams.size());
         for (const auto &stream : streams)
         {
-            configs.push_back(video_server::StreamConfig{
-                stream.stream_id, stream.label, stream.width, stream.height, stream.fps, stream.pixel_format});
+            video_server::StreamConfig config{
+                stream.stream_id, stream.label, stream.width, stream.height, stream.fps, stream.pixel_format};
+            config.max_subscribers = stream.max_subscribers;
+            configs.push_back(std::move(config));
         }
         return configs;
     }
@@ -368,9 +371,10 @@ int main(int argc, char **argv)
     for (const auto &stream_config : config.streams)
     {
         streams.emplace_back(stream_config, run_started_at);
-        spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps input={}", stream_config.stream_id,
-                     stream_config.label, stream_config.width, stream_config.height, stream_config.nominal_fps,
-                     video_server::to_string(stream_config.input_pixel_format));
+        spdlog::info("[smoke-server] stream={} label='{}' {}x{} @ {} fps input={} max_subscribers={}",
+                     stream_config.stream_id, stream_config.label, stream_config.width, stream_config.height,
+                     stream_config.nominal_fps, video_server::to_string(stream_config.input_pixel_format),
+                     stream_config.max_subscribers);
     }
 
     spdlog::info("[smoke-server] started managed HTTP/WebRTC server on http://{}:{} with {} stream(s) config={}",

@@ -155,7 +155,7 @@ async def video_proxy(request: Request, full_path: str) -> Response:
 
     body = await request.body()
     outgoing = urllib.request.Request(target, data=body if request.method in {'POST', 'PUT'} else None, method=request.method)
-    for header_name in ('Authorization', 'Content-Type', 'X-Video-Server-Key'):
+    for header_name in ('Authorization', 'Content-Type', 'X-Video-Server-Key', 'X-Video-Session-Id'):
         header_value = request.headers.get(header_name)
         if header_value:
             outgoing.add_header(header_name, header_value)
@@ -163,9 +163,22 @@ async def video_proxy(request: Request, full_path: str) -> Response:
         with urllib.request.urlopen(outgoing, timeout=5.0) as upstream:
             response_body = upstream.read()
             content_type = upstream.headers.get('Content-Type', 'application/octet-stream')
-            return Response(content=response_body, status_code=upstream.status, media_type=content_type)
+            response_headers = {}
+            for header_name in ('X-Video-Session-Id', 'Cache-Control', 'Vary'):
+                header_value = upstream.headers.get(header_name)
+                if header_value:
+                    response_headers[header_name] = header_value
+            return Response(content=response_body, status_code=upstream.status, media_type=content_type,
+                            headers=response_headers)
     except urllib.error.HTTPError as exc:
-        return Response(content=exc.read(), status_code=exc.code, media_type=exc.headers.get('Content-Type', 'text/plain'))
+        response_headers = {}
+        for header_name in ('X-Video-Session-Id', 'Cache-Control', 'Vary'):
+            header_value = exc.headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
+        return Response(content=exc.read(), status_code=exc.code,
+                        media_type=exc.headers.get('Content-Type', 'text/plain'),
+                        headers=response_headers)
     except OSError as exc:
         return Response(str(exc), status_code=502, media_type='text/plain')
 
@@ -351,8 +364,10 @@ window.videoSmokeHarness = (() => {{
     sessionSummary: null,
     statsSummary: null,
     observabilitySummary: null,
+    observabilityAvailable: null,
     offerStatus: 'idle',
     candidateStatus: 'idle',
+    sessionId: '',
     connectedStreamId: '',
     remoteDescriptionApplied: false,
     remoteTrackReceived: false,
@@ -440,10 +455,19 @@ window.videoSmokeHarness = (() => {{
     }}
   }};
   const configUrl = (serverBase, streamId) => apiProxyUrl(serverBase, `/api/video/streams/${{encodeURIComponent(streamId)}}/config`);
+  const signalingPath = (streamId, action, sessionId='') => {{
+    const basePath = `/api/video/signaling/${{encodeURIComponent(streamId)}}/${{action}}`;
+    return sessionId ? `${{basePath}}/${{encodeURIComponent(sessionId)}}` : basePath;
+  }};
   const authHeaders = (contentType=null) => {{
     const headers = {{}};
     if (contentType) headers['Content-Type'] = contentType;
     if (state.config?.sharedKey) headers['Authorization'] = `Bearer ${{state.config.sharedKey}}`;
+    return headers;
+  }};
+  const signalingHeaders = (contentType=null, sessionId='') => {{
+    const headers = authHeaders(contentType);
+    if (sessionId) headers['X-Video-Session-Id'] = sessionId;
     return headers;
   }};
   const selectedStreamSpec = (streamId) => {{
@@ -898,6 +922,7 @@ window.videoSmokeHarness = (() => {{
     state.sessionPollAbort = true;
     state.offerStatus = 'idle';
     state.candidateStatus = 'idle';
+    state.sessionId = '';
     state.connectedStreamId = '';
     state.remoteDescriptionApplied = false;
     state.remoteTrackReceived = false;
@@ -907,6 +932,7 @@ window.videoSmokeHarness = (() => {{
     state.sessionSummary = null;
     state.statsSummary = null;
     state.observabilitySummary = null;
+    state.observabilityAvailable = null;
     state.selectedCodec = '';
     state.lastStatsAt = '';
     state.disconnectReason = reason;
@@ -955,10 +981,11 @@ window.videoSmokeHarness = (() => {{
     }}, delayMs);
   }}
 
-  async function postCandidate(serverBase, streamId, candidate) {{
-    const response = await fetch(apiProxyUrl(serverBase, `/api/video/signaling/${{streamId}}/candidate`), {{
+  async function postCandidate(serverBase, streamId, candidate, sessionId='') {{
+    const response = await fetch(apiProxyUrl(serverBase, signalingPath(streamId, 'candidate', sessionId)), {{
       method: 'POST',
-      headers: authHeaders('text/plain'),
+      cache: 'no-store',
+      headers: signalingHeaders('text/plain', sessionId),
       body: candidate,
     }});
     if (!response.ok) {{
@@ -989,6 +1016,10 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_video_mid: session.encoded_sender_video_mid,
       last_local_candidate: session.last_local_candidate,
       answer_present: !!session.answer_sdp,
+      session_id: session.session_id || '',
+      active: session.active,
+      teardown_reason: session.teardown_reason || '',
+      last_transition_reason: session.last_transition_reason || '',
     }};
   }}
 
@@ -1032,8 +1063,12 @@ window.videoSmokeHarness = (() => {{
     const streamId = streamIdOverride || state.connectedStreamId || cfg.streamId;
     if (!streamId) return;
     try {{
-      const sessionResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/session`), {{
-        headers: authHeaders(),
+      const sessionResponse = await fetch(apiProxyUrl(
+        cfg.serverBase,
+        state.sessionId ? signalingPath(streamId, 'session', state.sessionId) : signalingPath(streamId, 'session')
+      ), {{
+        cache: 'no-store',
+        headers: signalingHeaders(null, state.sessionId),
       }});
       if (!sessionResponse.ok) {{
         appendLog('session', `session poll failed: HTTP ${{sessionResponse.status}}`);
@@ -1041,6 +1076,7 @@ window.videoSmokeHarness = (() => {{
       }}
       const session = await sessionResponse.json();
       if (token !== state.connectToken) return;
+      state.sessionId = session.session_id || state.sessionId || '';
       state.sessionSummary = summarizeSession(session);
       await refreshObservability();
       if (session.last_local_candidate && session.last_local_candidate !== state.lastBackendCandidate) {{
@@ -1072,14 +1108,23 @@ window.videoSmokeHarness = (() => {{
   async function refreshObservability() {{
     const cfg = state.config;
     if (!cfg?.serverBase) return;
+    if (state.observabilityAvailable === false) return;
     try {{
       const response = await fetch(apiProxyUrl(cfg.serverBase, '/api/video/debug/stats'), {{
+        cache: 'no-store',
         headers: authHeaders(),
       }});
       if (!response.ok) {{
+        if (response.status === 404) {{
+          state.observabilityAvailable = false;
+          appendLog('session', 'observability disabled on backend; stopping debug stats polling');
+          updateSummary();
+          return;
+        }}
         appendLog('session', `observability poll failed: HTTP ${{response.status}}`);
         return;
       }}
+      state.observabilityAvailable = true;
       state.observabilitySummary = await response.json();
       updateSummary();
     }} catch (error) {{
@@ -1124,7 +1169,7 @@ window.videoSmokeHarness = (() => {{
       while (bufferedLocalCandidates.length > 0) {{
         const candidate = bufferedLocalCandidates.shift();
         try {{
-          await postCandidate(cfg.serverBase, streamId, candidate);
+          await postCandidate(cfg.serverBase, streamId, candidate, state.sessionId);
           state.candidateStatus = 'posted';
           appendLog('ice', `candidate posted: ${{candidate}}`);
         }} catch (error) {{
@@ -1177,7 +1222,7 @@ window.videoSmokeHarness = (() => {{
         return;
       }}
       try {{
-        await postCandidate(cfg.serverBase, streamId, candidate);
+        await postCandidate(cfg.serverBase, streamId, candidate, state.sessionId);
         state.candidateStatus = 'posted';
         appendLog('ice', `candidate posted immediately: ${{candidate}}`);
       }} catch (error) {{
@@ -1209,9 +1254,10 @@ window.videoSmokeHarness = (() => {{
       updateSummary();
 
       appendLog('signaling', 'posting SDP offer to server');
-      const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, `/api/video/signaling/${{streamId}}/offer`), {{
+      const offerResponse = await fetch(apiProxyUrl(cfg.serverBase, signalingPath(streamId, 'offer')), {{
         method: 'POST',
-        headers: authHeaders('text/plain'),
+        cache: 'no-store',
+        headers: signalingHeaders('text/plain'),
         body: pc.localDescription.sdp,
       }});
       if (!offerResponse.ok) {{
@@ -1223,9 +1269,11 @@ window.videoSmokeHarness = (() => {{
         scheduleReconnect('offer failure');
         return;
       }}
+      const offerPayload = await offerResponse.json().catch(() => ({{}}));
+      state.sessionId = offerPayload.session_id || offerResponse.headers.get('X-Video-Session-Id') || '';
       offerPosted = true;
       state.offerStatus = 'offer posted';
-      appendLog('signaling', 'offer posted successfully');
+      appendLog('signaling', `offer posted successfully${{state.sessionId ? ` session_id=${{state.sessionId}}` : ''}}`);
       updateSummary();
 
       await refreshSession(streamId);
@@ -1299,6 +1347,10 @@ window.videoSmokeHarness = (() => {{
 
   async function copyLogs() {{
     const logText = byId('smoke-log')?.textContent || '';
+    if (!navigator.clipboard?.writeText) {{
+      appendLog('error', 'copy failed: clipboard API unavailable');
+      return;
+    }}
     await navigator.clipboard.writeText(logText);
     appendLog('ui', 'logs copied to clipboard');
   }}

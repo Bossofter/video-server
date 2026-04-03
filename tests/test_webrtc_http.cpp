@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #define CHECK_TRUE(expr)                     \
@@ -211,6 +212,11 @@ namespace
         return it->second;
     }
 
+    std::unordered_map<std::string, std::string> session_header_map(const std::string &session_id)
+    {
+        return {{"X-Video-Session-Id", session_id}};
+    }
+
     void assert_no_control_chars(const std::string &text)
     {
         for (unsigned char c : text)
@@ -396,7 +402,7 @@ TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions)
         CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Origin") == origin);
         CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Methods") == "GET, POST, PUT, OPTIONS");
         CHECK_TRUE(response_header(offer_response, "Access-Control-Allow-Headers") ==
-                   "Authorization, Content-Type, X-Video-Server-Key");
+                   "Authorization, Content-Type, X-Video-Server-Key, X-Video-Session-Id");
     }
 
     const auto session_response =
@@ -411,7 +417,7 @@ TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions)
     CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Origin") == origin);
     CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Methods") == "GET, POST, PUT, OPTIONS");
     CHECK_TRUE(response_header(options_offer, "Access-Control-Allow-Headers") ==
-               "Authorization, Content-Type, X-Video-Server-Key");
+               "Authorization, Content-Type, X-Video-Server-Key, X-Video-Session-Id");
 
     const auto options_candidate =
         server.handle_http_request_for_test("OPTIONS", "/api/video/signaling/signal-cors/candidate", "", headers);
@@ -604,6 +610,209 @@ TEST(WebRtcHttpTest, RepeatedSignalingOperationsRemainResponsive)
     }
 
     server.stop();
+}
+
+TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
+{
+    video_server::WebRtcVideoServer server(make_http_test_config());
+    video_server::StreamConfig cfg{"fanout", "fanout", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
+    cfg.max_subscribers = 2;
+    ASSERT_TRUE(server.register_stream(cfg));
+
+    auto first_client = make_client_offer("fanout-a");
+    auto second_client = make_client_offer("fanout-b");
+    auto third_client = make_client_offer("fanout-c");
+
+    const auto first_offer =
+        server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/offer", first_client->offer_sdp);
+    const auto second_offer =
+        server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/offer", second_client->offer_sdp);
+    ASSERT_EQ(first_offer.status, 200);
+    ASSERT_EQ(second_offer.status, 200);
+
+    const std::string first_session_id = json_string_field(first_offer.body, "session_id");
+    const std::string second_session_id = json_string_field(second_offer.body, "session_id");
+    ASSERT_FALSE(first_session_id.empty());
+    ASSERT_FALSE(second_session_id.empty());
+    ASSERT_NE(first_session_id, second_session_id);
+    EXPECT_EQ(response_header(first_offer, "X-Video-Session-Id"), first_session_id);
+    EXPECT_EQ(response_header(second_offer, "X-Video-Session-Id"), second_session_id);
+
+    video_server::WebRtcHttpResponse first_session{};
+    video_server::WebRtcHttpResponse second_session{};
+    ASSERT_TRUE(wait_until([&]()
+                           {
+    first_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                        session_header_map(first_session_id));
+    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session/" + second_session_id);
+    return first_session.status == 200 && second_session.status == 200 &&
+           json_string_field(first_session.body, "session_id") == first_session_id &&
+           json_string_field(second_session.body, "session_id") == second_session_id &&
+           !json_string_field(first_session.body, "answer_sdp").empty() &&
+           !json_string_field(second_session.body, "answer_sdp").empty(); }));
+    first_client->peer_connection->setRemoteDescription(
+        rtc::Description(json_string_field(first_session.body, "answer_sdp"), "answer"));
+    second_client->peer_connection->setRemoteDescription(
+        rtc::Description(json_string_field(second_session.body, "answer_sdp"), "answer"));
+
+    std::string first_candidate;
+    std::string second_candidate;
+    wait_until([&]()
+               {
+    std::lock_guard<std::mutex> first_lock(first_client->mutex);
+    if (first_client->candidates.empty()) {
+      return false;
+    }
+    first_candidate = first_client->candidates.front();
+    return true; }, 1000);
+    wait_until([&]()
+               {
+    std::lock_guard<std::mutex> second_lock(second_client->mutex);
+    if (second_client->candidates.empty()) {
+      return false;
+    }
+    second_candidate = second_client->candidates.front();
+    return true; }, 1000);
+
+    if (!first_candidate.empty())
+    {
+        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate", first_candidate,
+                                                      session_header_map(first_session_id))
+                      .status,
+                  200);
+    }
+    if (!second_candidate.empty())
+    {
+        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate/" + second_session_id,
+                                                      second_candidate)
+                      .status,
+                  200);
+    }
+
+    std::string first_backend_candidate;
+    std::string second_backend_candidate;
+    wait_until([&]()
+               {
+    first_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                        session_header_map(first_session_id));
+    if (first_session.status != 200) {
+      return false;
+    }
+    first_backend_candidate = json_string_field(first_session.body, "last_local_candidate");
+    return !first_backend_candidate.empty(); }, 1000);
+    wait_until([&]()
+               {
+    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session/" + second_session_id);
+    if (second_session.status != 200) {
+      return false;
+    }
+    second_backend_candidate = json_string_field(second_session.body, "last_local_candidate");
+    return !second_backend_candidate.empty(); }, 1000);
+
+    if (!first_backend_candidate.empty())
+    {
+        first_client->peer_connection->addRemoteCandidate(rtc::Candidate(first_backend_candidate));
+    }
+    if (!second_backend_candidate.empty())
+    {
+        second_client->peer_connection->addRemoteCandidate(rtc::Candidate(second_backend_candidate));
+    }
+
+    ASSERT_TRUE(wait_until([&]()
+                           {
+    first_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                        session_header_map(first_session_id));
+    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                         session_header_map(second_session_id));
+    if (first_session.status != 200 || second_session.status != 200) {
+      return false;
+    }
+    return json_string_field(first_session.body, "peer_state") != "new" &&
+           json_string_field(second_session.body, "peer_state") != "new"; }));
+
+    const auto rejected_offer =
+        server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/offer", third_client->offer_sdp);
+    ASSERT_EQ(rejected_offer.status, 409);
+    ASSERT_NE(rejected_offer.body.find("max subscribers reached"), std::string::npos);
+
+    const std::array<uint8_t, 16> codec_config_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+                                                     0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2};
+    const std::array<uint8_t, 7> idr_bytes{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84};
+    video_server::EncodedAccessUnitView codec_config{codec_config_bytes.data(),
+                                                     codec_config_bytes.size(),
+                                                     video_server::VideoCodec::H264,
+                                                     1000,
+                                                     false,
+                                                     true};
+    video_server::EncodedAccessUnitView idr{};
+    idr.data = idr_bytes.data();
+    idr.size_bytes = idr_bytes.size();
+    idr.codec = video_server::VideoCodec::H264;
+    idr.timestamp_ns = 2000;
+    idr.keyframe = true;
+    idr.codec_config = false;
+    ASSERT_TRUE(server.push_access_unit("fanout", codec_config));
+    ASSERT_TRUE(server.push_access_unit("fanout", idr));
+
+    ASSERT_TRUE(wait_until([&]()
+                           {
+    first_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                        session_header_map(first_session_id));
+    second_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                         session_header_map(second_session_id));
+    if (first_session.status != 200 || second_session.status != 200) {
+      return false;
+    }
+    return json_uint_field(first_session.body, "latest_encoded_timestamp_ns") == 2000 &&
+           json_uint_field(second_session.body, "latest_encoded_timestamp_ns") == 2000 &&
+           json_uint_field(first_session.body, "encoded_sender_delivered_units") >= 2 &&
+           json_uint_field(second_session.body, "encoded_sender_delivered_units") >= 2; }));
+
+    if (!first_candidate.empty())
+    {
+        EXPECT_EQ(json_string_field(first_session.body, "last_remote_candidate"), first_candidate);
+    }
+    if (!second_candidate.empty())
+    {
+        EXPECT_EQ(json_string_field(second_session.body, "last_remote_candidate"), second_candidate);
+    }
+    EXPECT_EQ(server.get_debug_snapshot().active_session_count, 2u);
+
+    first_client->peer_connection->close();
+
+    const bool freed_slot = wait_until([&]()
+                                       {
+    first_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                        session_header_map(first_session_id));
+    return first_session.status == 404 ||
+           (first_session.status == 200 && !json_bool_field(first_session.body, "active")); });
+
+    if (freed_slot)
+    {
+        video_server::WebRtcHttpResponse replacement_offer{};
+        ASSERT_TRUE(wait_until([&]()
+                               {
+        replacement_offer = server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/offer",
+                                                                third_client->offer_sdp);
+        return replacement_offer.status == 200; }));
+
+        const std::string third_session_id = json_string_field(replacement_offer.body, "session_id");
+        ASSERT_FALSE(third_session_id.empty());
+        ASSERT_NE(third_session_id, first_session_id);
+        ASSERT_NE(third_session_id, second_session_id);
+
+        video_server::WebRtcHttpResponse third_session{};
+        ASSERT_TRUE(wait_until([&]()
+                               {
+        third_session = server.handle_http_request_for_test("GET", "/api/video/signaling/fanout/session", "",
+                                                            session_header_map(third_session_id));
+        return third_session.status == 200 && json_string_field(third_session.body, "session_id") == third_session_id &&
+               !json_string_field(third_session.body, "answer_sdp").empty(); }));
+        third_client->peer_connection->setRemoteDescription(
+            rtc::Description(json_string_field(third_session.body, "answer_sdp"), "answer"));
+
+        EXPECT_EQ(server.get_debug_snapshot().active_session_count, 2u);
+    }
 }
 
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow)
@@ -1363,6 +1572,7 @@ TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCohe
 #else
 TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated) { GTEST_SKIP() << "WebRTC backend disabled"; }
+TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit) { GTEST_SKIP() << "WebRTC backend disabled"; }
 TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCoherent)
 {
     GTEST_SKIP() << "WebRTC backend disabled";

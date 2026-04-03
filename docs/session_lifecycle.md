@@ -4,32 +4,56 @@ This project keeps session behavior explicit and easy to reason about.
 
 ## Connect
 
-`POST /api/video/signaling/{stream_id}/offer` creates or replaces the current WebRTC session for that stream.
+`POST /api/video/signaling/{stream_id}/offer` creates one WebRTC recipient session for that stream.
 
 On success:
 
 - a new `WebRtcStreamSession` is created
+- the response includes a per-recipient `session_id`
 - the remote offer is applied
 - the backend generates an answer
-- the stream's `session_generation` increments
+- that recipient's `session_generation` increments
 
-## Disconnect And Replace
+For concurrent viewers, send `X-Video-Session-Id: {session_id}` on:
 
-There is currently one active session slot per stream.
+- `GET /api/video/signaling/{stream_id}/session`
+- `POST /api/video/signaling/{stream_id}/candidate`
+- `POST /api/video/signaling/{stream_id}/answer`
 
-That means:
+If the header is omitted, the API falls back to the newest recipient session for that stream so older single-viewer clients still work.
 
-- one stream can have multiple streams overall, but only one live peer session per stream
-- a new offer for the same stream replaces the previous session
-- when a session is replaced or the peer disconnects, the old sender is deactivated
+## Fanout
+
+One stream can now have multiple active WebRTC recipient sessions at the same time.
+
+Important behavior:
+
+- encoding still happens once per stream
+- the latest encoded access unit is fanned out to every active recipient
+- packetization and transport stay per-recipient because each viewer has its own peer connection and track
+- `StreamConfig.max_subscribers` limits concurrent recipients per stream
+
+When the limit is reached:
+
+- new offers are rejected with HTTP `409`
+- the signaling error is `max subscribers reached`
+
+## Disconnect And Reuse
+
+When a recipient disconnects:
+
+- that session becomes inactive
+- its sender is deactivated
+- the slot becomes available for a later subscriber on the same stream
 
 ## Reconnect
 
-Reconnect means creating a new session for the same stream after disconnect or replacement.
+Reconnect means creating a new recipient session for the same stream after disconnect.
 
 What to look for:
 
-- `session_generation` increases
+- the new recipient gets a fresh `session_id`
+- that recipient's `session_generation` increases
 - `disconnect_count` on the old session path increases when it transitions inactive
 - the browser gets a fresh answer and candidate flow
 
@@ -80,7 +104,7 @@ Session inspection surfaces:
 Useful endpoint:
 
 ```bash
-curl http://127.0.0.1:8080/api/video/signaling/alpha/session
+curl -H 'X-Video-Session-Id: session-2' http://127.0.0.1:8080/api/video/signaling/alpha/session
 ```
 
 If a session is healthy, the usual end state is a move into `sending-h264-rtp`.

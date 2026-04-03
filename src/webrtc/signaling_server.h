@@ -16,6 +16,8 @@ namespace video_server
 
     /** @brief Callback used to validate stream existence. */
     using StreamExistsFn = std::function<bool(const std::string &)>;
+    /** @brief Getter alias used to fetch the configured per-stream subscriber cap. */
+    using MaxSubscribersGetterFn = std::function<std::optional<uint32_t>(const std::string &)>;
     /** @brief Getter alias used to fetch the latest transformed frame. */
     using LatestFrameGetterFn = WebRtcStreamSession::LatestFrameGetter;
     /** @brief Getter alias used to fetch the latest encoded unit. */
@@ -26,6 +28,7 @@ namespace video_server
      */
     struct SignalingSession
     {
+        std::string session_id;                  /**< Stable signaling session identifier for one recipient. */
         uint64_t session_generation{0};         /**< Monotonic session generation for the stream. */
         std::string stream_id;                  /**< Identifier of the owning stream. */
         std::string offer_sdp;                  /**< Latest applied remote offer SDP. */
@@ -51,11 +54,13 @@ namespace video_server
          * @brief Creates a signaling server bound to stream existence and snapshot getters.
          *
          * @param stream_exists Callback used to validate stream ids.
+         * @param max_subscribers_getter Callback used to fetch each stream's subscriber cap.
          * @param latest_frame_getter Callback used to fetch latest-frame snapshots.
          * @param latest_encoded_unit_getter Callback used to fetch latest encoded-unit snapshots.
          * @param max_pending_candidates_per_stream Maximum number of queued candidates before a session exists.
          */
-        SignalingServer(StreamExistsFn stream_exists, LatestFrameGetterFn latest_frame_getter,
+        SignalingServer(StreamExistsFn stream_exists, MaxSubscribersGetterFn max_subscribers_getter,
+                        LatestFrameGetterFn latest_frame_getter,
                         LatestEncodedUnitGetterFn latest_encoded_unit_getter,
                         size_t max_pending_candidates_per_stream = 32);
         ~SignalingServer();
@@ -68,7 +73,8 @@ namespace video_server
          * @param error_message Optional destination for a human-readable failure reason.
          * @return True when the offer was accepted, false otherwise.
          */
-        bool set_offer(const std::string &stream_id, const std::string &offer_sdp, std::string *error_message = nullptr);
+        bool set_offer(const std::string &stream_id, const std::string &offer_sdp, std::string *error_message = nullptr,
+                       std::string *session_id_out = nullptr);
 
         /**
          * @brief Applies a remote answer to an active session.
@@ -78,7 +84,8 @@ namespace video_server
          * @param error_message Optional destination for a human-readable failure reason.
          * @return True when the answer was accepted, false otherwise.
          */
-        bool set_answer(const std::string &stream_id, const std::string &answer_sdp, std::string *error_message = nullptr);
+        bool set_answer(const std::string &stream_id, const std::string &answer_sdp, std::string *error_message = nullptr,
+                        std::optional<std::string> session_id = std::nullopt);
 
         /**
          * @brief Queues or applies a remote ICE candidate.
@@ -89,7 +96,8 @@ namespace video_server
          * @return True when the candidate was queued or applied, false otherwise.
          */
         bool add_ice_candidate(const std::string &stream_id, const std::string &candidate,
-                               std::string *error_message = nullptr);
+                               std::string *error_message = nullptr,
+                               std::optional<std::string> session_id = std::nullopt);
 
         /**
          * @brief Publishes a latest-frame update to the active session for a stream.
@@ -114,7 +122,8 @@ namespace video_server
          * @param stream_id Identifier of the stream to query.
          * @return Session snapshot when the stream has a session, otherwise `std::nullopt`.
          */
-        std::optional<SignalingSession> get_session(const std::string &stream_id) const;
+        std::optional<SignalingSession> get_session(const std::string &stream_id,
+                                                    std::optional<std::string> session_id = std::nullopt) const;
 
         /**
          * @brief Returns all active session snapshots.
@@ -139,18 +148,26 @@ namespace video_server
          */
         struct StreamSessionSlot
         {
-            uint64_t session_generation{0};                     /**< Monotonic session generation for the stream. */
-            std::shared_ptr<WebRtcStreamSession> session;       /**< Active session instance when present. */
             std::vector<std::string> pending_remote_candidates; /**< Candidates queued before session creation. */
+            uint64_t next_session_generation{0};                /**< Monotonic generation assigned to each new recipient. */
+            struct RecipientSessionSlot
+            {
+                uint64_t session_generation{0};               /**< Monotonic session generation for the recipient. */
+                std::shared_ptr<WebRtcStreamSession> session; /**< Session instance when present. */
+            };
+            std::unordered_map<std::string, RecipientSessionSlot> sessions; /**< Active and recently inactive recipients. */
         };
 
+        static void prune_inactive_recipients_locked(StreamSessionSlot &slot);
+
         StreamExistsFn stream_exists_;
+        MaxSubscribersGetterFn max_subscribers_getter_;
         LatestFrameGetterFn latest_frame_getter_;
         LatestEncodedUnitGetterFn latest_encoded_unit_getter_;
         size_t max_pending_candidates_per_stream_;
 
         mutable std::mutex mutex_;
-        std::unordered_map<std::string, StreamSessionSlot> sessions_;
+        mutable std::unordered_map<std::string, StreamSessionSlot> sessions_;
     };
 
 } // namespace video_server
