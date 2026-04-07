@@ -330,3 +330,52 @@ TEST(ManagedVideoServerTest, RejectsTomlConfigWithNegativeMaxSubscribers)
     EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
     std::remove(path.c_str());
 }
+
+TEST(ManagedVideoServerTest, LoadsExplicitHighBitDepthGrayscaleFormatsAndAliases)
+{
+    const std::string path = "/tmp/video_server_managed_config_gray_formats.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"gray10\"\n";
+        out << "label = \"Gray10\"\n";
+        out << "width = 64\n";
+        out << "height = 48\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"GRAY10\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"gray16\"\n";
+        out << "label = \"Gray16\"\n";
+        out << "width = 64\n";
+        out << "height = 48\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"GRAY16LE\"\n";
+    }
+
+    const auto config = video_server::load_managed_video_server_config(path);
+    ASSERT_EQ(config.streams.size(), 2u);
+    EXPECT_EQ(config.streams[0].input_pixel_format, video_server::VideoPixelFormat::GRAY10LE);
+    EXPECT_EQ(config.streams[1].input_pixel_format, video_server::VideoPixelFormat::GRAY16LE);
+
+    std::remove(path.c_str());
+}
+
+TEST(ManagedVideoServerTest, RejectsTomlConfigWithManagedUnsupportedPixelFormat)
+{
+    const std::string path = "/tmp/video_server_managed_config_unsupported_pixel_format.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "\n[[streams]]\n";
+        out << "stream_id = \"alpha\"\n";
+        out << "label = \"Alpha\"\n";
+        out << "width = 320\n";
+        out << "height = 240\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"NV12\"\n";
+    }
+
+    EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
+    std::remove(path.c_str());
+}

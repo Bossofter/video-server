@@ -24,6 +24,8 @@ extern "C"
 #include <libswscale/swscale.h>
 }
 
+#include "../core/video_pixel_format_utils.h"
+#include "libav_pixel_format_mapping.h"
 #include "raw_h264_encoder_backend.h"
 
 namespace video_server
@@ -40,50 +42,6 @@ namespace video_server
             char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
             av_strerror(error_code, buffer, sizeof(buffer));
             return std::string(buffer);
-        }
-
-        AVPixelFormat pixel_format_to_av(VideoPixelFormat pixel_format)
-        {
-            switch (pixel_format)
-            {
-            case VideoPixelFormat::RGB24:
-                return AV_PIX_FMT_RGB24;
-            case VideoPixelFormat::BGR24:
-                return AV_PIX_FMT_BGR24;
-            case VideoPixelFormat::RGBA32:
-                return AV_PIX_FMT_RGBA;
-            case VideoPixelFormat::BGRA32:
-                return AV_PIX_FMT_BGRA;
-            case VideoPixelFormat::GRAY8:
-                return AV_PIX_FMT_GRAY8;
-            case VideoPixelFormat::NV12:
-                return AV_PIX_FMT_NV12;
-            case VideoPixelFormat::I420:
-                return AV_PIX_FMT_YUV420P;
-            }
-            return AV_PIX_FMT_NONE;
-        }
-
-        uint32_t bytes_per_pixel(VideoPixelFormat pixel_format)
-        {
-            switch (pixel_format)
-            {
-            case VideoPixelFormat::RGB24:
-            case VideoPixelFormat::BGR24:
-                return 3;
-            case VideoPixelFormat::RGBA32:
-            case VideoPixelFormat::BGRA32:
-                return 4;
-            case VideoPixelFormat::GRAY8:
-                return 1;
-            default:
-                return 0;
-            }
-        }
-
-        bool is_planar_pixel_format(VideoPixelFormat pixel_format)
-        {
-            return pixel_format == VideoPixelFormat::NV12 || pixel_format == VideoPixelFormat::I420;
         }
 
         bool start_code_at(const uint8_t *bytes, size_t size, size_t index, size_t *prefix_size)
@@ -343,7 +301,15 @@ namespace video_server
                     return false;
                 }
 
-                input_frame->format = pixel_format_to_av(config_.input_pixel_format);
+                const auto input_pixel_format = libav_pixel_format_from_video_pixel_format(config_.input_pixel_format);
+                if (!input_pixel_format.has_value())
+                {
+                    set_error_value(error_message,
+                                    "failed to map raw input pixel format '" + std::string(to_string(config_.input_pixel_format)) +
+                                        "' into a libav pixel format");
+                    return false;
+                }
+                input_frame->format = *input_pixel_format;
                 input_frame->width = static_cast<int>(config_.input_width);
                 input_frame->height = static_cast<int>(config_.input_height);
 
@@ -358,8 +324,8 @@ namespace video_server
                 }
 
                 std::unique_ptr<SwsContext, SwsContextDeleter> sws_context(sws_getContext(
-                    static_cast<int>(config_.input_width), static_cast<int>(config_.input_height),
-                    pixel_format_to_av(config_.input_pixel_format), codec_context->width, codec_context->height,
+                    static_cast<int>(config_.input_width), static_cast<int>(config_.input_height), *input_pixel_format,
+                    codec_context->width, codec_context->height,
                     codec_context->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr));
                 if (!sws_context)
                 {
@@ -453,6 +419,9 @@ namespace video_server
                 case VideoPixelFormat::RGBA32:
                 case VideoPixelFormat::BGRA32:
                 case VideoPixelFormat::GRAY8:
+                case VideoPixelFormat::GRAY10LE:
+                case VideoPixelFormat::GRAY12LE:
+                case VideoPixelFormat::GRAY16LE:
                     input_frame_->data[0] = const_cast<uint8_t *>(data);
                     input_frame_->linesize[0] = static_cast<int>(frame.stride_bytes);
                     break;
@@ -700,9 +669,10 @@ namespace video_server
                     set_error_locked("input dimensions and fps must be valid", error_message);
                     return false;
                 }
-                if (pixel_format_to_av(config_.input_pixel_format) == AV_PIX_FMT_NONE)
+                std::string pixel_format_error;
+                if (!validate_libav_pixel_format(config_.input_pixel_format, &pixel_format_error))
                 {
-                    set_error_locked("unsupported libav input pixel format", error_message);
+                    set_error_locked(pixel_format_error, error_message);
                     return false;
                 }
                 if (config_.scale_mode == RawPipelineScaleMode::Resize)
@@ -730,17 +700,12 @@ namespace video_server
                     set_error_value(error_message, "frame does not match pipeline input contract");
                     return false;
                 }
-                if (!is_planar_pixel_format(frame.pixel_format))
+                if (!video_pixel_format_is_planar(frame.pixel_format))
                 {
-                    const uint32_t min_stride = config_.input_width * bytes_per_pixel(frame.pixel_format);
+                    const uint32_t min_stride = video_pixel_format_min_row_bytes(frame.pixel_format, config_.input_width);
                     if (frame.stride_bytes < min_stride)
                     {
                         set_error_value(error_message, "frame stride is too small");
-                        return false;
-                    }
-                    if (frame.stride_bytes != min_stride)
-                    {
-                        set_error_value(error_message, "pipeline currently requires tightly packed raw frames");
                         return false;
                     }
                     return true;

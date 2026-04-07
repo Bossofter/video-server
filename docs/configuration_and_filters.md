@@ -36,6 +36,8 @@ Practical meaning:
 
 `palette_min` and `palette_max` matter for intensity-mapped output such as `WhiteHot`, `BlackHot`, `Ironbow`, `Rainbow`, and `Arctic`. The server requires `palette_max > palette_min`.
 
+For grayscale raw inputs, including `GRAY10LE`, `GRAY12LE`, and `GRAY16LE`, intensity is normalized from the source bit depth before the display mode is applied.
+
 ## Output Size
 
 `output_width` and `output_height` control the transformed output size.

@@ -135,15 +135,31 @@ The managed server wraps that lower-level behavior into one stepped progression 
 
 ## Choosing The Input Format
 
-The raw pipeline currently accepts tightly packed:
+The producer-facing `VideoPixelFormat` enum remains the public API. Backend/libav pixel types stay internal to the raw-to-H.264 layer.
+
+Managed/raw-frame ingest and latest-frame transforms currently accept:
 
 - `RGB24`
 - `BGR24`
 - `RGBA32`
 - `BGRA32`
 - `GRAY8`
+- `GRAY10LE`
+- `GRAY12LE`
+- `GRAY16LE`
+
+Config parsing also accepts grayscale aliases `GRAY10`, `GRAY12`, and `GRAY16`, which normalize to the explicit little-endian enum values.
+
+The direct raw-to-H.264 pipeline additionally accepts:
+
 - `NV12`
 - `I420`
+
+Practical grayscale notes:
+
+- high-bit grayscale inputs are normalized into 8-bit RGB snapshots for latest-frame HTTP/debug output
+- the raw-to-H.264 pipeline converts supported grayscale inputs into the encoder working format internally before H.264 encode
+- managed/raw-frame config validation rejects formats that do not have a supported display-transform path today, so unsupported combinations fail before runtime encode
 
 For the simplest first integration, use tightly packed `RGB24` if that matches your producer.
 

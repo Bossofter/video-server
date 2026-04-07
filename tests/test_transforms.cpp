@@ -85,4 +85,36 @@ namespace
         EXPECT_EQ(out.height, 4u);
     }
 
+    TEST(DisplayTransformTest, ScalesHighBitDepthGrayscaleAndIgnoresAlpha)
+    {
+        const std::vector<uint8_t> gray16 = {
+            0x00, 0x00,
+            0x00, 0x80,
+            0xff, 0xff,
+            0x00, 0x40,
+        };
+        video_server::VideoFrameView gray_frame{
+            gray16.data(), 2, 2, 4, video_server::VideoPixelFormat::GRAY16LE, 10, 2};
+
+        video_server::StreamOutputConfig cfg;
+        cfg.display_mode = video_server::VideoDisplayMode::Passthrough;
+
+        video_server::RgbImage out;
+        ASSERT_TRUE(video_server::apply_display_transform(gray_frame, cfg, out));
+        EXPECT_EQ(at_rgb(out, 0, 0), (std::array<uint8_t, 3>{0, 0, 0}));
+        EXPECT_NEAR(static_cast<double>(at_rgb(out, 1, 0)[0]), 128.0, 1.0);
+        EXPECT_EQ(at_rgb(out, 0, 1), (std::array<uint8_t, 3>{255, 255, 255}));
+        EXPECT_NEAR(static_cast<double>(at_rgb(out, 1, 1)[0]), 64.0, 1.0);
+
+        const std::vector<uint8_t> rgba = {
+            10, 20, 30, 255,
+            40, 50, 60, 1,
+        };
+        video_server::VideoFrameView rgba_frame{
+            rgba.data(), 2, 1, 8, video_server::VideoPixelFormat::RGBA32, 11, 3};
+        ASSERT_TRUE(video_server::apply_display_transform(rgba_frame, cfg, out));
+        EXPECT_EQ(at_rgb(out, 0, 0), (std::array<uint8_t, 3>{10, 20, 30}));
+        EXPECT_EQ(at_rgb(out, 1, 0), (std::array<uint8_t, 3>{40, 50, 60}));
+    }
+
 } // namespace
