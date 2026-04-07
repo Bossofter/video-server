@@ -18,6 +18,13 @@ namespace
                                             timestamp_ns, frame_id};
     }
 
+    video_server::VideoFrameView make_gray16_frame(const std::vector<uint8_t> &data, uint32_t width, uint32_t height,
+                                                   uint64_t timestamp_ns, uint64_t frame_id)
+    {
+        return video_server::VideoFrameView{
+            data.data(), width, height, width * 2u, video_server::VideoPixelFormat::GRAY16LE, timestamp_ns, frame_id};
+    }
+
     TEST(VideoServerCoreTest, KeepsMultipleStreamsIsolated)
     {
         video_server::VideoServerCore server;
@@ -220,8 +227,8 @@ namespace
         EXPECT_FALSE(server.remove_stream(cfg.stream_id));
     }
 
-    TEST(VideoServerCoreTest, StreamDebugSnapshotsRemainPerStreamAndStableUnderRepeatedUpdates)
-    {
+TEST(VideoServerCoreTest, StreamDebugSnapshotsRemainPerStreamAndStableUnderRepeatedUpdates)
+{
         video_server::VideoServerCore server;
         ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
         ASSERT_TRUE(server.register_stream({"bravo", "Bravo", 3, 1, 30.0, video_server::VideoPixelFormat::GRAY8}));
@@ -310,6 +317,30 @@ TEST(VideoServerCoreTest, AppliesPerStreamOutputConfigIsolationAndGeneration)
     EXPECT_EQ(alpha_snapshot->active_output_height, 24u);
     EXPECT_DOUBLE_EQ(alpha_snapshot->active_output_fps, 10.0);
     EXPECT_EQ(alpha_snapshot->config_generation, 2u);
+}
+
+TEST(VideoServerCoreTest, AcceptsHighBitDepthGrayscaleInputAndPublishesRgbSnapshot)
+{
+    video_server::VideoServerCore server;
+    const video_server::StreamConfig cfg{"gray16", "Gray16", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY16LE};
+    ASSERT_TRUE(server.register_stream(cfg));
+
+    const std::vector<uint8_t> frame_data = {
+        0x00, 0x00,
+        0x00, 0x80,
+        0xff, 0xff,
+        0x00, 0x40,
+    };
+    ASSERT_TRUE(server.push_frame(cfg.stream_id, make_gray16_frame(frame_data, cfg.width, cfg.height, 1000, 4)));
+
+    const auto latest = server.get_latest_frame_for_stream(cfg.stream_id);
+    ASSERT_NE(latest, nullptr);
+    ASSERT_EQ(latest->bytes.size(), 12u);
+    EXPECT_EQ(latest->pixel_format, video_server::VideoPixelFormat::RGB24);
+    EXPECT_EQ(latest->bytes[0], 0u);
+    EXPECT_NEAR(static_cast<double>(latest->bytes[3]), 128.0, 1.0);
+    EXPECT_EQ(latest->bytes[6], 255u);
+    EXPECT_NEAR(static_cast<double>(latest->bytes[9]), 64.0, 1.0);
 }
 
 TEST(VideoServerCoreTest, ReconfigureResetsOutputAndFpsThrottlePerStreamOnly)

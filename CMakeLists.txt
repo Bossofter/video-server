@@ -16,6 +16,7 @@ if(ENABLE_VIDEO_SERVER)
 
   add_library(video_server_core
     src/core/video_server_core.cpp
+    src/core/video_pixel_format_utils.cpp
     src/core/video_types.cpp
     src/transforms/display_transform.cpp
     src/testing/synthetic_frame_generator.cpp

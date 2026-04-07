@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
 
+#include "../core/video_pixel_format_utils.h"
 #include "../transforms/display_transform.h"
 
 namespace video_server
@@ -54,35 +55,7 @@ namespace video_server
 
         std::optional<VideoPixelFormat> parse_pixel_format(const std::string &value)
         {
-            if (value == "RGB24")
-            {
-                return VideoPixelFormat::RGB24;
-            }
-            if (value == "BGR24")
-            {
-                return VideoPixelFormat::BGR24;
-            }
-            if (value == "RGBA32")
-            {
-                return VideoPixelFormat::RGBA32;
-            }
-            if (value == "BGRA32")
-            {
-                return VideoPixelFormat::BGRA32;
-            }
-            if (value == "GRAY8")
-            {
-                return VideoPixelFormat::GRAY8;
-            }
-            if (value == "NV12")
-            {
-                return VideoPixelFormat::NV12;
-            }
-            if (value == "I420")
-            {
-                return VideoPixelFormat::I420;
-            }
-            return std::nullopt;
+            return video_pixel_format_from_string(value.c_str());
         }
 
         std::optional<RawPipelineScaleMode> parse_scale_mode(const std::string &value)
@@ -140,6 +113,11 @@ namespace video_server
                 throw std::runtime_error("invalid stream input_pixel_format: " + pixel_format_value);
             }
             stream.input_pixel_format = *pixel_format;
+            if (!video_pixel_format_supports_display_transform(stream.input_pixel_format))
+            {
+                throw std::runtime_error("managed stream input_pixel_format is not supported by raw-frame ingest/display transform: " +
+                                         std::string(to_string(stream.input_pixel_format)));
+            }
             if (const auto *max_subscribers_node = table.get("max_subscribers"))
             {
                 const auto max_subscribers = max_subscribers_node->value<uint32_t>();
@@ -242,21 +220,7 @@ namespace video_server
 
         size_t frame_storage_size(const VideoFrameView &frame)
         {
-            switch (frame.pixel_format)
-            {
-            case VideoPixelFormat::RGB24:
-            case VideoPixelFormat::BGR24:
-                return static_cast<size_t>(frame.stride_bytes) * static_cast<size_t>(frame.height);
-            case VideoPixelFormat::RGBA32:
-            case VideoPixelFormat::BGRA32:
-                return static_cast<size_t>(frame.stride_bytes) * static_cast<size_t>(frame.height);
-            case VideoPixelFormat::GRAY8:
-                return static_cast<size_t>(frame.stride_bytes) * static_cast<size_t>(frame.height);
-            case VideoPixelFormat::NV12:
-            case VideoPixelFormat::I420:
-                return static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height) * 3u / 2u;
-            }
-            return 0;
+            return video_frame_storage_size(frame);
         }
 
         class ManagedVideoServer final : public IManagedVideoServer

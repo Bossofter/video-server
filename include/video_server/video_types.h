@@ -15,9 +15,12 @@ namespace video_server
         BGR24,
         RGBA32,
         BGRA32,
+        GRAY8,
+        GRAY10LE,
+        GRAY12LE,
+        GRAY16LE,
         NV12,
-        I420,
-        GRAY8
+        I420
     };
 
     /**
@@ -57,6 +60,18 @@ namespace video_server
      * @return Null-terminated string describing the pixel format.
      */
     const char *to_string(VideoPixelFormat pixel_format);
+
+    /**
+     * @brief Parses a pixel format from a producer-facing API string.
+     *
+     * The parser is case-insensitive and accepts legacy grayscale aliases such as
+     * `GRAY10`, `GRAY12`, and `GRAY16`, which map to the explicit little-endian
+     * storage formats.
+     *
+     * @param value String value to parse.
+     * @return Parsed pixel format when recognized, otherwise `std::nullopt`.
+     */
+    std::optional<VideoPixelFormat> video_pixel_format_from_string(const char *value);
 
     /**
      * @brief Returns a readable name for a codec value.

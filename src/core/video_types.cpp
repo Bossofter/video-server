@@ -4,6 +4,8 @@
 #include <cctype>
 #include <string>
 
+#include "video_pixel_format_utils.h"
+
 namespace video_server
 {
 
@@ -31,24 +33,19 @@ namespace video_server
 
     const char *to_string(VideoPixelFormat pixel_format)
     {
-        switch (pixel_format)
+        const auto *descriptor = find_video_pixel_format_descriptor(pixel_format);
+        return descriptor != nullptr ? descriptor->name : "RGB24";
+    }
+
+    std::optional<VideoPixelFormat> video_pixel_format_from_string(const char *value)
+    {
+        if (value == nullptr)
         {
-        case VideoPixelFormat::RGB24:
-            return "RGB24";
-        case VideoPixelFormat::BGR24:
-            return "BGR24";
-        case VideoPixelFormat::RGBA32:
-            return "RGBA32";
-        case VideoPixelFormat::BGRA32:
-            return "BGRA32";
-        case VideoPixelFormat::NV12:
-            return "NV12";
-        case VideoPixelFormat::I420:
-            return "I420";
-        case VideoPixelFormat::GRAY8:
-            return "GRAY8";
+            return std::nullopt;
         }
-        return "RGB24";
+
+        const auto *descriptor = find_video_pixel_format_descriptor(std::string_view(value));
+        return descriptor != nullptr ? std::optional<VideoPixelFormat>(descriptor->pixel_format) : std::nullopt;
     }
 
     const char *to_string(VideoCodec codec)

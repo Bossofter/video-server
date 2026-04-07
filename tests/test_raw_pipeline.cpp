@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "video_server/raw_video_pipeline.h"
+#include "libav_pixel_format_mapping.h"
 #include "raw_h264_encoder_backend.h"
 #include "video_server/stream_config.h"
 #include "video_server/video_frame_view.h"
@@ -43,6 +44,29 @@ namespace
     {
         return video_server::VideoFrameView{frame.data(), width, height, width * 3u, video_server::VideoPixelFormat::RGB24,
                                             timestamp_ns, frame_id};
+    }
+
+    std::vector<uint8_t> make_gray16_frame(uint32_t width, uint32_t height, uint16_t seed)
+    {
+        std::vector<uint8_t> frame(static_cast<size_t>(width) * height * 2u);
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                const uint16_t value = static_cast<uint16_t>((static_cast<uint32_t>(x * 257u + y * 521u + seed) * 97u) & 0xffffu);
+                const size_t index = (static_cast<size_t>(y) * width + x) * 2u;
+                frame[index + 0] = static_cast<uint8_t>(value & 0xffu);
+                frame[index + 1] = static_cast<uint8_t>(value >> 8u);
+            }
+        }
+        return frame;
+    }
+
+    video_server::VideoFrameView make_gray16_view(const std::vector<uint8_t> &frame, uint32_t width, uint32_t height,
+                                                  uint64_t timestamp_ns, uint64_t frame_id)
+    {
+        return video_server::VideoFrameView{
+            frame.data(), width, height, width * 2u, video_server::VideoPixelFormat::GRAY16LE, timestamp_ns, frame_id};
     }
 
     bool contains_start_code(const std::vector<uint8_t> &bytes)
@@ -180,6 +204,45 @@ namespace
             auto frame = make_rgb_frame(config.input_width, config.input_height, i + 1);
             ASSERT_TRUE(
                 pipeline->push_frame(make_rgb_view(frame, config.input_width, config.input_height, 1000000000ull + i * 33333333ull, i + 1), &error))
+                << error;
+        }
+        ASSERT_TRUE(wait_until([&access_units]()
+                               { return !access_units.empty(); }));
+        pipeline->stop();
+
+        ASSERT_FALSE(access_units.empty());
+        EXPECT_TRUE(contains_start_code(access_units.front()));
+    }
+
+    TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromHighBitDepthGrayscaleFrames)
+    {
+        std::vector<std::vector<uint8_t>> access_units;
+        auto config = make_default_config();
+        config.input_pixel_format = video_server::VideoPixelFormat::GRAY16LE;
+
+        auto pipeline = video_server::make_raw_to_h264_pipeline(
+            "gray16-smoke", config,
+            [&access_units](const video_server::EncodedAccessUnitView &access_unit)
+            {
+                access_units.emplace_back(static_cast<const uint8_t *>(access_unit.data),
+                                          static_cast<const uint8_t *>(access_unit.data) + access_unit.size_bytes);
+                return true;
+            });
+
+        std::string error;
+        if (!video_server::libav_pixel_format_from_video_pixel_format(config.input_pixel_format).has_value())
+        {
+            EXPECT_FALSE(pipeline->start(&error));
+            EXPECT_NE(error.find("GRAY16LE"), std::string::npos);
+            return;
+        }
+
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        for (uint64_t i = 0; i < 12; ++i)
+        {
+            auto frame = make_gray16_frame(config.input_width, config.input_height, static_cast<uint16_t>(i + 1));
+            ASSERT_TRUE(
+                pipeline->push_frame(make_gray16_view(frame, config.input_width, config.input_height, 1000000000ull + i * 33333333ull, i + 1), &error))
                 << error;
         }
         ASSERT_TRUE(wait_until([&access_units]()
@@ -347,6 +410,22 @@ namespace
         auto extra_frame = make_rgb_frame(config.input_width, config.input_height, 99);
         EXPECT_FALSE(
             pipeline->push_frame(make_rgb_view(extra_frame, config.input_width, config.input_height, 999999999ull, 99), &error));
+    }
+
+    TEST(RawToH264PipelineTest, RejectsUnsupportedPixelFormatsAtStart)
+    {
+        auto config = make_default_config();
+        config.input_pixel_format = static_cast<video_server::VideoPixelFormat>(999);
+        auto pipeline = video_server::make_raw_to_h264_pipeline(
+            "invalid-format", config,
+            [](const video_server::EncodedAccessUnitView &)
+            {
+                return true;
+            });
+
+        std::string error;
+        EXPECT_FALSE(pipeline->start(&error));
+        EXPECT_NE(error.find("pixel format"), std::string::npos);
     }
 
     TEST(RawToH264PipelineTest, ThreePipelinesCanEncodeDistinctStreamsConcurrently)

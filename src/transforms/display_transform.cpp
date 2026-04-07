@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "../core/video_pixel_format_utils.h"
+
 namespace video_server
 {
     namespace
@@ -14,6 +16,11 @@ namespace video_server
         {
             return static_cast<uint8_t>(0.2126F * static_cast<float>(r) + 0.7152F * static_cast<float>(g) +
                                         0.0722F * static_cast<float>(b));
+        }
+
+        uint8_t normalized_to_u8(float value)
+        {
+            return static_cast<uint8_t>(std::lround(clamp01(value) * 255.0F));
         }
 
         void rainbow_map(float x, uint8_t &r, uint8_t &g, uint8_t &b)
@@ -138,8 +145,13 @@ namespace video_server
             return false;
         }
 
-        if (!(frame.pixel_format == VideoPixelFormat::RGB24 || frame.pixel_format == VideoPixelFormat::BGR24 ||
-              frame.pixel_format == VideoPixelFormat::GRAY8))
+        if (!video_pixel_format_supports_display_transform(frame.pixel_format))
+        {
+            return false;
+        }
+
+        const uint32_t min_row_bytes = video_pixel_format_min_row_bytes(frame.pixel_format, frame.width);
+        if (min_row_bytes == 0 || frame.stride_bytes < min_row_bytes)
         {
             return false;
         }
@@ -175,50 +187,72 @@ namespace video_server
                     src_x = (frame.width - 1U) - src_x;
                 }
 
-                const size_t src_idx = static_cast<size_t>(src_y) * frame.stride_bytes;
+                const auto *row = input + static_cast<size_t>(src_y) * frame.stride_bytes;
                 uint8_t r = 0, g = 0, b = 0;
-                uint8_t intensity = 0;
-                if (frame.pixel_format == VideoPixelFormat::GRAY8)
+                float intensity01 = 0.0F;
+                uint8_t display_intensity = 0;
+                if (video_pixel_format_is_grayscale(frame.pixel_format))
                 {
-                    intensity = input[src_idx + src_x];
-                    r = g = b = intensity;
+                    const uint32_t max_value = grayscale_sample_max(frame.pixel_format);
+                    if (max_value == 0)
+                    {
+                        return false;
+                    }
+                    const uint16_t sample = read_grayscale_sample(row, src_x, frame.pixel_format);
+                    intensity01 = clamp01(static_cast<float>(sample) / static_cast<float>(max_value));
+                    display_intensity = normalized_to_u8(intensity01);
+                    r = g = b = display_intensity;
                 }
                 else
                 {
-                    const size_t px = src_idx + src_x * 3;
+                    const uint32_t pixel_stride = video_pixel_format_min_row_bytes(frame.pixel_format, 1);
+                    const size_t px = static_cast<size_t>(src_x) * pixel_stride;
                     if (frame.pixel_format == VideoPixelFormat::RGB24)
                     {
-                        r = input[px + 0];
-                        g = input[px + 1];
-                        b = input[px + 2];
+                        r = row[px + 0];
+                        g = row[px + 1];
+                        b = row[px + 2];
+                    }
+                    else if (frame.pixel_format == VideoPixelFormat::BGR24)
+                    {
+                        b = row[px + 0];
+                        g = row[px + 1];
+                        r = row[px + 2];
+                    }
+                    else if (frame.pixel_format == VideoPixelFormat::RGBA32)
+                    {
+                        r = row[px + 0];
+                        g = row[px + 1];
+                        b = row[px + 2];
                     }
                     else
                     {
-                        b = input[px + 0];
-                        g = input[px + 1];
-                        r = input[px + 2];
+                        b = row[px + 0];
+                        g = row[px + 1];
+                        r = row[px + 2];
                     }
-                    intensity = luminance_from_rgb(r, g, b);
+                    display_intensity = luminance_from_rgb(r, g, b);
+                    intensity01 = static_cast<float>(display_intensity) / 255.0F;
                 }
 
-                const float n = clamp01((static_cast<float>(intensity) / 255.0F - config.palette_min) /
+                const float n = clamp01((intensity01 - config.palette_min) /
                                         std::max(0.0001F, config.palette_max - config.palette_min));
                 switch (config.display_mode)
                 {
                 case VideoDisplayMode::Passthrough:
                     break;
                 case VideoDisplayMode::Grayscale:
-                    r = g = b = intensity;
+                    r = g = b = display_intensity;
                     break;
                 case VideoDisplayMode::WhiteHot:
                 {
-                    const uint8_t v = static_cast<uint8_t>(n * 255.0F);
+                    const uint8_t v = normalized_to_u8(n);
                     r = g = b = v;
                     break;
                 }
                 case VideoDisplayMode::BlackHot:
                 {
-                    const uint8_t v = static_cast<uint8_t>((1.0F - n) * 255.0F);
+                    const uint8_t v = normalized_to_u8(1.0F - n);
                     r = g = b = v;
                     break;
                 }

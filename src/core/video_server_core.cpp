@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "video_server/video_types.h"
+#include "video_pixel_format_utils.h"
 #include "../transforms/display_transform.h"
 
 namespace video_server
@@ -212,8 +213,8 @@ namespace video_server
             return false;
         }
 
-        const uint32_t expected_stride = frame.width * bytes_per_pixel(frame.pixel_format);
-        if (frame.stride_bytes < expected_stride)
+        const uint32_t expected_stride = video_pixel_format_min_row_bytes(frame.pixel_format, frame.width);
+        if (expected_stride == 0 || frame.stride_bytes < expected_stride)
         {
             return false;
         }
@@ -434,22 +435,12 @@ namespace video_server
 
     bool VideoServerCore::is_supported_input_pixel_format(VideoPixelFormat pixel_format)
     {
-        return pixel_format == VideoPixelFormat::RGB24 || pixel_format == VideoPixelFormat::BGR24 ||
-               pixel_format == VideoPixelFormat::GRAY8;
+        return video_pixel_format_supports_display_transform(pixel_format);
     }
 
     uint32_t VideoServerCore::bytes_per_pixel(VideoPixelFormat pixel_format)
     {
-        switch (pixel_format)
-        {
-        case VideoPixelFormat::RGB24:
-        case VideoPixelFormat::BGR24:
-            return 3;
-        case VideoPixelFormat::GRAY8:
-            return 1;
-        default:
-            return 0;
-        }
+        return video_pixel_format_min_row_bytes(pixel_format, 1);
     }
 
 } // namespace video_server
