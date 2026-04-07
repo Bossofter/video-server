@@ -1,0 +1,7 @@
+{
+    "name": "video-server-vcpkg-downstream",
+    "version-string": "0.0.0",
+    "dependencies": [
+        "video-server"
+    ]
+}
