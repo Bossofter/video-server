@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(video_server LANGUAGES CXX)
+project(video_server VERSION 1.1.1 LANGUAGES CXX)
 
 option(ENABLE_VIDEO_SERVER "Build core video server library" ON)
 option(ENABLE_WEBRTC_BACKEND "Build WebRTC backend" ON)
@@ -9,10 +9,33 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
+set(VIDEO_SERVER_PACKAGE_NAME "video-server")
+set(VIDEO_SERVER_CMAKE_INSTALLDIR "${CMAKE_INSTALL_LIBDIR}/cmake/${VIDEO_SERVER_PACKAGE_NAME}")
+
+if(ENABLE_WEBRTC_BACKEND AND NOT ENABLE_VIDEO_SERVER)
+  message(FATAL_ERROR "ENABLE_WEBRTC_BACKEND requires ENABLE_VIDEO_SERVER.")
+endif()
+
 if(ENABLE_VIDEO_SERVER)
-  find_package(FFMPEG REQUIRED COMPONENTS avcodec avutil swscale)
+  find_package(FFMPEG MODULE REQUIRED COMPONENTS avcodec avutil swscale)
+
+  add_library(video_server_ffmpeg INTERFACE)
+  if(TARGET FFMPEG::avcodec AND TARGET FFMPEG::avutil AND TARGET FFMPEG::swscale)
+    target_link_libraries(video_server_ffmpeg INTERFACE
+      FFMPEG::avcodec
+      FFMPEG::avutil
+      FFMPEG::swscale
+    )
+  else()
+    target_include_directories(video_server_ffmpeg INTERFACE ${FFMPEG_INCLUDE_DIRS})
+    if(FFMPEG_LIBRARY_DIRS)
+      target_link_directories(video_server_ffmpeg INTERFACE ${FFMPEG_LIBRARY_DIRS})
+    endif()
+    target_link_libraries(video_server_ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
+  endif()
 
   add_library(video_server_core
     src/core/video_server_core.cpp
@@ -31,12 +54,12 @@ if(ENABLE_VIDEO_SERVER)
       ${CMAKE_CURRENT_SOURCE_DIR}/src/core
       ${CMAKE_CURRENT_SOURCE_DIR}/src/transforms
       ${CMAKE_CURRENT_SOURCE_DIR}/src/testing
-      ${FFMPEG_INCLUDE_DIRS}
   )
 
   target_link_libraries(video_server_core
     PUBLIC
-      ${FFMPEG_LIBRARIES}
+      "$<BUILD_INTERFACE:video_server_ffmpeg>"
+      "$<INSTALL_INTERFACE:video_server::ffmpeg>"
   )
 
   install(TARGETS video_server_core
@@ -142,16 +165,51 @@ if(ENABLE_WEBRTC_BACKEND)
   )
 endif()
 
-install(DIRECTORY include/video_server
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  FILES_MATCHING PATTERN "*.h"
-)
+if(ENABLE_VIDEO_SERVER)
+  add_library(video_server INTERFACE)
+  add_library(video_server::video_server ALIAS video_server)
 
-install(EXPORT video_serverTargets
-  FILE video_serverTargets.cmake
-  NAMESPACE video_server::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/video_server
-)
+  if(ENABLE_WEBRTC_BACKEND)
+    target_link_libraries(video_server INTERFACE video_server_webrtc)
+  else()
+    target_link_libraries(video_server INTERFACE video_server_core)
+  endif()
+
+  install(TARGETS video_server
+    EXPORT video_serverTargets
+  )
+
+  configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/video-serverConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/video-serverConfig.cmake"
+    INSTALL_DESTINATION "${VIDEO_SERVER_CMAKE_INSTALLDIR}"
+    NO_SET_AND_CHECK_MACRO
+    NO_CHECK_REQUIRED_COMPONENTS_MACRO
+  )
+
+  write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/video-serverConfigVersion.cmake"
+    VERSION "${PROJECT_VERSION}"
+    COMPATIBILITY SameMajorVersion
+  )
+
+  install(DIRECTORY include/video_server
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+  )
+
+  install(EXPORT video_serverTargets
+    FILE video_serverTargets.cmake
+    NAMESPACE video_server::
+    DESTINATION ${VIDEO_SERVER_CMAKE_INSTALLDIR}
+  )
+
+  install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/video-serverConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/video-serverConfigVersion.cmake"
+    DESTINATION "${VIDEO_SERVER_CMAKE_INSTALLDIR}"
+  )
+endif()
 
 if(BUILD_TESTING)
   include(CTest)

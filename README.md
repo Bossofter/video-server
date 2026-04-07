@@ -31,6 +31,21 @@ export VCPKG_ROOT=/path/to/vcpkg
 
 The supported build and first-run workflow is in [docs/getting_started.md](docs/getting_started.md).
 
+## CMake Package Consumption
+
+After installing the project, downstream consumers can use the exported config package:
+
+```cmake
+find_package(video-server CONFIG REQUIRED)
+target_link_libraries(test_app PRIVATE video_server::video_server)
+```
+
+The repository also includes a local vcpkg overlay port in `vcpkg/` for packaging the current checkout:
+
+```bash
+vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
+```
+
 ## License
 
 [MIT](LICENSE)
