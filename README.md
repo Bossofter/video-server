@@ -40,13 +40,10 @@ find_package(video-server CONFIG REQUIRED)
 target_link_libraries(test_app PRIVATE video_server::video_server)
 ```
 
-This repository includes a minimal consumer smoke project in `tests/package_consumer/`. To verify the installed package manually:
+The repository also includes a local vcpkg overlay port in `vcpkg/` for packaging the current checkout:
 
 ```bash
-cmake -S tests/package_consumer -B build/package_consumer \
-  -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-  -DCMAKE_PREFIX_PATH="${PWD}/build/install"
-cmake --build build/package_consumer
+vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
 ```
 
 ## License
