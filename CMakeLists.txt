@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(video_server VERSION 1.1.0 LANGUAGES CXX)
+project(video_server VERSION 1.1.1 LANGUAGES CXX)
 
 option(ENABLE_VIDEO_SERVER "Build core video server library" ON)
 option(ENABLE_WEBRTC_BACKEND "Build WebRTC backend" ON)
