@@ -1,0 +1,57 @@
+diff --git a/cmake/video-serverConfig.cmake.in b/cmake/video-serverConfig.cmake.in
+index 792f1d4..092ad18 100644
+--- a/cmake/video-serverConfig.cmake.in
++++ b/cmake/video-serverConfig.cmake.in
+@@ -2,6 +2,31 @@
+ 
+ include(CMakeFindDependencyMacro)
+ 
++function(_video_server_normalize_link_items out_var)
++  set(_video_server_link_mode "general")
++  set(_video_server_link_items "")
++
++  foreach(_video_server_link_item IN LISTS ARGN)
++    if(_video_server_link_item STREQUAL "debug")
++      set(_video_server_link_mode "debug")
++    elseif(_video_server_link_item STREQUAL "optimized")
++      set(_video_server_link_mode "optimized")
++    elseif(_video_server_link_item STREQUAL "general")
++      set(_video_server_link_mode "general")
++    elseif(_video_server_link_mode STREQUAL "debug")
++      list(APPEND _video_server_link_items "$<$<CONFIG:Debug>:${_video_server_link_item}>")
++      set(_video_server_link_mode "general")
++    elseif(_video_server_link_mode STREQUAL "optimized")
++      list(APPEND _video_server_link_items "$<$<NOT:$<CONFIG:Debug>>:${_video_server_link_item}>")
++      set(_video_server_link_mode "general")
++    else()
++      list(APPEND _video_server_link_items "${_video_server_link_item}")
++    endif()
++  endforeach()
++
++  set(${out_var} "${_video_server_link_items}" PARENT_SCOPE)
++endfunction()
++
+ set(_video_server_ffmpeg_found FALSE)
+ set(_video_server_ffmpeg_uses_pkg_config FALSE)
+ 
+@@ -50,9 +75,11 @@ if(NOT TARGET video_server::ffmpeg)
+       INTERFACE_LINK_LIBRARIES "PkgConfig::FFMPEG"
+     )
+   else()
++    _video_server_normalize_link_items(_video_server_ffmpeg_link_libraries ${FFMPEG_LIBRARIES})
++
+     set_target_properties(video_server::ffmpeg PROPERTIES
+       INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIRS}"
+-      INTERFACE_LINK_LIBRARIES "${FFMPEG_LIBRARIES}"
++      INTERFACE_LINK_LIBRARIES "${_video_server_ffmpeg_link_libraries}"
+     )
+ 
+     if(FFMPEG_LIBRARY_DIRS)
+@@ -65,6 +92,7 @@ endif()
+ 
+ unset(_video_server_ffmpeg_found)
+ unset(_video_server_ffmpeg_module_dir)
++unset(_video_server_ffmpeg_link_libraries)
+ unset(_video_server_ffmpeg_uses_pkg_config)
+ 
+ if(@ENABLE_WEBRTC_BACKEND@)

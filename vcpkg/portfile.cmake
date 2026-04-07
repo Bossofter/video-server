@@ -4,6 +4,8 @@ vcpkg_from_github(
     REF "v1.1.1"
     SHA512 e75c69e84291b3fa2dabeec80f62413e734595512c79a014177629b58a916ff51b85f7a049a6e2ed02a851d2efa84ddff2669a60b211264a3d9f5cb4d8be6502
     HEAD_REF main
+    PATCHES
+        fix-ffmpeg-link-keywords.patch
 )
 
 vcpkg_cmake_configure(
