@@ -1,0 +1,2 @@
+/usr/bin/ar qc libvideo_server_core.a CMakeFiles/video_server_core.dir/src/core/video_server_core.cpp.o CMakeFiles/video_server_core.dir/src/core/video_pixel_format_utils.cpp.o CMakeFiles/video_server_core.dir/src/core/video_types.cpp.o CMakeFiles/video_server_core.dir/src/transforms/display_transform.cpp.o CMakeFiles/video_server_core.dir/src/testing/synthetic_frame_generator.cpp.o CMakeFiles/video_server_core.dir/src/pipeline/raw_to_h264_pipeline.cpp.o
+/usr/bin/ranlib libvideo_server_core.a

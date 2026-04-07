@@ -1,0 +1,2 @@
+/usr/bin/ar qc libvideo_server_soak.a CMakeFiles/video_server_soak.dir/src/testing/soak_test_framework.cpp.o
+/usr/bin/ranlib libvideo_server_soak.a

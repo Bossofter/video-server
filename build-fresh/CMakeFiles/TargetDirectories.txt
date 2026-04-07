@@ -1,0 +1,11 @@
+/workspace/video-server/build-fresh/CMakeFiles/video_server_core.dir
+/workspace/video-server/build-fresh/CMakeFiles/video_server_webrtc.dir
+/workspace/video-server/build-fresh/CMakeFiles/video_server_nicegui_smoke_server.dir
+/workspace/video-server/build-fresh/CMakeFiles/video_server_soak.dir
+/workspace/video-server/build-fresh/CMakeFiles/video_server_soak_runner.dir
+/workspace/video-server/build-fresh/CMakeFiles/edit_cache.dir
+/workspace/video-server/build-fresh/CMakeFiles/rebuild_cache.dir
+/workspace/video-server/build-fresh/CMakeFiles/list_install_components.dir
+/workspace/video-server/build-fresh/CMakeFiles/install.dir
+/workspace/video-server/build-fresh/CMakeFiles/install/local.dir
+/workspace/video-server/build-fresh/CMakeFiles/install/strip.dir

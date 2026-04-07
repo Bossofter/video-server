@@ -31,6 +31,24 @@ export VCPKG_ROOT=/path/to/vcpkg
 
 The supported build and first-run workflow is in [docs/getting_started.md](docs/getting_started.md).
 
+## CMake Package Consumption
+
+After installing the project, downstream consumers can use the exported config package:
+
+```cmake
+find_package(video-server CONFIG REQUIRED)
+target_link_libraries(test_app PRIVATE video_server::video_server)
+```
+
+This repository includes a minimal consumer smoke project in `tests/package_consumer/`. To verify the installed package manually:
+
+```bash
+cmake -S tests/package_consumer -B build/package_consumer \
+  -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+  -DCMAKE_PREFIX_PATH="${PWD}/build/install"
+cmake --build build/package_consumer
+```
+
 ## License
 
 [MIT](LICENSE)
