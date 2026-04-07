@@ -1,8 +1,10 @@
-get_filename_component(SOURCE_PATH "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-
-if(NOT EXISTS "${SOURCE_PATH}/CMakeLists.txt")
-    message(FATAL_ERROR "Expected video-server source tree at '${SOURCE_PATH}'.")
-endif()
+vcpkg_from_github(
+    OUT_SOURCE_PATH SOURCE_PATH
+    REPO Bossofter/video-server
+    REF "v1.1.1"
+    SHA512 0
+    HEAD_REF main
+)
 
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
