@@ -42,24 +42,21 @@ if(NOT TARGET video_server::ffmpeg)
   add_library(video_server::ffmpeg INTERFACE IMPORTED)
 
   if(TARGET FFMPEG::avcodec AND TARGET FFMPEG::avutil AND TARGET FFMPEG::swscale)
-    set_target_properties(video_server::ffmpeg PROPERTIES
-      INTERFACE_LINK_LIBRARIES "FFMPEG::avcodec;FFMPEG::avutil;FFMPEG::swscale"
+    target_link_libraries(video_server::ffmpeg INTERFACE
+      FFMPEG::avcodec
+      FFMPEG::avutil
+      FFMPEG::swscale
     )
   elseif(_video_server_ffmpeg_uses_pkg_config)
-    set_target_properties(video_server::ffmpeg PROPERTIES
-      INTERFACE_LINK_LIBRARIES "PkgConfig::FFMPEG"
-    )
+    target_link_libraries(video_server::ffmpeg INTERFACE PkgConfig::FFMPEG)
   else()
-    set_target_properties(video_server::ffmpeg PROPERTIES
-      INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIRS}"
-      INTERFACE_LINK_LIBRARIES "${FFMPEG_LIBRARIES}"
-    )
+    target_include_directories(video_server::ffmpeg INTERFACE ${FFMPEG_INCLUDE_DIRS})
 
     if(FFMPEG_LIBRARY_DIRS)
-      set_target_properties(video_server::ffmpeg PROPERTIES
-        INTERFACE_LINK_DIRECTORIES "${FFMPEG_LIBRARY_DIRS}"
-      )
+      target_link_directories(video_server::ffmpeg INTERFACE ${FFMPEG_LIBRARY_DIRS})
     endif()
+
+    target_link_libraries(video_server::ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
   endif()
 endif()
 
