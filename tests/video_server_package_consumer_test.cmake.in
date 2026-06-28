@@ -1,0 +1,110 @@
+set(package_prefix "@VIDEO_SERVER_PACKAGE_TEST_INSTALL_PREFIX@")
+set(dependency_prefix "@VCPKG_INSTALLED_DIR@/@VCPKG_TARGET_TRIPLET@")
+set(consumer_source_dir "@VIDEO_SERVER_PACKAGE_TEST_SOURCE_DIR@")
+set(consumer_build_dir "@VIDEO_SERVER_PACKAGE_TEST_BUILD_DIR@")
+set(expected_shared "@VIDEO_SERVER_SHARED_BUILD@")
+
+file(REMOVE_RECURSE "${package_prefix}" "${consumer_build_dir}")
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --install "@CMAKE_BINARY_DIR@" --prefix "${package_prefix}"
+  RESULT_VARIABLE install_result
+)
+if(NOT install_result EQUAL 0)
+  message(FATAL_ERROR "video-server install failed with exit code ${install_result}")
+endif()
+
+if(expected_shared)
+  set(core_library "${package_prefix}/@CMAKE_INSTALL_LIBDIR@/@CMAKE_SHARED_LIBRARY_PREFIX@video_server_core@CMAKE_SHARED_LIBRARY_SUFFIX@")
+  set(webrtc_library "${package_prefix}/@CMAKE_INSTALL_LIBDIR@/@CMAKE_SHARED_LIBRARY_PREFIX@video_server_webrtc@CMAKE_SHARED_LIBRARY_SUFFIX@")
+
+  if(NOT EXISTS "${core_library}")
+    message(FATAL_ERROR "expected shared core library was not installed: ${core_library}")
+  endif()
+  if(NOT EXISTS "${webrtc_library}")
+    message(FATAL_ERROR "expected shared WebRTC library was not installed: ${webrtc_library}")
+  endif()
+endif()
+
+set(configure_args
+  -S "${consumer_source_dir}"
+  -B "${consumer_build_dir}"
+  "-DCMAKE_PREFIX_PATH=${package_prefix}\;${dependency_prefix}"
+)
+
+if(NOT "@CMAKE_BUILD_TYPE@" STREQUAL "")
+  list(APPEND configure_args "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@")
+endif()
+
+if(NOT "@CMAKE_TOOLCHAIN_FILE@" STREQUAL "")
+  list(APPEND configure_args "-DCMAKE_TOOLCHAIN_FILE=@CMAKE_TOOLCHAIN_FILE@")
+endif()
+
+if(NOT "@VCPKG_TARGET_TRIPLET@" STREQUAL "")
+  list(APPEND configure_args "-DVCPKG_TARGET_TRIPLET=@VCPKG_TARGET_TRIPLET@")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" ${configure_args}
+  RESULT_VARIABLE configure_result
+)
+if(NOT configure_result EQUAL 0)
+  message(FATAL_ERROR "consumer configure failed with exit code ${configure_result}")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --build "${consumer_build_dir}"
+  RESULT_VARIABLE build_result
+)
+if(NOT build_result EQUAL 0)
+  message(FATAL_ERROR "consumer build failed with exit code ${build_result}")
+endif()
+
+set(consumer_exe "${consumer_build_dir}/video_server_package_consumer@CMAKE_EXECUTABLE_SUFFIX@")
+if(NOT EXISTS "${consumer_exe}")
+  message(FATAL_ERROR "consumer executable was not built: ${consumer_exe}")
+endif()
+
+if(UNIX AND NOT APPLE)
+  set(existing_ld_library_path "$ENV{LD_LIBRARY_PATH}")
+  set(test_library_path "${package_prefix}/@CMAKE_INSTALL_LIBDIR@")
+  if(EXISTS "${dependency_prefix}/lib")
+    string(APPEND test_library_path ":${dependency_prefix}/lib")
+  endif()
+  if(EXISTS "${dependency_prefix}/debug/lib")
+    string(APPEND test_library_path ":${dependency_prefix}/debug/lib")
+  endif()
+  if(existing_ld_library_path STREQUAL "")
+    set(test_ld_library_path "${test_library_path}")
+  else()
+    set(test_ld_library_path "${test_library_path}:${existing_ld_library_path}")
+  endif()
+else()
+  set(test_ld_library_path "$ENV{LD_LIBRARY_PATH}")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" -E env "LD_LIBRARY_PATH=${test_ld_library_path}" "${consumer_exe}"
+  RESULT_VARIABLE run_result
+)
+if(NOT run_result EQUAL 0)
+  message(FATAL_ERROR "consumer executable failed with exit code ${run_result}")
+endif()
+
+if(expected_shared AND UNIX AND NOT APPLE)
+  find_program(LDD_EXECUTABLE ldd)
+  if(LDD_EXECUTABLE)
+    execute_process(
+      COMMAND "${LDD_EXECUTABLE}" "${consumer_exe}"
+      RESULT_VARIABLE ldd_result
+      OUTPUT_VARIABLE ldd_output
+      ERROR_VARIABLE ldd_error
+    )
+    if(NOT ldd_result EQUAL 0)
+      message(FATAL_ERROR "ldd failed with exit code ${ldd_result}: ${ldd_error}")
+    endif()
+    if(NOT ldd_output MATCHES "libvideo_server_webrtc\\.so")
+      message(FATAL_ERROR "consumer executable is not linked to libvideo_server_webrtc.so:\n${ldd_output}")
+    endif()
+  endif()
+endif()

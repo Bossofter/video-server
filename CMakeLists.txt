@@ -4,6 +4,7 @@ project(video_server VERSION 1.1.1 LANGUAGES CXX)
 option(ENABLE_VIDEO_SERVER "Build core video server library" ON)
 option(ENABLE_WEBRTC_BACKEND "Build WebRTC backend" ON)
 option(BUILD_TESTING "Build tests" ON)
+option(VIDEO_SERVER_BUILD_PACKAGE_TESTS "Build installed-package consumer smoke tests" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +15,7 @@ include(GNUInstallDirs)
 
 set(VIDEO_SERVER_PACKAGE_NAME "video-server")
 set(VIDEO_SERVER_CMAKE_INSTALLDIR "${CMAKE_INSTALL_LIBDIR}/cmake/${VIDEO_SERVER_PACKAGE_NAME}")
+set(VIDEO_SERVER_SHARED_BUILD ${BUILD_SHARED_LIBS})
 
 if(ENABLE_WEBRTC_BACKEND AND NOT ENABLE_VIDEO_SERVER)
   message(FATAL_ERROR "ENABLE_WEBRTC_BACKEND requires ENABLE_VIDEO_SERVER.")
@@ -78,15 +80,17 @@ if(ENABLE_WEBRTC_BACKEND)
   find_package(LibJuice CONFIG REQUIRED)
   find_package(libSRTP CONFIG REQUIRED)
 
-  get_target_property(LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES LibDataChannel::LibDataChannel INTERFACE_LINK_LIBRARIES)
-  if(NOT LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES)
-    message(FATAL_ERROR
-      "LibDataChannel::LibDataChannel did not expose interface link libraries. "
-      "Install libdatachannel with media support enabled (vcpkg feature: libdatachannel[srtp]).")
+  get_target_property(LIBDATACHANNEL_INTERFACE_COMPILE_DEFINITIONS
+    LibDataChannel::LibDataChannel
+    INTERFACE_COMPILE_DEFINITIONS
+  )
+  if(NOT LIBDATACHANNEL_INTERFACE_COMPILE_DEFINITIONS)
+    set(LIBDATACHANNEL_INTERFACE_COMPILE_DEFINITIONS "")
   endif()
-
-  string(REPLACE ";" "\n" LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES_TEXT "${LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES}")
-  if(NOT LIBDATACHANNEL_INTERFACE_LINK_LIBRARIES_TEXT MATCHES "libSRTP::srtp2")
+  string(REPLACE ";" "\n" LIBDATACHANNEL_INTERFACE_COMPILE_DEFINITIONS_TEXT
+    "${LIBDATACHANNEL_INTERFACE_COMPILE_DEFINITIONS}"
+  )
+  if(NOT LIBDATACHANNEL_INTERFACE_COMPILE_DEFINITIONS_TEXT MATCHES "(^|\n)RTC_ENABLE_MEDIA=1($|\n)")
     message(FATAL_ERROR
       "Detected a libdatachannel build without media/SRTP support. "
       "This project requires libdatachannel[srtp] so rtc::Track::send can carry media.")
@@ -153,15 +157,21 @@ if(ENABLE_WEBRTC_BACKEND)
 
   target_link_libraries(video_server_nicegui_smoke_server PRIVATE
     video_server_webrtc
+    video_server_core
+    spdlog::spdlog
   )
 
   target_link_libraries(video_server_soak
     PUBLIC
       video_server_webrtc
+      LibDataChannel::LibDataChannel
+    PRIVATE
+      spdlog::spdlog
   )
 
   target_link_libraries(video_server_soak_runner PRIVATE
     video_server_soak
+    spdlog::spdlog
   )
 endif()
 
@@ -240,11 +250,43 @@ if(BUILD_TESTING)
   target_link_libraries(video_server_tests PRIVATE GTest::gtest)
 
   if(ENABLE_WEBRTC_BACKEND)
-    target_link_libraries(video_server_tests PRIVATE video_server_webrtc video_server_soak)
+    target_link_libraries(video_server_tests PRIVATE
+      video_server_webrtc
+      video_server_core
+      video_server_soak
+      LibDataChannel::LibDataChannel
+      spdlog::spdlog
+    )
   else()
     target_link_libraries(video_server_tests PRIVATE video_server_core)
   endif()
 
   include(GoogleTest)
   gtest_discover_tests(video_server_tests)
+
+  if(VIDEO_SERVER_BUILD_PACKAGE_TESTS AND ENABLE_VIDEO_SERVER)
+    set(VIDEO_SERVER_PACKAGE_TEST_INSTALL_PREFIX
+      "${CMAKE_CURRENT_BINARY_DIR}/package-test/install"
+    )
+    set(VIDEO_SERVER_PACKAGE_TEST_BUILD_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/package-test/consumer-build"
+    )
+    set(VIDEO_SERVER_PACKAGE_TEST_SOURCE_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_consumer"
+    )
+    set(VIDEO_SERVER_PACKAGE_TEST_CONFIG
+      "${CMAKE_CURRENT_BINARY_DIR}/package-test/video_server_package_consumer_test.cmake"
+    )
+
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/video_server_package_consumer_test.cmake.in"
+      "${VIDEO_SERVER_PACKAGE_TEST_CONFIG}"
+      @ONLY
+    )
+
+    add_test(
+      NAME video_server_package_consumer
+      COMMAND "${CMAKE_COMMAND}" -P "${VIDEO_SERVER_PACKAGE_TEST_CONFIG}"
+    )
+  endif()
 endif()
