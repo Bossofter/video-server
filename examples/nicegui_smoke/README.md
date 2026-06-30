@@ -89,6 +89,18 @@ If you already launched the smoke server yourself:
 python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --stream alpha:640:360:30:Alpha-Sweep --stream bravo:1280:720:30:Bravo-Orbit --stream charlie:320:240:30:Charlie-Checker --auto-connect
 ```
 
+To start only the C++ video-server synthetic pattern producer/server side through the helper script, skip NiceGUI with `--producer-only`:
+
+```bash
+examples/nicegui_smoke/run_smoke.sh --producer-only --multi-stream-demo
+```
+
+For bounded validation runs:
+
+```bash
+examples/nicegui_smoke/run_smoke.sh --producer-only --multi-stream-demo --duration-seconds 30 --print-observability-summary
+```
+
 ## Caveats
 
 - This is a debug harness, not a production UI.

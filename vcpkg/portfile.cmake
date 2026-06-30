@@ -1,10 +1,15 @@
-vcpkg_from_github(
-    OUT_SOURCE_PATH SOURCE_PATH
-    REPO Bossofter/video-server
-    REF "v1.1.1"
-    SHA512 0
-    HEAD_REF main
-)
+get_filename_component(_video_server_overlay_source "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+if(EXISTS "${_video_server_overlay_source}/CMakeLists.txt")
+    set(SOURCE_PATH "${_video_server_overlay_source}")
+else()
+    vcpkg_from_github(
+        OUT_SOURCE_PATH SOURCE_PATH
+        REPO Bossofter/video-server
+        REF "v1.1.2"
+        SHA512 0
+        HEAD_REF main
+    )
+endif()
 
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"

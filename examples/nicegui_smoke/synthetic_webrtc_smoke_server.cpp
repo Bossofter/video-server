@@ -143,7 +143,7 @@ namespace
     void print_usage(const char *argv0)
     {
         spdlog::info(
-            "Usage: {} [--config PATH] [--host HOST] [--port PORT] [--enable-debug-api] [--lan-only] [--shared-key TOKEN] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
+            "Usage: {} [--producer-only] [--config PATH] [--host HOST] [--port PORT] [--enable-debug-api] [--lan-only] [--shared-key TOKEN] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo] [--duration-seconds SECONDS] [--stats-interval-seconds SECONDS] [--print-observability-summary]",
             argv0);
     }
 
@@ -266,6 +266,11 @@ namespace
             else if (arg == "--print-observability-summary")
             {
                 options.print_observability_summary = true;
+            }
+            else if (arg == "--producer-only")
+            {
+                // This executable is already the producer/server side; accept the
+                // runner flag so direct invocations behave the same way.
             }
             else if (arg == "--help" || arg == "-h")
             {

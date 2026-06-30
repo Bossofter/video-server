@@ -117,6 +117,10 @@ if(ENABLE_WEBRTC_BACKEND)
     tools/video_server_soak_runner.cpp
   )
 
+  add_executable(video_server_vcpkg_example
+    examples/vcpkg_example/main.cpp
+  )
+
   target_include_directories(video_server_webrtc
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -172,6 +176,10 @@ if(ENABLE_WEBRTC_BACKEND)
   target_link_libraries(video_server_soak_runner PRIVATE
     video_server_soak
     spdlog::spdlog
+  )
+
+  target_link_libraries(video_server_vcpkg_example PRIVATE
+    video_server
   )
 endif()
 
