@@ -21,8 +21,14 @@ max_signaling_candidate_bytes = 8192
 max_pending_candidates_per_stream = 32
 ice_transport_policy = "all"
 ice_bind_address = ""
+ice_servers = []
 # ice_port_range_begin = 49152
-# ice_port_range_end = 65535
+# ice_port_range_end = 49200
+#
+# ice_servers = [
+#   { uri = "stun:stun.example.com:3478" },
+#   { uri = "turns:turn.example.com:443?transport=tcp", username = "user", credential = "secret" }
+# ]
 signaling_rate_limit_window_seconds = 10
 signaling_rate_limit_max_requests = 60
 config_rate_limit_window_seconds = 10
@@ -31,15 +37,6 @@ debug_rate_limit_window_seconds = 10
 debug_rate_limit_max_requests = 60
 http_poll_timeout_ms = 5
 max_http_connections_per_step = 1
-
-# Add one or more entries when testing through STUN/TURN.
-# [[webrtc.ice_servers]]
-# uri = "stun:stun.example.com:3478"
-#
-# [[webrtc.ice_servers]]
-# uri = "turn:turn.example.com:3478?transport=udp"
-# username = "user"
-# credential = "password"
 
 [[streams]]
 stream_id = "alpha"

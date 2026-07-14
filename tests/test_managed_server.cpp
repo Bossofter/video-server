@@ -261,6 +261,71 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     std::remove(path.c_str());
 }
 
+TEST(ManagedVideoServerTest, LoadsTomlIceConfiguration)
+{
+    const std::string path = "/tmp/video_server_managed_ice_config_test.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "http_poll_timeout_ms = 3\n";
+        out << "\n[webrtc]\n";
+        out << "execution_mode = \"manual_step\"\n";
+        out << "http_poll_timeout_ms = 3\n";
+        out << "enable_http_api = false\n";
+        out << "ice_transport_policy = \"relay\"\n";
+        out << "ice_bind_address = \"10.1.2.3\"\n";
+        out << "ice_port_range_begin = 49152\n";
+        out << "ice_port_range_end = 49200\n";
+        out << "ice_servers = [\n";
+        out << "  { uri = \"stun:stun.example.com:3478\" },\n";
+        out << "  { uri = \"turns:turn.example.com:443?transport=tcp\", username = \"user\", credential = \"secret\" }\n";
+        out << "]\n";
+    }
+
+    const auto config = video_server::load_managed_video_server_config(path);
+    EXPECT_EQ(config.webrtc.ice.transport_policy, "relay");
+    ASSERT_TRUE(config.webrtc.ice.bind_address.has_value());
+    EXPECT_EQ(*config.webrtc.ice.bind_address, "10.1.2.3");
+    ASSERT_TRUE(config.webrtc.ice.port_range_begin.has_value());
+    ASSERT_TRUE(config.webrtc.ice.port_range_end.has_value());
+    EXPECT_EQ(*config.webrtc.ice.port_range_begin, 49152u);
+    EXPECT_EQ(*config.webrtc.ice.port_range_end, 49200u);
+    ASSERT_EQ(config.webrtc.ice.servers.size(), 2u);
+    EXPECT_EQ(config.webrtc.ice.servers[0].uri, "stun:stun.example.com:3478");
+    EXPECT_TRUE(config.webrtc.ice.servers[0].username.empty());
+    EXPECT_TRUE(config.webrtc.ice.servers[0].credential.empty());
+    EXPECT_EQ(config.webrtc.ice.servers[1].uri, "turns:turn.example.com:443?transport=tcp");
+    EXPECT_EQ(config.webrtc.ice.servers[1].username, "user");
+    EXPECT_EQ(config.webrtc.ice.servers[1].credential, "secret");
+
+    std::remove(path.c_str());
+}
+
+TEST(ManagedVideoServerTest, RejectsMalformedTomlIceConfiguration)
+{
+    const auto expect_load_error = [](const std::string &body)
+    {
+        const std::string path = "/tmp/video_server_managed_bad_ice_config_test.toml";
+        {
+            std::ofstream out(path);
+            out << "execution_mode = \"manual_step\"\n";
+            out << "http_poll_timeout_ms = 3\n";
+            out << "\n[webrtc]\n";
+            out << "execution_mode = \"manual_step\"\n";
+            out << "http_poll_timeout_ms = 3\n";
+            out << body;
+        }
+        EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
+        std::remove(path.c_str());
+    };
+
+    expect_load_error("ice_servers = [\"stun:stun.example.com:3478\"]\n");
+    expect_load_error("ice_servers = [{ username = \"user\", credential = \"secret\" }]\n");
+    expect_load_error("ice_port_range_begin = 49152\n");
+    expect_load_error("ice_port_range_begin = 49200\nice_port_range_end = 49152\n");
+    expect_load_error("ice_transport_policy = \"relay-only\"\n");
+}
+
 TEST(ManagedVideoServerTest, LoadsTomlConfigDefaultsMaxSubscribersAndSupportsPerStreamOverrides)
 {
     const std::string path = "/tmp/video_server_managed_config_multi_stream_subscribers.toml";
