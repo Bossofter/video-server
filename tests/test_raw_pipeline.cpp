@@ -126,6 +126,7 @@ namespace
     TEST(RawToH264PipelineTest, BuildsLibavBackendOptionsPerEncoderFamily)
     {
         auto config = make_default_config();
+        config.encoder_crf = 21;
 
         const auto x264_options = video_server::build_libav_h264_encoder_backend_options(config, "libx264");
         EXPECT_EQ(x264_options.family, video_server::RawH264EncoderFamily::X264);
@@ -136,6 +137,9 @@ namespace
         EXPECT_TRUE(std::any_of(x264_options.private_options.begin(), x264_options.private_options.end(),
                                 [](const video_server::RawH264EncoderOption &option)
                                 { return option.key == "aud"; }));
+        EXPECT_TRUE(std::any_of(x264_options.private_options.begin(), x264_options.private_options.end(),
+                                [](const video_server::RawH264EncoderOption &option)
+                                { return option.key == "crf" && option.value == "21"; }));
 
         const auto openh264_options = video_server::build_libav_h264_encoder_backend_options(config, "libopenh264");
         EXPECT_EQ(openh264_options.family, video_server::RawH264EncoderFamily::OpenH264);
@@ -151,6 +155,9 @@ namespace
         EXPECT_FALSE(std::any_of(openh264_options.private_options.begin(), openh264_options.private_options.end(),
                                  [](const video_server::RawH264EncoderOption &option)
                                  { return option.key == "aud"; }));
+        EXPECT_FALSE(std::any_of(openh264_options.private_options.begin(), openh264_options.private_options.end(),
+                                 [](const video_server::RawH264EncoderOption &option)
+                                 { return option.key == "crf"; }));
     }
 
     TEST(RawToH264PipelineTest, UsesEncoderBackendFactorySeamToProduceOutput)

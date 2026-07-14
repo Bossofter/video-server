@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -10,6 +11,27 @@
 
 namespace video_server
 {
+    /**
+     * @brief One browser/server ICE server entry.
+     */
+    struct WebRtcIceServerConfig
+    {
+        std::string uri;        /**< STUN/TURN URI, for example stun:host:3478 or turn:host:3478?transport=tcp. */
+        std::string username;   /**< Optional TURN username. */
+        std::string credential; /**< Optional TURN credential/password. */
+    };
+
+    /**
+     * @brief ICE configuration shared by native server peer connections and browser clients.
+     */
+    struct WebRtcIceConfig
+    {
+        std::vector<WebRtcIceServerConfig> servers;            /**< Configured STUN/TURN servers. */
+        std::string transport_policy{"all"};                  /**< "all" or "relay". */
+        std::optional<std::string> bind_address;               /**< Optional local ICE bind address. */
+        std::optional<uint16_t> port_range_begin;              /**< Optional local ICE port range start. */
+        std::optional<uint16_t> port_range_end;                /**< Optional local ICE port range end. */
+    };
 
     /**
      * @brief WebRTC and HTTP server configuration for the browser delivery backend.
@@ -37,6 +59,7 @@ namespace video_server
         uint32_t config_rate_limit_max_requests{20};      /**< Maximum config requests per rate-limit window. */
         uint32_t debug_rate_limit_window_seconds{10};     /**< Debug rate-limit window in seconds. */
         uint32_t debug_rate_limit_max_requests{60};       /**< Maximum debug requests per rate-limit window. */
+        WebRtcIceConfig ice;                              /**< ICE/STUN/TURN configuration for server and clients. */
         ExecutionMode execution_mode{ExecutionMode::WorkerThread}; /**< Execution policy for HTTP progression. */
         uint32_t http_poll_timeout_ms{200};                         /**< Poll timeout used by HTTP worker or stepped pump. */
         size_t max_http_connections_per_step{1};                   /**< Maximum accepted connections serviced per step. */

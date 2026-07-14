@@ -249,6 +249,137 @@ namespace
         return "";
     }
 
+    std::vector<std::string> json_string_array_field(const std::string &json, const std::string &key)
+    {
+        const std::string needle = "\"" + key + "\":[";
+        const auto start = json.find(needle);
+        CHECK_TRUE(start != std::string::npos);
+        size_t pos = start + needle.size();
+        std::vector<std::string> values;
+        while (pos < json.size())
+        {
+            while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\r' || json[pos] == '\t'))
+            {
+                ++pos;
+            }
+            if (pos < json.size() && json[pos] == ']')
+            {
+                return values;
+            }
+            CHECK_TRUE(pos < json.size() && json[pos] == '"');
+            ++pos;
+            std::string value;
+            bool escaping = false;
+            for (; pos < json.size(); ++pos)
+            {
+                const char c = json[pos];
+                if (escaping)
+                {
+                    switch (c)
+                    {
+                    case '"':
+                    case '\\':
+                    case '/':
+                        value.push_back(c);
+                        break;
+                    case 'b':
+                        value.push_back('\b');
+                        break;
+                    case 'f':
+                        value.push_back('\f');
+                        break;
+                    case 'n':
+                        value.push_back('\n');
+                        break;
+                    case 'r':
+                        value.push_back('\r');
+                        break;
+                    case 't':
+                        value.push_back('\t');
+                        break;
+                    default:
+                        CHECK_TRUE(false);
+                    }
+                    escaping = false;
+                    continue;
+                }
+                if (c == '\\')
+                {
+                    escaping = true;
+                    continue;
+                }
+                if (c == '"')
+                {
+                    break;
+                }
+                value.push_back(c);
+            }
+            CHECK_TRUE(pos < json.size() && json[pos] == '"');
+            ++pos;
+            values.push_back(std::move(value));
+            while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\r' || json[pos] == '\t'))
+            {
+                ++pos;
+            }
+            if (pos < json.size() && json[pos] == ',')
+            {
+                ++pos;
+                continue;
+            }
+            CHECK_TRUE(pos < json.size() && json[pos] == ']');
+            return values;
+        }
+        CHECK_TRUE(false);
+        return {};
+    }
+
+    struct JsonCandidateRecord
+    {
+        uint64_t sequence{0};
+        std::string candidate;
+        std::string mid;
+    };
+
+    std::vector<JsonCandidateRecord> json_local_candidate_records(const std::string &json)
+    {
+        const std::string needle = "\"local_candidates\":[";
+        const auto start = json.find(needle);
+        CHECK_TRUE(start != std::string::npos);
+        const auto array_end = json.find(']', start + needle.size());
+        CHECK_TRUE(array_end != std::string::npos);
+        const std::string array = json.substr(start + needle.size(), array_end - (start + needle.size()));
+        std::vector<JsonCandidateRecord> records;
+        size_t pos = 0;
+        while ((pos = array.find("\"candidate\":\"", pos)) != std::string::npos)
+        {
+            JsonCandidateRecord record;
+            const auto seq_key = array.rfind("\"sequence\":", pos);
+            CHECK_TRUE(seq_key != std::string::npos);
+            size_t seq_start = seq_key + std::string("\"sequence\":").size();
+            size_t seq_end = seq_start;
+            while (seq_end < array.size() && array[seq_end] >= '0' && array[seq_end] <= '9')
+            {
+                ++seq_end;
+            }
+            record.sequence = std::stoull(array.substr(seq_start, seq_end - seq_start));
+
+            size_t candidate_start = pos + std::string("\"candidate\":\"").size();
+            const auto candidate_end = array.find('"', candidate_start);
+            CHECK_TRUE(candidate_end != std::string::npos);
+            record.candidate = array.substr(candidate_start, candidate_end - candidate_start);
+
+            const auto mid_key = array.find("\"mid\":\"", candidate_end);
+            CHECK_TRUE(mid_key != std::string::npos);
+            const size_t mid_start = mid_key + std::string("\"mid\":\"").size();
+            const auto mid_end = array.find('"', mid_start);
+            CHECK_TRUE(mid_end != std::string::npos);
+            record.mid = array.substr(mid_start, mid_end - mid_start);
+            records.push_back(std::move(record));
+            pos = mid_end + 1;
+        }
+        return records;
+    }
+
     uint64_t json_uint_field(const std::string &json, const std::string &key)
     {
         const std::string needle = "\"" + key + "\":";
@@ -481,6 +612,101 @@ TEST(WebRtcHttpTest, SignalingCallbacksRemainResponsive)
     }
 
     server.stop();
+}
+
+TEST(WebRtcHttpTest, ExposesConfiguredIceAndOrderedBackendCandidates)
+{
+    auto config = make_http_test_config();
+    config.ice.servers.push_back(video_server::WebRtcIceServerConfig{
+        "stun:127.0.0.1:3478", "", ""});
+    config.ice.servers.push_back(video_server::WebRtcIceServerConfig{
+        "turn:127.0.0.1:3478?transport=udp", "turn-user", "turn-secret"});
+    config.ice.transport_policy = "relay";
+    config.ice.bind_address = "127.0.0.1";
+    config.ice.port_range_begin = 49152;
+    config.ice.port_range_end = 49160;
+
+    video_server::WebRtcVideoServer server(config);
+    video_server::StreamConfig stream{"ice-config", "ice config", 4, 4, 30.0,
+                                      video_server::VideoPixelFormat::GRAY8};
+    CHECK_TRUE(server.register_stream(stream));
+
+    const auto ice_config_response =
+        server.handle_http_request_for_test("GET", "/api/video/signaling/ice-config/ice-config");
+    ASSERT_EQ(ice_config_response.status, 200);
+    EXPECT_NE(ice_config_response.body.find("\"iceTransportPolicy\":\"relay\""), std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"urls\":\"stun:127.0.0.1:3478\""), std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"urls\":\"turn:127.0.0.1:3478?transport=udp\""),
+              std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"username\":\"turn-user\""), std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"credential\":\"turn-secret\""), std::string::npos);
+    server.stop();
+
+    auto candidate_config = make_http_test_config();
+    candidate_config.enable_debug_api = true;
+    candidate_config.ice.servers.push_back(video_server::WebRtcIceServerConfig{
+        "turn:127.0.0.1:3478?transport=udp", "turn-user", "turn-secret"});
+    video_server::WebRtcVideoServer candidate_server(candidate_config);
+    CHECK_TRUE(candidate_server.register_stream(stream));
+    auto client_offer = make_client_offer("ice-config");
+    ASSERT_EQ(candidate_server.handle_http_request_for_test("POST", "/api/video/signaling/ice-config/offer",
+                                                            client_offer->offer_sdp)
+                  .status,
+              200);
+
+    ASSERT_TRUE(wait_until([&]()
+                           {
+        const auto session =
+            candidate_server.handle_http_request_for_test("GET", "/api/video/signaling/ice-config/session");
+        if (session.status != 200)
+        {
+            return false;
+        }
+        const std::string candidate = json_string_field(session.body, "last_local_candidate");
+        return !candidate.empty() &&
+               !json_local_candidate_records(session.body).empty() &&
+               session.body.find("\"ice_config\"") == std::string::npos &&
+               session.body.find("turn-secret") == std::string::npos; },
+                           2000));
+    const auto debug_response = candidate_server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+    EXPECT_EQ(debug_response.status, 200);
+    EXPECT_EQ(debug_response.body.find("turn-secret"), std::string::npos);
+    candidate_server.stop();
+}
+
+TEST(WebRtcHttpTest, RejectsInvalidIceConfigurationBeforeStart)
+{
+    auto expect_start_rejected = [](video_server::WebRtcVideoServerConfig config)
+    {
+        video_server::WebRtcVideoServer server(config);
+        EXPECT_FALSE(server.start());
+    };
+
+    auto invalid_policy = make_http_test_config();
+    invalid_policy.ice.transport_policy = "relay-only";
+    expect_start_rejected(invalid_policy);
+
+    auto partial_port_range = make_http_test_config();
+    partial_port_range.ice.port_range_begin = 49152;
+    expect_start_rejected(partial_port_range);
+
+    auto reversed_port_range = make_http_test_config();
+    reversed_port_range.ice.port_range_begin = 50000;
+    reversed_port_range.ice.port_range_end = 40000;
+    expect_start_rejected(reversed_port_range);
+
+    auto relay_without_turn = make_http_test_config();
+    relay_without_turn.ice.transport_policy = "relay";
+    relay_without_turn.ice.servers.push_back(video_server::WebRtcIceServerConfig{"stun:127.0.0.1:3478", "", ""});
+    expect_start_rejected(relay_without_turn);
+
+    auto stun_credentials = make_http_test_config();
+    stun_credentials.ice.servers.push_back(video_server::WebRtcIceServerConfig{"stun:127.0.0.1:3478", "user", "secret"});
+    expect_start_rejected(stun_credentials);
+
+    auto missing_turn_credential = make_http_test_config();
+    missing_turn_credential.ice.servers.push_back(video_server::WebRtcIceServerConfig{"turn:127.0.0.1:3478", "user", ""});
+    expect_start_rejected(missing_turn_credential);
 }
 
 TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions)
@@ -833,12 +1059,15 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
 
     std::string first_candidate;
     std::string second_candidate;
+    std::vector<std::string> first_candidates;
+    std::vector<std::string> second_candidates;
     wait_until([&]()
                {
     std::lock_guard<std::mutex> first_lock(first_client->mutex);
     if (first_client->candidates.empty()) {
       return false;
     }
+    first_candidates = first_client->candidates;
     first_candidate = first_client->candidates.front();
     return true; }, 1000);
     wait_until([&]()
@@ -847,20 +1076,21 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     if (second_client->candidates.empty()) {
       return false;
     }
+    second_candidates = second_client->candidates;
     second_candidate = second_client->candidates.front();
     return true; }, 1000);
 
-    if (!first_candidate.empty())
+    for (const auto &candidate : first_candidates)
     {
-        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate", first_candidate,
+        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate", candidate,
                                                       session_header_map(first_session_id))
                       .status,
                   200);
     }
-    if (!second_candidate.empty())
+    for (const auto &candidate : second_candidates)
     {
         ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate/" + second_session_id,
-                                                      second_candidate)
+                                                      candidate)
                       .status,
                   200);
     }
@@ -885,13 +1115,15 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     second_backend_candidate = json_string_field(second_session.body, "last_local_candidate");
     return !second_backend_candidate.empty(); }, 1000);
 
-    if (!first_backend_candidate.empty())
+    const auto first_backend_candidates = json_local_candidate_records(first_session.body);
+    const auto second_backend_candidates = json_local_candidate_records(second_session.body);
+    for (const auto &candidate : first_backend_candidates)
     {
-        first_client->peer_connection->addRemoteCandidate(rtc::Candidate(first_backend_candidate));
+        first_client->peer_connection->addRemoteCandidate(rtc::Candidate(candidate.candidate, candidate.mid));
     }
-    if (!second_backend_candidate.empty())
+    for (const auto &candidate : second_backend_candidates)
     {
-        second_client->peer_connection->addRemoteCandidate(rtc::Candidate(second_backend_candidate));
+        second_client->peer_connection->addRemoteCandidate(rtc::Candidate(candidate.candidate, candidate.mid));
     }
 
     ASSERT_TRUE(wait_until([&]()
@@ -903,8 +1135,8 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     if (first_session.status != 200 || second_session.status != 200) {
       return false;
     }
-    return json_string_field(first_session.body, "peer_state") != "new" &&
-           json_string_field(second_session.body, "peer_state") != "new"; }));
+    return json_string_field(first_session.body, "peer_state") == "connected" &&
+           json_string_field(second_session.body, "peer_state") == "connected"; }));
 
     const auto rejected_offer =
         server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/offer", third_client->offer_sdp);
@@ -1574,6 +1806,15 @@ TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrec
         "GET", "/api/video/streams/alpha/config", "", {{"Authorization", "Bearer lan-secret"}});
     ASSERT_EQ(ok.status, 200);
     ASSERT_NE(ok.body.find("\"config_generation\":1"), std::string::npos);
+
+    const auto missing_ice_config =
+        server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/ice-config");
+    ASSERT_EQ(missing_ice_config.status, 401);
+
+    const auto ok_ice_config = server.handle_http_request_for_test(
+        "GET", "/api/video/signaling/alpha/ice-config", "", {{"Authorization", "Bearer lan-secret"}});
+    ASSERT_EQ(ok_ice_config.status, 200);
+    ASSERT_NE(ok_ice_config.body.find("\"iceServers\""), std::string::npos);
 }
 
 TEST(WebRtcHttpTest, AllowlistSupportsCidrsAndRejectsDisallowedRemoteAddresses)
@@ -1641,6 +1882,21 @@ TEST(WebRtcHttpTest, RateLimitingRejectsRepeatedConfigMutations)
     ASSERT_EQ(first.status, 200);
     ASSERT_EQ(second.status, 200);
     ASSERT_EQ(third.status, 429);
+}
+
+TEST(WebRtcHttpTest, RateLimitingProtectsIceConfigEndpoint)
+{
+    auto server_config = make_http_test_config();
+    server_config.signaling_rate_limit_max_requests = 1;
+    server_config.signaling_rate_limit_window_seconds = 60;
+    video_server::WebRtcVideoServer server(server_config);
+    ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8}));
+
+    const auto first = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/ice-config");
+    const auto second = server.handle_http_request_for_test("GET", "/api/video/signaling/alpha/ice-config");
+
+    ASSERT_EQ(first.status, 200);
+    ASSERT_EQ(second.status, 429);
 }
 
 TEST(WebRtcHttpTest, KeepsMultiStreamSignalingAndStateIsolated)

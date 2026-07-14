@@ -1,0 +1,55 @@
+execution_mode = "manual_step"
+http_poll_timeout_ms = 0
+max_streams_per_step = 0
+
+[webrtc]
+execution_mode = "manual_step"
+http_host = "127.0.0.1"
+http_port = 0
+enable_http_api = false
+enable_debug_api = false
+enable_runtime_config_api = false
+allow_unsafe_public_routes = false
+enable_shared_key_auth = false
+shared_key = ""
+ip_allowlist = []
+cors_allowed_origins = []
+ice_transport_policy = "all"
+ice_bind_address = ""
+ice_servers = []
+# ice_port_range_begin = 49152
+# ice_port_range_end = 49200
+#
+# ice_servers = [
+#   { uri = "stun:stun.example.com:3478" },
+#   { uri = "turns:turn.example.com:443?transport=tcp", username = "user", credential = "secret" }
+# ]
+http_poll_timeout_ms = 0
+max_http_connections_per_step = 1
+
+[[streams]]
+stream_id = "alpha"
+label = "Profiler alpha grayscale"
+width = 640
+height = 360
+nominal_fps = 30.0
+input_pixel_format = "GRAY8"
+max_subscribers = 1
+
+[[streams]]
+stream_id = "bravo"
+label = "Profiler bravo 720p"
+width = 1280
+height = 720
+nominal_fps = 30.0
+input_pixel_format = "RGB24"
+max_subscribers = 1
+
+[default_raw_pipelines.default]
+encoder = "automatic"
+encoder_preset = "ultrafast"
+encoder_tune = "zerolatency"
+encoder_profile = "baseline"
+encoder_crf = 28
+repeat_headers = true
+emit_access_unit_delimiters = true

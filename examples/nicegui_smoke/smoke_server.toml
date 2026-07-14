@@ -19,6 +19,14 @@ max_json_body_bytes = 16384
 max_signaling_sdp_bytes = 131072
 max_signaling_candidate_bytes = 8192
 max_pending_candidates_per_stream = 32
+ice_transport_policy = "relay"
+ice_bind_address = ""
+# ice_port_range_begin = 49152
+# ice_port_range_end = 49200
+#
+ice_servers = [
+  { uri = "turn:192.168.0.63:3478?transport=udp" }
+]
 signaling_rate_limit_window_seconds = 10
 signaling_rate_limit_max_requests = 60
 config_rate_limit_window_seconds = 10
@@ -60,5 +68,6 @@ encoder = "automatic"
 encoder_preset = "ultrafast"
 encoder_tune = "zerolatency"
 encoder_profile = "baseline"
+encoder_crf = 23
 repeat_headers = true
 emit_access_unit_delimiters = true

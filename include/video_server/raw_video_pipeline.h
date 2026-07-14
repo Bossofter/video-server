@@ -49,6 +49,7 @@ namespace video_server
         std::string encoder_preset{"ultrafast"};                            /**< Encoder preset when supported by the backend. */
         std::string encoder_tune{"zerolatency"};                            /**< Encoder tune when supported by the backend. */
         std::string encoder_profile{"baseline"};                            /**< Encoder profile when supported by the backend. */
+        std::optional<uint32_t> encoder_crf;                                 /**< x264 CRF quality target, 0..51, when supported. */
         bool repeat_headers{true};                                          /**< Requests repeated codec headers when supported. */
         bool emit_access_unit_delimiters{true};                             /**< Requests AUD NAL emission when supported. */
     };

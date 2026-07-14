@@ -70,6 +70,12 @@ namespace video_server
         /** @brief Parsed subset of the session HTTP endpoint used by the runner. */
         struct SessionHttpSnapshot
         {
+            struct LocalCandidate
+            {
+                uint64_t sequence{0};
+                std::string candidate;
+                std::string mid;
+            };
             uint64_t session_generation{0};
             uint64_t disconnect_count{0};
             uint64_t encoded_sender_packets_attempted{0};
@@ -79,6 +85,7 @@ namespace video_server
             bool encoded_sender_video_track_open{false};
             std::string answer_sdp;
             std::string last_local_candidate;
+            std::vector<LocalCandidate> local_candidates;
             std::string encoded_sender_video_mid;
             std::string encoded_sender_state;
             std::string encoded_sender_last_packetization_status;
@@ -285,6 +292,7 @@ namespace video_server
             std::shared_ptr<CallbackState> callback_state_;
             bool remote_description_applied_{false};
             std::string last_applied_backend_candidate_;
+            uint64_t last_applied_backend_candidate_sequence_{0};
         };
 
         /** @brief Embedded synthetic server plus frame generation threads used by the runner. */

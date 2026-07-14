@@ -52,6 +52,7 @@ namespace video_server
         constexpr uint8_t kH264PayloadType = 102;
         constexpr uint64_t kH264ClockRate = 90000;
         constexpr size_t kMaxRtpPayloadSize = 1200;
+        constexpr size_t kMaxLocalIceCandidatesRetained = 256;
 
         uint32_t timestamp_ns_to_h264_rtp_timestamp(uint64_t timestamp_ns)
         {
@@ -202,6 +203,50 @@ namespace video_server
                 pos += to.size();
             }
             return sdp;
+        }
+
+        rtc::Configuration make_rtc_configuration(const WebRtcIceConfig &ice_config)
+        {
+            rtc::Configuration config;
+            config.disableAutoNegotiation = false;
+            for (const auto &server : ice_config.servers)
+            {
+                if (server.uri.empty())
+                {
+                    continue;
+                }
+                rtc::IceServer ice_server(server.uri);
+                if (!server.username.empty())
+                {
+                    ice_server.username = server.username;
+                }
+                if (!server.credential.empty())
+                {
+                    ice_server.password = server.credential;
+                }
+                config.iceServers.push_back(std::move(ice_server));
+            }
+            if (ice_config.transport_policy == "relay")
+            {
+                config.iceTransportPolicy = rtc::TransportPolicy::Relay;
+            }
+            else
+            {
+                config.iceTransportPolicy = rtc::TransportPolicy::All;
+            }
+            if (ice_config.bind_address.has_value() && !ice_config.bind_address->empty())
+            {
+                config.bindAddress = *ice_config.bind_address;
+            }
+            if (ice_config.port_range_begin.has_value())
+            {
+                config.portRangeBegin = *ice_config.port_range_begin;
+            }
+            if (ice_config.port_range_end.has_value())
+            {
+                config.portRangeEnd = *ice_config.port_range_end;
+            }
+            return config;
         }
 
         std::vector<uint8_t> make_rtp_packet(const uint8_t *payload, size_t payload_size, uint16_t sequence_number,
@@ -998,12 +1043,14 @@ namespace video_server
     }
 
     WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
-                                             LatestEncodedUnitGetter latest_encoded_unit_getter)
-        : stream_id_(std::move(stream_id)), callbacks_enabled_(std::make_shared<std::atomic_bool>(true))
+                                             LatestEncodedUnitGetter latest_encoded_unit_getter,
+                                             WebRtcIceConfig ice_config)
+        : stream_id_(std::move(stream_id)),
+          ice_config_(std::move(ice_config)),
+          callbacks_enabled_(std::make_shared<std::atomic_bool>(true))
     {
         ensure_default_logging_config();
-        rtc::Configuration config;
-        config.disableAutoNegotiation = false;
+        rtc::Configuration config = make_rtc_configuration(ice_config_);
         peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
         media_source_ = std::make_unique<StreamMediaSourceBridge>();
         video_ssrc_ = make_random_ssrc();
@@ -1137,6 +1184,8 @@ namespace video_server
                                      answer_sdp_,
                                      last_remote_candidate_,
                                      last_local_candidate_,
+                                     local_candidates_,
+                                     ice_gathering_complete_,
                                      peer_state_,
                                      active_,
                                      sending_active_,
@@ -1287,7 +1336,20 @@ namespace video_server
     const std::string local_candidate = std::string(candidate);
     spdlog::debug("[signaling] local candidate generated stream={} size={}", stream_id_, local_candidate.size());
     std::lock_guard<std::mutex> lock(mutex_);
-    last_local_candidate_ = local_candidate; });
+    last_local_candidate_ = local_candidate;
+    local_candidates_.push_back(WebRtcLocalIceCandidate{++next_local_candidate_sequence_, local_candidate, candidate.mid()});
+    if (local_candidates_.size() > kMaxLocalIceCandidatesRetained) {
+      local_candidates_.erase(local_candidates_.begin(),
+                              local_candidates_.begin() + static_cast<std::ptrdiff_t>(local_candidates_.size() - kMaxLocalIceCandidatesRetained));
+    } });
+
+        peer_connection_->onGatheringStateChange([this, callbacks_enabled](rtc::PeerConnection::GatheringState state)
+                                                 {
+    if (!callbacks_enabled->load(std::memory_order_acquire)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    ice_gathering_complete_ = state == rtc::PeerConnection::GatheringState::Complete; });
 
         peer_connection_->onStateChange([this, callbacks_enabled](rtc::PeerConnection::State state)
                                         {
