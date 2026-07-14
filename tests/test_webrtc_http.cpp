@@ -249,6 +249,90 @@ namespace
         return "";
     }
 
+    std::vector<std::string> json_string_array_field(const std::string &json, const std::string &key)
+    {
+        const std::string needle = "\"" + key + "\":[";
+        const auto start = json.find(needle);
+        CHECK_TRUE(start != std::string::npos);
+        size_t pos = start + needle.size();
+        std::vector<std::string> values;
+        while (pos < json.size())
+        {
+            while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\r' || json[pos] == '\t'))
+            {
+                ++pos;
+            }
+            if (pos < json.size() && json[pos] == ']')
+            {
+                return values;
+            }
+            CHECK_TRUE(pos < json.size() && json[pos] == '"');
+            ++pos;
+            std::string value;
+            bool escaping = false;
+            for (; pos < json.size(); ++pos)
+            {
+                const char c = json[pos];
+                if (escaping)
+                {
+                    switch (c)
+                    {
+                    case '"':
+                    case '\\':
+                    case '/':
+                        value.push_back(c);
+                        break;
+                    case 'b':
+                        value.push_back('\b');
+                        break;
+                    case 'f':
+                        value.push_back('\f');
+                        break;
+                    case 'n':
+                        value.push_back('\n');
+                        break;
+                    case 'r':
+                        value.push_back('\r');
+                        break;
+                    case 't':
+                        value.push_back('\t');
+                        break;
+                    default:
+                        CHECK_TRUE(false);
+                    }
+                    escaping = false;
+                    continue;
+                }
+                if (c == '\\')
+                {
+                    escaping = true;
+                    continue;
+                }
+                if (c == '"')
+                {
+                    break;
+                }
+                value.push_back(c);
+            }
+            CHECK_TRUE(pos < json.size() && json[pos] == '"');
+            ++pos;
+            values.push_back(std::move(value));
+            while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\r' || json[pos] == '\t'))
+            {
+                ++pos;
+            }
+            if (pos < json.size() && json[pos] == ',')
+            {
+                ++pos;
+                continue;
+            }
+            CHECK_TRUE(pos < json.size() && json[pos] == ']');
+            return values;
+        }
+        CHECK_TRUE(false);
+        return {};
+    }
+
     uint64_t json_uint_field(const std::string &json, const std::string &key)
     {
         const std::string needle = "\"" + key + "\":";
@@ -481,6 +565,58 @@ TEST(WebRtcHttpTest, SignalingCallbacksRemainResponsive)
     }
 
     server.stop();
+}
+
+TEST(WebRtcHttpTest, ExposesConfiguredIceAndOrderedBackendCandidates)
+{
+    auto config = make_http_test_config();
+    config.ice.servers.push_back(video_server::WebRtcIceServerConfig{
+        "stun:127.0.0.1:3478", "", ""});
+    config.ice.servers.push_back(video_server::WebRtcIceServerConfig{
+        "turn:127.0.0.1:3478?transport=udp", "turn-user", "turn-secret"});
+    config.ice.transport_policy = "relay";
+    config.ice.bind_address = "127.0.0.1";
+    config.ice.port_range_begin = 49152;
+    config.ice.port_range_end = 49160;
+
+    video_server::WebRtcVideoServer server(config);
+    video_server::StreamConfig stream{"ice-config", "ice config", 4, 4, 30.0,
+                                      video_server::VideoPixelFormat::GRAY8};
+    CHECK_TRUE(server.register_stream(stream));
+
+    const auto ice_config_response =
+        server.handle_http_request_for_test("GET", "/api/video/signaling/ice-config/ice-config");
+    ASSERT_EQ(ice_config_response.status, 200);
+    EXPECT_NE(ice_config_response.body.find("\"iceTransportPolicy\":\"relay\""), std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"urls\":\"stun:127.0.0.1:3478\""), std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"urls\":\"turn:127.0.0.1:3478?transport=udp\""),
+              std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"username\":\"turn-user\""), std::string::npos);
+    EXPECT_NE(ice_config_response.body.find("\"credential\":\"turn-secret\""), std::string::npos);
+    server.stop();
+
+    video_server::WebRtcVideoServer candidate_server(make_http_test_config());
+    CHECK_TRUE(candidate_server.register_stream(stream));
+    auto client_offer = make_client_offer("ice-config");
+    ASSERT_EQ(candidate_server.handle_http_request_for_test("POST", "/api/video/signaling/ice-config/offer",
+                                                            client_offer->offer_sdp)
+                  .status,
+              200);
+
+    ASSERT_TRUE(wait_until([&]()
+                           {
+        const auto session =
+            candidate_server.handle_http_request_for_test("GET", "/api/video/signaling/ice-config/session");
+        if (session.status != 200)
+        {
+            return false;
+        }
+        const std::string candidate = json_string_field(session.body, "last_local_candidate");
+        return !candidate.empty() &&
+               !json_string_array_field(session.body, "local_candidates").empty() &&
+               session.body.find("\"ice_config\"") != std::string::npos; },
+                           2000));
+    candidate_server.stop();
 }
 
 TEST(WebRtcHttpTest, SignalingRoutesExposeCorsHeadersAndHandleOptions)
@@ -833,12 +969,15 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
 
     std::string first_candidate;
     std::string second_candidate;
+    std::vector<std::string> first_candidates;
+    std::vector<std::string> second_candidates;
     wait_until([&]()
                {
     std::lock_guard<std::mutex> first_lock(first_client->mutex);
     if (first_client->candidates.empty()) {
       return false;
     }
+    first_candidates = first_client->candidates;
     first_candidate = first_client->candidates.front();
     return true; }, 1000);
     wait_until([&]()
@@ -847,20 +986,21 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     if (second_client->candidates.empty()) {
       return false;
     }
+    second_candidates = second_client->candidates;
     second_candidate = second_client->candidates.front();
     return true; }, 1000);
 
-    if (!first_candidate.empty())
+    for (const auto &candidate : first_candidates)
     {
-        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate", first_candidate,
+        ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate", candidate,
                                                       session_header_map(first_session_id))
                       .status,
                   200);
     }
-    if (!second_candidate.empty())
+    for (const auto &candidate : second_candidates)
     {
         ASSERT_EQ(server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/candidate/" + second_session_id,
-                                                      second_candidate)
+                                                      candidate)
                       .status,
                   200);
     }
@@ -885,13 +1025,15 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     second_backend_candidate = json_string_field(second_session.body, "last_local_candidate");
     return !second_backend_candidate.empty(); }, 1000);
 
-    if (!first_backend_candidate.empty())
+    const auto first_backend_candidates = json_string_array_field(first_session.body, "local_candidates");
+    const auto second_backend_candidates = json_string_array_field(second_session.body, "local_candidates");
+    for (const auto &candidate : first_backend_candidates)
     {
-        first_client->peer_connection->addRemoteCandidate(rtc::Candidate(first_backend_candidate));
+        first_client->peer_connection->addRemoteCandidate(rtc::Candidate(candidate));
     }
-    if (!second_backend_candidate.empty())
+    for (const auto &candidate : second_backend_candidates)
     {
-        second_client->peer_connection->addRemoteCandidate(rtc::Candidate(second_backend_candidate));
+        second_client->peer_connection->addRemoteCandidate(rtc::Candidate(candidate));
     }
 
     ASSERT_TRUE(wait_until([&]()
@@ -903,8 +1045,8 @@ TEST(WebRtcHttpTest, SupportsMultiRecipientFanoutAndSubscriberLimit)
     if (first_session.status != 200 || second_session.status != 200) {
       return false;
     }
-    return json_string_field(first_session.body, "peer_state") != "new" &&
-           json_string_field(second_session.body, "peer_state") != "new"; }));
+    return json_string_field(first_session.body, "peer_state") == "connected" &&
+           json_string_field(second_session.body, "peer_state") == "connected"; }));
 
     const auto rejected_offer =
         server.handle_http_request_for_test("POST", "/api/video/signaling/fanout/offer", third_client->offer_sdp);

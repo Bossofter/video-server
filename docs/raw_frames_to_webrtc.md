@@ -114,6 +114,7 @@ max_subscribers = 4
 
 [default_raw_pipelines.default]
 encoder = "automatic"
+encoder_crf = 23
 ```
 
 Notes:
@@ -123,6 +124,52 @@ Notes:
 - `http_poll_timeout_ms` is mirrored into `webrtc.http_poll_timeout_ms`; if both are supplied they must match
 - the managed TOML loader supports the full meaningful `WebRtcVideoServerConfig` HTTP/security/rate-limit surface
 - `max_subscribers` defaults to `1`, which preserves the old single-viewer behavior unless you opt into fanout
+- `encoder_crf` is forwarded to libx264 when available; lower values improve image quality at higher bitrate/CPU cost, and valid values are `0..51`
+
+## Encoder Profile Examples
+
+Example profile configs live in `examples/encoder_profiles/`:
+
+- `min_latency.toml`: `ultrafast`, `zerolatency`, baseline profile, higher CRF
+- `balanced.toml`: `veryfast`, `zerolatency`, main profile, default-quality CRF
+- `max_quality.toml`: slower preset, high profile, lower CRF; x264-specific knobs apply when the active FFmpeg build has libx264, otherwise unsupported knobs are ignored by the OpenH264 fallback
+
+You can compare these profiles with the in-process profiler:
+
+```bash
+cmake --build build --target video_server_config_profiler
+./build/video_server_config_profiler --duration-seconds 5
+```
+
+Pass explicit TOML paths to compare custom profiles:
+
+```bash
+./build/video_server_config_profiler --duration-seconds 10 path/to/profile-a.toml path/to/profile-b.toml
+```
+
+The profiler drives synthetic frames through the managed `push_frame()` + `step()` path and reports pushed frame rate, encoded access-unit rate, push/step timing, and sampled encoded access-unit sizes.
+
+Profiler fields:
+
+- `encoder requested`: the encoder mode requested by the TOML, such as `Automatic`, `LibX264`, or `LibOpenH264`
+- `encoder selected`: the actual libav encoder found on this machine; if `automatic` resolves to `libopenh264`, x264-only settings do not affect the run
+- `x264_options_active`: `yes` only when the selected encoder name contains `x264`; `encoder_preset`, `encoder_tune`, `encoder_profile`, and `encoder_crf` are meaningful for that path
+- `elapsed_s`: wall-clock duration of the profile run
+- `frames`: raw synthetic frames pushed into the managed server across all streams
+- `frame_rate`: pushed frames per second across all streams
+- `access_units`: encoded H.264 access units accepted by the server across all streams
+- `access_unit_rate`: encoded access units per second across all streams
+- `avg_sampled_encoded_bytes`: average size of the latest encoded access unit samples observed after each `step()`, not a full bitrate calculation
+- `push_us_avg` and `push_us_p95`: mean and 95th percentile time spent in `push_frame()`; this mostly covers frame validation, transform/latest-frame update, and latching
+- `step_us_avg` and `step_us_p95`: mean and 95th percentile time spent in `step()`; with HTTP disabled in the profiler, this is dominated by managed stream progression and H.264 encode work
+- `step_calls`: total managed `step()` calls completed during the run
+
+Interpretation notes:
+
+- Similar `step_us_p95` values across profiles usually mean the profiles resolved to the same underlying encoder path or the tested settings are not supported by the selected encoder.
+- On builds without `libx264`, `automatic` commonly resolves to OpenH264. In that case the example profiles still run, but x264 quality knobs are effectively a no-op and the profiler should report `x264_options_active=no`.
+- The profiler is CPU-side and in-process. It does not measure browser decode, RTP packet delivery, WebRTC jitter, or visual quality.
+- Use longer runs when comparing small deltas, because one-second and short runs can be dominated by startup, scheduling, and synthetic-frame generation noise.
 
 ## Lower-Level Split Path
 

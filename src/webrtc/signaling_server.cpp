@@ -33,12 +33,14 @@ namespace video_server
     SignalingServer::SignalingServer(StreamExistsFn stream_exists, MaxSubscribersGetterFn max_subscribers_getter,
                                      LatestFrameGetterFn latest_frame_getter,
                                      LatestEncodedUnitGetterFn latest_encoded_unit_getter,
-                                     size_t max_pending_candidates_per_stream)
+                                     size_t max_pending_candidates_per_stream,
+                                     WebRtcIceConfig ice_config)
         : stream_exists_(std::move(stream_exists)),
           max_subscribers_getter_(std::move(max_subscribers_getter)),
           latest_frame_getter_(std::move(latest_frame_getter)),
           latest_encoded_unit_getter_(std::move(latest_encoded_unit_getter)),
-          max_pending_candidates_per_stream_(max_pending_candidates_per_stream)
+          max_pending_candidates_per_stream_(max_pending_candidates_per_stream),
+          ice_config_(std::move(ice_config))
     {
         ensure_default_logging_config();
     }
@@ -83,7 +85,8 @@ namespace video_server
             slot.pending_remote_candidates.clear();
         }
 
-        auto session = std::make_shared<WebRtcStreamSession>(stream_id, latest_frame_getter_, latest_encoded_unit_getter_);
+        auto session = std::make_shared<WebRtcStreamSession>(stream_id, latest_frame_getter_, latest_encoded_unit_getter_,
+                                                             ice_config_);
         spdlog::info("[signaling] offer received stream={} session_id={} size={}", stream_id, session_id, offer_sdp.size());
         if (!session->apply_offer(offer_sdp, error_message))
         {
@@ -378,6 +381,8 @@ namespace video_server
                                 snapshot.answer_sdp,
                                 snapshot.last_remote_candidate,
                                 snapshot.last_local_candidate,
+                                snapshot.local_candidates,
+                                snapshot.ice_config,
                                 snapshot.peer_state,
                                 snapshot.active,
                                 snapshot.sending_active,
@@ -425,6 +430,8 @@ namespace video_server
                                               snapshot.answer_sdp,
                                               snapshot.last_remote_candidate,
                                               snapshot.last_local_candidate,
+                                              snapshot.local_candidates,
+                                              snapshot.ice_config,
                                               snapshot.peer_state,
                                               snapshot.active,
                                               snapshot.sending_active,

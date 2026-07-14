@@ -41,6 +41,13 @@ namespace
         bool enable_debug_api{false};
         bool lan_only{false};
         std::string shared_key;
+        std::vector<std::string> ice_servers;
+        std::string ice_username;
+        std::string ice_credential;
+        std::string ice_transport_policy;
+        std::string ice_bind_address;
+        std::optional<uint16_t> ice_port_range_begin;
+        std::optional<uint16_t> ice_port_range_end;
         std::vector<StreamSpec> streams;
         double duration_seconds{0.0};
         double stats_interval_seconds{5.0};
@@ -143,7 +150,7 @@ namespace
     void print_usage(const char *argv0)
     {
         spdlog::info(
-            "Usage: {} [--config PATH] [--host HOST] [--port PORT] [--enable-debug-api] [--lan-only] [--shared-key TOKEN] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
+            "Usage: {} [--config PATH] [--host HOST] [--port PORT] [--enable-debug-api] [--lan-only] [--shared-key TOKEN] [--ice-server URI] [--ice-username USER] [--ice-credential SECRET] [--ice-transport-policy all|relay] [--ice-bind-address ADDR] [--ice-port-range BEGIN:END] [--stream-id ID --width W --height H --fps FPS] [--stream ID:W:H:FPS[:LABEL]] [--multi-stream-demo]",
             argv0);
     }
 
@@ -202,6 +209,55 @@ namespace
                 if (!value)
                     return std::nullopt;
                 options.shared_key = value;
+            }
+            else if (arg == "--ice-server")
+            {
+                const char *value = require_value("--ice-server");
+                if (!value)
+                    return std::nullopt;
+                options.ice_servers.push_back(value);
+            }
+            else if (arg == "--ice-username")
+            {
+                const char *value = require_value("--ice-username");
+                if (!value)
+                    return std::nullopt;
+                options.ice_username = value;
+            }
+            else if (arg == "--ice-credential")
+            {
+                const char *value = require_value("--ice-credential");
+                if (!value)
+                    return std::nullopt;
+                options.ice_credential = value;
+            }
+            else if (arg == "--ice-transport-policy")
+            {
+                const char *value = require_value("--ice-transport-policy");
+                if (!value || (std::string(value) != "all" && std::string(value) != "relay"))
+                    return std::nullopt;
+                options.ice_transport_policy = value;
+            }
+            else if (arg == "--ice-bind-address")
+            {
+                const char *value = require_value("--ice-bind-address");
+                if (!value)
+                    return std::nullopt;
+                options.ice_bind_address = value;
+            }
+            else if (arg == "--ice-port-range")
+            {
+                const char *value = require_value("--ice-port-range");
+                if (!value)
+                    return std::nullopt;
+                const auto parts = split(value, ':');
+                uint16_t begin = 0;
+                uint16_t end = 0;
+                if (parts.size() != 2 || !parse_uint16(parts[0].c_str(), begin) ||
+                    !parse_uint16(parts[1].c_str(), end) || begin > end)
+                    return std::nullopt;
+                options.ice_port_range_begin = begin;
+                options.ice_port_range_end = end;
             }
             else if (arg == "--stream-id")
             {
@@ -352,6 +408,31 @@ int main(int argc, char **argv)
     {
         config.webrtc.enable_shared_key_auth = true;
         config.webrtc.shared_key = options->shared_key;
+    }
+    if (!options->ice_servers.empty())
+    {
+        config.webrtc.ice.servers.clear();
+        for (const auto &uri : options->ice_servers)
+        {
+            config.webrtc.ice.servers.push_back(
+                video_server::WebRtcIceServerConfig{uri, options->ice_username, options->ice_credential});
+        }
+    }
+    if (!options->ice_transport_policy.empty())
+    {
+        config.webrtc.ice.transport_policy = options->ice_transport_policy;
+    }
+    if (!options->ice_bind_address.empty())
+    {
+        config.webrtc.ice.bind_address = options->ice_bind_address;
+    }
+    if (options->ice_port_range_begin.has_value())
+    {
+        config.webrtc.ice.port_range_begin = *options->ice_port_range_begin;
+    }
+    if (options->ice_port_range_end.has_value())
+    {
+        config.webrtc.ice.port_range_end = *options->ice_port_range_end;
     }
     if (!options->streams.empty())
     {

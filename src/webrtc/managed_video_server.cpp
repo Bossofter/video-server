@@ -191,6 +191,19 @@ namespace video_server
             config.encoder_preset = table["encoder_preset"].value_or(config.encoder_preset);
             config.encoder_tune = table["encoder_tune"].value_or(config.encoder_tune);
             config.encoder_profile = table["encoder_profile"].value_or(config.encoder_profile);
+            if (const auto *encoder_crf_node = table.get("encoder_crf"))
+            {
+                const auto encoder_crf = encoder_crf_node->value<uint32_t>();
+                if (!encoder_crf.has_value())
+                {
+                    throw std::runtime_error("pipeline encoder_crf must be an integer in the range 0..51");
+                }
+                if (*encoder_crf > 51)
+                {
+                    throw std::runtime_error("pipeline encoder_crf must be in the range 0..51");
+                }
+                config.encoder_crf = *encoder_crf;
+            }
             config.repeat_headers = table["repeat_headers"].value_or(config.repeat_headers);
             config.emit_access_unit_delimiters =
                 table["emit_access_unit_delimiters"].value_or(config.emit_access_unit_delimiters);
@@ -216,6 +229,57 @@ namespace video_server
                 values.push_back(*value);
             }
             return values;
+        }
+
+        void parse_ice_config(const toml::table &table, WebRtcIceConfig &ice_config)
+        {
+            if (const auto value = table_value<std::string>(table, "ice_transport_policy"))
+            {
+                if (*value != "all" && *value != "relay")
+                {
+                    throw std::runtime_error("webrtc.ice_transport_policy must be \"all\" or \"relay\"");
+                }
+                ice_config.transport_policy = *value;
+            }
+            if (const auto value = table_value<std::string>(table, "ice_bind_address"))
+            {
+                ice_config.bind_address = *value;
+            }
+            if (const auto value = table_value<uint16_t>(table, "ice_port_range_begin"))
+            {
+                ice_config.port_range_begin = *value;
+            }
+            if (const auto value = table_value<uint16_t>(table, "ice_port_range_end"))
+            {
+                ice_config.port_range_end = *value;
+            }
+            if (ice_config.port_range_begin.has_value() && ice_config.port_range_end.has_value() &&
+                *ice_config.port_range_begin > *ice_config.port_range_end)
+            {
+                throw std::runtime_error("webrtc ICE port range begin must be <= end");
+            }
+
+            if (const auto *servers = table["ice_servers"].as_array())
+            {
+                ice_config.servers.clear();
+                for (const auto &node : *servers)
+                {
+                    const auto *server_table = node.as_table();
+                    if (server_table == nullptr)
+                    {
+                        throw std::runtime_error("webrtc.ice_servers entries must be tables");
+                    }
+                    WebRtcIceServerConfig server;
+                    server.uri = (*server_table)["uri"].value_or("");
+                    if (server.uri.empty())
+                    {
+                        throw std::runtime_error("webrtc.ice_servers entry requires uri");
+                    }
+                    server.username = (*server_table)["username"].value_or("");
+                    server.credential = (*server_table)["credential"].value_or("");
+                    ice_config.servers.push_back(std::move(server));
+                }
+            }
         }
 
         size_t frame_storage_size(const VideoFrameView &frame)
@@ -839,6 +903,7 @@ namespace video_server
             {
                 config.webrtc.max_http_connections_per_step = *value;
             }
+            parse_ice_config(*webrtc, config.webrtc.ice);
         }
 
         if (saw_top_level_http_poll_timeout && saw_nested_http_poll_timeout &&

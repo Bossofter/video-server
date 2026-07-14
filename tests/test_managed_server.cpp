@@ -218,6 +218,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
         out << "\n[default_raw_pipelines.default]\n";
         out << "encoder = \"libx264\"\n";
         out << "encoder_preset = \"veryfast\"\n";
+        out << "encoder_crf = 18\n";
     }
 
     const auto config = video_server::load_managed_video_server_config(path);
@@ -254,6 +255,8 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     ASSERT_TRUE(config.default_raw_pipelines.find("default") != config.default_raw_pipelines.end());
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder, video_server::RawH264Encoder::LibX264);
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_preset, "veryfast");
+    ASSERT_TRUE(config.default_raw_pipelines.at("default").encoder_crf.has_value());
+    EXPECT_EQ(*config.default_raw_pipelines.at("default").encoder_crf, 18u);
 
     std::remove(path.c_str());
 }
@@ -288,6 +291,20 @@ TEST(ManagedVideoServerTest, LoadsTomlConfigDefaultsMaxSubscribersAndSupportsPer
     EXPECT_EQ(config.streams[1].stream_id, "bravo");
     EXPECT_EQ(config.streams[1].max_subscribers, 3u);
 
+    std::remove(path.c_str());
+}
+
+TEST(ManagedVideoServerTest, RejectsTomlConfigWithOutOfRangeEncoderCrf)
+{
+    const std::string path = "/tmp/video_server_managed_config_invalid_encoder_crf.toml";
+    {
+        std::ofstream out(path);
+        out << "execution_mode = \"manual_step\"\n";
+        out << "\n[default_raw_pipelines.default]\n";
+        out << "encoder_crf = 52\n";
+    }
+
+    EXPECT_THROW(static_cast<void>(video_server::load_managed_video_server_config(path)), std::runtime_error);
     std::remove(path.c_str());
 }
 

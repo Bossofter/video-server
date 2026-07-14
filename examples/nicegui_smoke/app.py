@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--server-port', type=int, default=8080, help='Port to pass to the smoke server when --start-server is used.')
     parser.add_argument('--lan-only', action='store_true', help='Enable LAN smoke mode: allow remote signaling/config/debug access on the launched smoke server.')
     parser.add_argument('--shared-key', default='', help='Optional shared key for protected server endpoints.')
+    parser.add_argument('--ice-server', action='append', default=[], help='Repeatable STUN/TURN URI passed to the launched smoke server.')
+    parser.add_argument('--ice-username', default='', help='TURN username applied to configured ICE servers.')
+    parser.add_argument('--ice-credential', default='', help='TURN credential applied to configured ICE servers.')
+    parser.add_argument('--ice-transport-policy', choices=['all', 'relay'], default='', help='ICE transport policy for browser and server peer connections.')
+    parser.add_argument('--ice-bind-address', default='', help='Optional local ICE bind address for the launched smoke server.')
+    parser.add_argument('--ice-port-range', default='', help='Optional local ICE UDP port range BEGIN:END for the launched smoke server.')
     parser.add_argument('--width', type=int, default=640, help='Synthetic stream width for the launched smoke server.')
     parser.add_argument('--height', type=int, default=360, help='Synthetic stream height for the launched smoke server.')
     parser.add_argument('--fps', type=float, default=30.0, help='Synthetic stream FPS for the launched smoke server.')
@@ -246,6 +252,18 @@ def start_smoke_server() -> subprocess.Popen[str]:
         cmd.append('--lan-only')
     if ARGS.shared_key:
         cmd.extend(['--shared-key', ARGS.shared_key])
+    for uri in ARGS.ice_server:
+        cmd.extend(['--ice-server', uri])
+    if ARGS.ice_username:
+        cmd.extend(['--ice-username', ARGS.ice_username])
+    if ARGS.ice_credential:
+        cmd.extend(['--ice-credential', ARGS.ice_credential])
+    if ARGS.ice_transport_policy:
+        cmd.extend(['--ice-transport-policy', ARGS.ice_transport_policy])
+    if ARGS.ice_bind_address:
+        cmd.extend(['--ice-bind-address', ARGS.ice_bind_address])
+    if ARGS.ice_port_range:
+        cmd.extend(['--ice-port-range', ARGS.ice_port_range])
 
     probe_host = effective_server_host
     if probe_host in ('0.0.0.0', '::', ''):
@@ -1015,12 +1033,44 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_negotiated_h264_fmtp: session.encoded_sender_negotiated_h264_fmtp,
       encoded_sender_video_mid: session.encoded_sender_video_mid,
       last_local_candidate: session.last_local_candidate,
+      local_candidates: Array.isArray(session.local_candidates) ? session.local_candidates : [],
+      ice_config: session.ice_config || null,
       answer_present: !!session.answer_sdp,
       session_id: session.session_id || '',
       active: session.active,
       teardown_reason: session.teardown_reason || '',
       last_transition_reason: session.last_transition_reason || '',
     }};
+  }}
+
+  function browserIceConfig(iceConfig) {{
+    const config = {{iceServers: []}};
+    if (!iceConfig || typeof iceConfig !== 'object') return config;
+    if (Array.isArray(iceConfig.iceServers)) {{
+      config.iceServers = iceConfig.iceServers
+        .filter((server) => server && server.urls)
+        .map((server) => ({{
+          urls: server.urls,
+          ...(server.username ? {{username: server.username}} : {{}}),
+          ...(server.credential ? {{credential: server.credential}} : {{}}),
+        }}));
+    }}
+    if (iceConfig.iceTransportPolicy === 'relay') {{
+      config.iceTransportPolicy = 'relay';
+    }}
+    return config;
+  }}
+
+  async function fetchIceConfig(serverBase, streamId) {{
+    const response = await fetch(apiProxyUrl(serverBase, signalingPath(streamId, 'ice-config')), {{
+      cache: 'no-store',
+      headers: signalingHeaders(),
+    }});
+    if (!response.ok) {{
+      appendLog('ice', `ICE config unavailable: HTTP ${{response.status}}`);
+      return {{iceServers: []}};
+    }}
+    return browserIceConfig(await response.json());
   }}
 
   function summarizeStats(report) {{
@@ -1079,18 +1129,24 @@ window.videoSmokeHarness = (() => {{
       state.sessionId = session.session_id || state.sessionId || '';
       state.sessionSummary = summarizeSession(session);
       await refreshObservability();
-      if (session.last_local_candidate && session.last_local_candidate !== state.lastBackendCandidate) {{
-        state.lastBackendCandidate = session.last_local_candidate;
-        appendLog('ice', `backend ICE candidate observed: ${{session.last_local_candidate}}`);
+      const backendCandidates = Array.isArray(session.local_candidates) && session.local_candidates.length > 0
+        ? session.local_candidates
+        : (session.last_local_candidate ? [session.last_local_candidate] : []);
+      if (backendCandidates.length > 0 && backendCandidates[backendCandidates.length - 1] !== state.lastBackendCandidate) {{
+        state.lastBackendCandidate = backendCandidates[backendCandidates.length - 1];
+        appendLog('ice', `backend ICE candidate observed: ${{state.lastBackendCandidate}}`);
       }}
-      if (state.remoteDescriptionApplied && session.last_local_candidate && !state.appliedBackendCandidates.has(session.last_local_candidate)) {{
+      for (const backendCandidate of backendCandidates) {{
+        if (!state.remoteDescriptionApplied || !backendCandidate || state.appliedBackendCandidates.has(backendCandidate)) {{
+          continue;
+        }}
         await state.pc.addIceCandidate({{
-          candidate: session.last_local_candidate,
+          candidate: backendCandidate,
           sdpMid: session.encoded_sender_video_mid || '0',
           sdpMLineIndex: 0,
         }});
-        state.appliedBackendCandidates.add(session.last_local_candidate);
-        appendLog('ice', `backend ICE candidate applied: ${{session.last_local_candidate}}`);
+        state.appliedBackendCandidates.add(backendCandidate);
+        appendLog('ice', `backend ICE candidate applied: ${{backendCandidate}}`);
       }}
       if (!state.remoteDescriptionApplied && session.answer_sdp) {{
         appendLog('signaling', 'answer received from backend session');
@@ -1154,7 +1210,7 @@ window.videoSmokeHarness = (() => {{
     appendLog('ui', `connect requested (${{origin}})`);
 
     const video = byId('smoke-video');
-    const pc = new RTCPeerConnection({{iceServers: []}});
+    const pc = new RTCPeerConnection(await fetchIceConfig(cfg.serverBase, streamId));
     state.pc = pc;
     bindDebugHooks();
     pc.addTransceiver('video', {{direction: 'recvonly'}});
@@ -1163,7 +1219,7 @@ window.videoSmokeHarness = (() => {{
     let offerPosted = false;
 
     const flushBufferedCandidates = async () => {{
-      if (!offerPosted || !state.remoteDescriptionApplied || bufferedLocalCandidates.length === 0) return;
+      if (!offerPosted || bufferedLocalCandidates.length === 0) return;
       state.candidateStatus = `flushing ${{bufferedLocalCandidates.length}} candidate(s)`;
       updateSummary();
       while (bufferedLocalCandidates.length > 0) {{
@@ -1214,7 +1270,7 @@ window.videoSmokeHarness = (() => {{
         return;
       }}
       const candidate = event.candidate.candidate;
-      if (!offerPosted || !state.remoteDescriptionApplied) {{
+      if (!offerPosted) {{
         bufferedLocalCandidates.push(candidate);
         state.candidateStatus = `buffered (${{bufferedLocalCandidates.length}})`;
         appendLog('ice', `candidate buffered: ${{candidate}}`);
@@ -1276,6 +1332,7 @@ window.videoSmokeHarness = (() => {{
       appendLog('signaling', `offer posted successfully${{state.sessionId ? ` session_id=${{state.sessionId}}` : ''}}`);
       updateSummary();
 
+      await flushBufferedCandidates();
       await refreshSession(streamId);
       await flushBufferedCandidates();
 

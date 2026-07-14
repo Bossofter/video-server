@@ -13,6 +13,7 @@
 
 #include "../core/video_server_core.h"
 #include "video_server/encoded_access_unit_view.h"
+#include "video_server/webrtc_video_server.h"
 
 namespace video_server
 {
@@ -144,6 +145,8 @@ namespace video_server
         std::string answer_sdp;
         std::string last_remote_candidate;
         std::string last_local_candidate;
+        std::vector<std::string> local_candidates;
+        WebRtcIceConfig ice_config;
         std::string peer_state;
         bool active{true};
         bool sending_active{false};
@@ -200,7 +203,8 @@ namespace video_server
 
         /** @brief Creates a session for one stream. */
         WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
-                            LatestEncodedUnitGetter latest_encoded_unit_getter);
+                            LatestEncodedUnitGetter latest_encoded_unit_getter,
+                            WebRtcIceConfig ice_config = {});
         ~WebRtcStreamSession();
 
         WebRtcStreamSession(const WebRtcStreamSession &) = delete;
@@ -242,6 +246,8 @@ namespace video_server
         std::string answer_sdp_;
         std::string last_remote_candidate_;
         std::string last_local_candidate_;
+        std::vector<std::string> local_candidates_;
+        WebRtcIceConfig ice_config_;
         std::string peer_state_{"new"};
         bool active_{true};
         bool sending_active_{false};

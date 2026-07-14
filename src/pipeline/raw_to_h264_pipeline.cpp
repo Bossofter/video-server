@@ -689,6 +689,11 @@ namespace video_server
                     set_error_locked("output_fps must be > 0 when provided", error_message);
                     return false;
                 }
+                if (config_.encoder_crf.has_value() && *config_.encoder_crf > 51)
+                {
+                    set_error_locked("encoder_crf must be in the range 0..51 when provided", error_message);
+                    return false;
+                }
                 return true;
             }
 
@@ -771,6 +776,10 @@ namespace video_server
             options.private_options.push_back({"preset", config.encoder_preset});
             options.private_options.push_back({"tune", config.encoder_tune});
             options.private_options.push_back({"profile", config.encoder_profile});
+            if (config.encoder_crf.has_value())
+            {
+                options.private_options.push_back({"crf", std::to_string(*config.encoder_crf)});
+            }
             options.private_options.push_back({"scenecut", "0"});
             options.private_options.push_back({"repeat-headers", config.repeat_headers ? "1" : "0"});
             options.private_options.push_back({"aud", config.emit_access_unit_delimiters ? "1" : "0"});

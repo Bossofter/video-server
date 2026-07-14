@@ -81,6 +81,49 @@ namespace video_server
 
         std::string bool_to_json(bool value) { return value ? "true" : "false"; }
 
+        std::string json_string_array(const std::vector<std::string> &values)
+        {
+            std::ostringstream out;
+            out << '[';
+            for (size_t i = 0; i < values.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    out << ',';
+                }
+                out << '"' << json_escape(values[i]) << '"';
+            }
+            out << ']';
+            return out.str();
+        }
+
+        std::string ice_config_json(const WebRtcIceConfig &ice_config)
+        {
+            std::ostringstream out;
+            out << "{\"iceServers\":[";
+            for (size_t i = 0; i < ice_config.servers.size(); ++i)
+            {
+                const auto &server = ice_config.servers[i];
+                if (i != 0)
+                {
+                    out << ',';
+                }
+                out << "{\"urls\":\"" << json_escape(server.uri) << "\"";
+                if (!server.username.empty())
+                {
+                    out << ",\"username\":\"" << json_escape(server.username) << "\"";
+                }
+                if (!server.credential.empty())
+                {
+                    out << ",\"credential\":\"" << json_escape(server.credential) << "\"";
+                }
+                out << '}';
+            }
+            out << "],\"iceTransportPolicy\":\""
+                << json_escape(ice_config.transport_policy == "relay" ? "relay" : "all") << "\"}";
+            return out.str();
+        }
+
         struct JsonValue
         {
             enum class Type
@@ -674,6 +717,8 @@ namespace video_server
                 << "\"answer_sdp\":\"" << json_escape(session.answer_sdp) << "\","
                 << "\"last_remote_candidate\":\"" << json_escape(session.last_remote_candidate) << "\","
                 << "\"last_local_candidate\":\"" << json_escape(session.last_local_candidate) << "\","
+                << "\"local_candidates\":" << json_string_array(session.local_candidates) << ','
+                << "\"ice_config\":" << ice_config_json(session.ice_config) << ','
                 << "\"peer_state\":\"" << json_escape(session.peer_state) << "\","
                 << "\"active\":" << bool_to_json(session.active) << ','
                 << "\"sending_active\":" << bool_to_json(session.sending_active) << ','
@@ -876,7 +921,8 @@ namespace video_server
                          {
                              return core_.get_latest_encoded_unit_for_stream(stream_id);
                          },
-                         config_.max_pending_candidates_per_stream),
+                         config_.max_pending_candidates_per_stream,
+                         config_.ice),
               http_server_(std::make_unique<HttpApiServer>(config_.http_host, config_.http_port, config_.max_http_request_bytes))
         {
             for (const auto &entry : config_.ip_allowlist)
@@ -1532,6 +1578,12 @@ namespace video_server
                 const auto session_id =
                     session_id_from_path.has_value() ? session_id_from_path : signaling_session_id_from_request(request);
 
+                if (request.method == "GET" && action == "ice-config")
+                {
+                    HttpResponse response{200, ice_config_json(config_.ice), "application/json"};
+                    response.headers["Cache-Control"] = "no-store";
+                    return finalize(std::move(response));
+                }
                 if (request.method == "POST" && action == "offer")
                 {
                     if (request.body.empty())
