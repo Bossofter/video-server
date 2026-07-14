@@ -231,6 +231,62 @@ namespace video_server
                 return {};
             }
 
+            std::vector<SessionHttpSnapshot::LocalCandidate> json_local_candidates(const std::string &json)
+            {
+                const std::string needle = "\"local_candidates\":[";
+                const auto start = json.find(needle);
+                if (start == std::string::npos)
+                {
+                    return {};
+                }
+                const auto array_end = json.find(']', start + needle.size());
+                if (array_end == std::string::npos)
+                {
+                    return {};
+                }
+                const std::string array = json.substr(start + needle.size(), array_end - (start + needle.size()));
+                std::vector<SessionHttpSnapshot::LocalCandidate> candidates;
+                size_t pos = 0;
+                while ((pos = array.find("\"candidate\":\"", pos)) != std::string::npos)
+                {
+                    SessionHttpSnapshot::LocalCandidate candidate;
+                    const auto sequence_key = array.rfind("\"sequence\":", pos);
+                    if (sequence_key != std::string::npos)
+                    {
+                        size_t sequence_start = sequence_key + std::string("\"sequence\":").size();
+                        size_t sequence_end = sequence_start;
+                        while (sequence_end < array.size() && array[sequence_end] >= '0' && array[sequence_end] <= '9')
+                        {
+                            ++sequence_end;
+                        }
+                        if (sequence_end > sequence_start)
+                        {
+                            candidate.sequence = std::stoull(array.substr(sequence_start, sequence_end - sequence_start));
+                        }
+                    }
+                    size_t candidate_start = pos + std::string("\"candidate\":\"").size();
+                    const auto candidate_end = array.find('"', candidate_start);
+                    if (candidate_end == std::string::npos)
+                    {
+                        break;
+                    }
+                    candidate.candidate = array.substr(candidate_start, candidate_end - candidate_start);
+                    const auto mid_key = array.find("\"mid\":\"", candidate_end);
+                    if (mid_key != std::string::npos)
+                    {
+                        const size_t mid_start = mid_key + std::string("\"mid\":\"").size();
+                        const auto mid_end = array.find('"', mid_start);
+                        if (mid_end != std::string::npos)
+                        {
+                            candidate.mid = array.substr(mid_start, mid_end - mid_start);
+                        }
+                    }
+                    candidates.push_back(std::move(candidate));
+                    pos = candidate_end + 1;
+                }
+                return candidates;
+            }
+
             std::optional<uint16_t> parse_port(const char *value)
             {
                 char *end = nullptr;
@@ -393,6 +449,7 @@ namespace video_server
             snapshot.encoded_sender_video_track_open = json_bool_field(json, "encoded_sender_video_track_open");
             snapshot.answer_sdp = json_string_field(json, "answer_sdp");
             snapshot.last_local_candidate = json_string_field(json, "last_local_candidate");
+            snapshot.local_candidates = json_local_candidates(json);
             snapshot.encoded_sender_video_mid = json_string_field(json, "encoded_sender_video_mid");
             snapshot.encoded_sender_state = json_string_field(json, "encoded_sender_state");
             snapshot.encoded_sender_last_packetization_status = json_string_field(json, "encoded_sender_last_packetization_status");
@@ -886,6 +943,7 @@ namespace video_server
 
             remote_description_applied_ = false;
             last_applied_backend_candidate_.clear();
+            last_applied_backend_candidate_sequence_ = 0;
             return true;
         }
 
@@ -898,6 +956,7 @@ namespace video_server
             callback_state_.reset();
             remote_description_applied_ = false;
             last_applied_backend_candidate_.clear();
+            last_applied_backend_candidate_sequence_ = 0;
         }
 
         void WebRtcClientSession::poll(const HttpJsonClient &http_client, std::string *error_message)
@@ -927,9 +986,29 @@ namespace video_server
             if (remote_description_applied_ && !session.last_local_candidate.empty() &&
                 session.last_local_candidate != last_applied_backend_candidate_)
             {
-                rtc::Candidate candidate(session.last_local_candidate, session.encoded_sender_video_mid.empty() ? "0" : session.encoded_sender_video_mid);
-                peer_connection_->addRemoteCandidate(candidate);
-                last_applied_backend_candidate_ = session.last_local_candidate;
+                if (session.local_candidates.empty())
+                {
+                    rtc::Candidate candidate(session.last_local_candidate, session.encoded_sender_video_mid.empty() ? "0" : session.encoded_sender_video_mid);
+                    peer_connection_->addRemoteCandidate(candidate);
+                    last_applied_backend_candidate_ = session.last_local_candidate;
+                }
+            }
+
+            if (remote_description_applied_)
+            {
+                for (const auto &backend_candidate : session.local_candidates)
+                {
+                    if (backend_candidate.sequence <= last_applied_backend_candidate_sequence_ ||
+                        backend_candidate.candidate.empty())
+                    {
+                        continue;
+                    }
+                    rtc::Candidate candidate(backend_candidate.candidate,
+                                             backend_candidate.mid.empty() ? session.encoded_sender_video_mid : backend_candidate.mid);
+                    peer_connection_->addRemoteCandidate(candidate);
+                    last_applied_backend_candidate_sequence_ = backend_candidate.sequence;
+                    last_applied_backend_candidate_ = backend_candidate.candidate;
+                }
             }
 
             std::vector<std::string> candidates_to_send;

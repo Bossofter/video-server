@@ -391,6 +391,7 @@ window.videoSmokeHarness = (() => {{
     remoteTrackReceived: false,
     playbackActive: false,
     lastBackendCandidate: '',
+    lastBackendCandidateSequence: 0,
     appliedBackendCandidates: new Set(),
     lastStatsAt: '',
     disconnectReason: 'idle',
@@ -946,6 +947,7 @@ window.videoSmokeHarness = (() => {{
     state.remoteTrackReceived = false;
     state.playbackActive = false;
     state.lastBackendCandidate = '';
+    state.lastBackendCandidateSequence = 0;
     state.appliedBackendCandidates = new Set();
     state.sessionSummary = null;
     state.statsSummary = null;
@@ -1034,7 +1036,7 @@ window.videoSmokeHarness = (() => {{
       encoded_sender_video_mid: session.encoded_sender_video_mid,
       last_local_candidate: session.last_local_candidate,
       local_candidates: Array.isArray(session.local_candidates) ? session.local_candidates : [],
-      ice_config: session.ice_config || null,
+      ice_gathering_complete: !!session.ice_gathering_complete,
       answer_present: !!session.answer_sdp,
       session_id: session.session_id || '',
       active: session.active,
@@ -1129,24 +1131,50 @@ window.videoSmokeHarness = (() => {{
       state.sessionId = session.session_id || state.sessionId || '';
       state.sessionSummary = summarizeSession(session);
       await refreshObservability();
-      const backendCandidates = Array.isArray(session.local_candidates) && session.local_candidates.length > 0
-        ? session.local_candidates
-        : (session.last_local_candidate ? [session.last_local_candidate] : []);
-      if (backendCandidates.length > 0 && backendCandidates[backendCandidates.length - 1] !== state.lastBackendCandidate) {{
-        state.lastBackendCandidate = backendCandidates[backendCandidates.length - 1];
+      const backendCandidates = Array.isArray(session.local_candidates) ? session.local_candidates : [];
+      if (backendCandidates.length === 0 && session.last_local_candidate) {{
+        backendCandidates.push({{
+          sequence: 0,
+          candidate: session.last_local_candidate,
+          mid: session.encoded_sender_video_mid || '0',
+        }});
+      }}
+      const newestCandidateRecord = backendCandidates[backendCandidates.length - 1];
+      const newestCandidate = typeof newestCandidateRecord === 'string'
+        ? newestCandidateRecord
+        : (newestCandidateRecord && newestCandidateRecord.candidate);
+      if (newestCandidate && newestCandidate !== state.lastBackendCandidate) {{
+        state.lastBackendCandidate = newestCandidate;
         appendLog('ice', `backend ICE candidate observed: ${{state.lastBackendCandidate}}`);
       }}
-      for (const backendCandidate of backendCandidates) {{
-        if (!state.remoteDescriptionApplied || !backendCandidate || state.appliedBackendCandidates.has(backendCandidate)) {{
+      for (const backendCandidateRecord of backendCandidates) {{
+        const candidateText = typeof backendCandidateRecord === 'string'
+          ? backendCandidateRecord
+          : (backendCandidateRecord && backendCandidateRecord.candidate);
+        const sequence = typeof backendCandidateRecord === 'object' && backendCandidateRecord
+          ? Number(backendCandidateRecord.sequence || 0)
+          : 0;
+        const mid = typeof backendCandidateRecord === 'object' && backendCandidateRecord
+          ? (backendCandidateRecord.mid || session.encoded_sender_video_mid || '0')
+          : (session.encoded_sender_video_mid || '0');
+        if (!state.remoteDescriptionApplied || !candidateText) {{
+          continue;
+        }}
+        if (sequence > 0 && sequence <= state.lastBackendCandidateSequence) {{
+          continue;
+        }}
+        if (sequence === 0 && state.appliedBackendCandidates.has(candidateText)) {{
           continue;
         }}
         await state.pc.addIceCandidate({{
-          candidate: backendCandidate,
-          sdpMid: session.encoded_sender_video_mid || '0',
-          sdpMLineIndex: 0,
+          candidate: candidateText,
+          sdpMid: mid,
         }});
-        state.appliedBackendCandidates.add(backendCandidate);
-        appendLog('ice', `backend ICE candidate applied: ${{backendCandidate}}`);
+        if (sequence > 0) {{
+          state.lastBackendCandidateSequence = Math.max(state.lastBackendCandidateSequence, sequence);
+        }}
+        state.appliedBackendCandidates.add(candidateText);
+        appendLog('ice', `backend ICE candidate applied: ${{candidateText}}`);
       }}
       if (!state.remoteDescriptionApplied && session.answer_sdp) {{
         appendLog('signaling', 'answer received from backend session');

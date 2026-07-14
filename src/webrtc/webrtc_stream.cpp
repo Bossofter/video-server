@@ -52,6 +52,7 @@ namespace video_server
         constexpr uint8_t kH264PayloadType = 102;
         constexpr uint64_t kH264ClockRate = 90000;
         constexpr size_t kMaxRtpPayloadSize = 1200;
+        constexpr size_t kMaxLocalIceCandidatesRetained = 256;
 
         uint32_t timestamp_ns_to_h264_rtp_timestamp(uint64_t timestamp_ns)
         {
@@ -1184,7 +1185,7 @@ namespace video_server
                                      last_remote_candidate_,
                                      last_local_candidate_,
                                      local_candidates_,
-                                     ice_config_,
+                                     ice_gathering_complete_,
                                      peer_state_,
                                      active_,
                                      sending_active_,
@@ -1336,7 +1337,19 @@ namespace video_server
     spdlog::debug("[signaling] local candidate generated stream={} size={}", stream_id_, local_candidate.size());
     std::lock_guard<std::mutex> lock(mutex_);
     last_local_candidate_ = local_candidate;
-    local_candidates_.push_back(local_candidate); });
+    local_candidates_.push_back(WebRtcLocalIceCandidate{++next_local_candidate_sequence_, local_candidate, candidate.mid()});
+    if (local_candidates_.size() > kMaxLocalIceCandidatesRetained) {
+      local_candidates_.erase(local_candidates_.begin(),
+                              local_candidates_.begin() + static_cast<std::ptrdiff_t>(local_candidates_.size() - kMaxLocalIceCandidatesRetained));
+    } });
+
+        peer_connection_->onGatheringStateChange([this, callbacks_enabled](rtc::PeerConnection::GatheringState state)
+                                                 {
+    if (!callbacks_enabled->load(std::memory_order_acquire)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    ice_gathering_complete_ = state == rtc::PeerConnection::GatheringState::Complete; });
 
         peer_connection_->onStateChange([this, callbacks_enabled](rtc::PeerConnection::State state)
                                         {

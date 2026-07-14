@@ -81,17 +81,19 @@ namespace video_server
 
         std::string bool_to_json(bool value) { return value ? "true" : "false"; }
 
-        std::string json_string_array(const std::vector<std::string> &values)
+        std::string local_candidates_json(const std::vector<WebRtcLocalIceCandidate> &candidates)
         {
             std::ostringstream out;
             out << '[';
-            for (size_t i = 0; i < values.size(); ++i)
+            for (size_t i = 0; i < candidates.size(); ++i)
             {
                 if (i != 0)
                 {
                     out << ',';
                 }
-                out << '"' << json_escape(values[i]) << '"';
+                out << "{\"sequence\":" << candidates[i].sequence
+                    << ",\"candidate\":\"" << json_escape(candidates[i].candidate)
+                    << "\",\"mid\":\"" << json_escape(candidates[i].mid) << "\"}";
             }
             out << ']';
             return out.str();
@@ -441,6 +443,70 @@ namespace video_server
                    std::floor(value.number_value) == value.number_value;
         }
 
+        bool ice_uri_is_turn(const std::string &uri)
+        {
+            std::string lower = uri;
+            for (char &c : lower)
+            {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return lower.rfind("turn:", 0) == 0 || lower.rfind("turns:", 0) == 0;
+        }
+
+        bool ice_uri_is_stun_or_turn(const std::string &uri)
+        {
+            std::string lower = uri;
+            for (char &c : lower)
+            {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return lower.rfind("stun:", 0) == 0 || lower.rfind("stuns:", 0) == 0 || ice_uri_is_turn(uri);
+        }
+
+        std::optional<std::string> validate_ice_config(const WebRtcIceConfig &ice_config)
+        {
+            if (ice_config.transport_policy != "all" && ice_config.transport_policy != "relay")
+            {
+                return "ice transport policy must be \"all\" or \"relay\"";
+            }
+            if (ice_config.port_range_begin.has_value() != ice_config.port_range_end.has_value())
+            {
+                return "ice port range begin and end must both be provided or both omitted";
+            }
+            if (ice_config.port_range_begin.has_value() && *ice_config.port_range_begin > *ice_config.port_range_end)
+            {
+                return "ice port range begin must be <= end";
+            }
+
+            bool has_turn_server = false;
+            for (const auto &server : ice_config.servers)
+            {
+                if (server.uri.empty())
+                {
+                    return "ice server uri is required";
+                }
+                if (!ice_uri_is_stun_or_turn(server.uri))
+                {
+                    return "ice server uri must start with stun:, stuns:, turn:, or turns:";
+                }
+                const bool is_turn = ice_uri_is_turn(server.uri);
+                has_turn_server = has_turn_server || is_turn;
+                if (server.username.empty() != server.credential.empty())
+                {
+                    return "ice server username and credential must both be provided or both omitted";
+                }
+                if (!is_turn && (!server.username.empty() || !server.credential.empty()))
+                {
+                    return "ice server credentials are only valid for TURN servers";
+                }
+            }
+            if (ice_config.transport_policy == "relay" && !has_turn_server)
+            {
+                return "relay ice transport policy requires at least one TURN server";
+            }
+            return std::nullopt;
+        }
+
         enum class RouteGroup
         {
             None,
@@ -529,7 +595,7 @@ namespace video_server
                 policy.stream_id = slash == std::string::npos ? tail : tail.substr(0, slash);
                 policy.valid = true;
                 policy.sensitive = true;
-                policy.rate_limited = request.method == "POST";
+                policy.rate_limited = request.method == "POST" || tail.find("/ice-config") != std::string::npos;
                 policy.rate_limit_bucket = "signaling";
                 return policy;
             }
@@ -717,8 +783,8 @@ namespace video_server
                 << "\"answer_sdp\":\"" << json_escape(session.answer_sdp) << "\","
                 << "\"last_remote_candidate\":\"" << json_escape(session.last_remote_candidate) << "\","
                 << "\"last_local_candidate\":\"" << json_escape(session.last_local_candidate) << "\","
-                << "\"local_candidates\":" << json_string_array(session.local_candidates) << ','
-                << "\"ice_config\":" << ice_config_json(session.ice_config) << ','
+                << "\"local_candidates\":" << local_candidates_json(session.local_candidates) << ','
+                << "\"ice_gathering_complete\":" << bool_to_json(session.ice_gathering_complete) << ','
                 << "\"peer_state\":\"" << json_escape(session.peer_state) << "\","
                 << "\"active\":" << bool_to_json(session.active) << ','
                 << "\"sending_active\":" << bool_to_json(session.sending_active) << ','
@@ -935,6 +1001,10 @@ namespace video_server
                 }
                 allowlist_.push_back(*subnet);
             }
+            if (const auto ice_error = validate_ice_config(config_.ice))
+            {
+                ice_config_error_ = *ice_error;
+            }
         }
 
         struct SecurityCounters
@@ -957,6 +1027,11 @@ namespace video_server
             if (!allowlist_parse_error_.empty())
             {
                 spdlog::error("[security] {}", allowlist_parse_error_);
+                return false;
+            }
+            if (!ice_config_error_.empty())
+            {
+                spdlog::error("[webrtc] invalid ICE configuration: {}", ice_config_error_);
                 return false;
             }
             if (!config_.enable_http_api)
@@ -1691,6 +1766,7 @@ namespace video_server
         std::unique_ptr<HttpApiServer> http_server_;
         std::vector<IpSubnet> allowlist_;
         std::string allowlist_parse_error_;
+        std::string ice_config_error_;
         mutable std::mutex security_mutex_;
         SecurityCounters security_counters_;
         std::unordered_map<std::string, RateLimitWindow> rate_limit_windows_;

@@ -243,7 +243,7 @@ namespace video_server
             }
             if (const auto value = table_value<std::string>(table, "ice_bind_address"))
             {
-                ice_config.bind_address = *value;
+                ice_config.bind_address = value->empty() ? std::optional<std::string>{} : std::optional<std::string>{*value};
             }
             if (const auto value = table_value<uint16_t>(table, "ice_port_range_begin"))
             {
@@ -257,6 +257,10 @@ namespace video_server
                 *ice_config.port_range_begin > *ice_config.port_range_end)
             {
                 throw std::runtime_error("webrtc ICE port range begin must be <= end");
+            }
+            if (ice_config.port_range_begin.has_value() != ice_config.port_range_end.has_value())
+            {
+                throw std::runtime_error("webrtc ICE port range begin and end must both be provided or both omitted");
             }
 
             if (const auto *servers = table["ice_servers"].as_array())

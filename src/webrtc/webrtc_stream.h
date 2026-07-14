@@ -136,6 +136,16 @@ namespace video_server
     };
 
     /**
+     * @brief One backend-generated ICE candidate with delivery metadata.
+     */
+    struct WebRtcLocalIceCandidate
+    {
+        uint64_t sequence{0};
+        std::string candidate;
+        std::string mid;
+    };
+
+    /**
      * @brief Snapshot of one WebRTC session exposed through signaling inspection.
      */
     struct WebRtcSessionSnapshot
@@ -145,8 +155,8 @@ namespace video_server
         std::string answer_sdp;
         std::string last_remote_candidate;
         std::string last_local_candidate;
-        std::vector<std::string> local_candidates;
-        WebRtcIceConfig ice_config;
+        std::vector<WebRtcLocalIceCandidate> local_candidates;
+        bool ice_gathering_complete{false};
         std::string peer_state;
         bool active{true};
         bool sending_active{false};
@@ -246,8 +256,10 @@ namespace video_server
         std::string answer_sdp_;
         std::string last_remote_candidate_;
         std::string last_local_candidate_;
-        std::vector<std::string> local_candidates_;
+        std::vector<WebRtcLocalIceCandidate> local_candidates_;
         WebRtcIceConfig ice_config_;
+        uint64_t next_local_candidate_sequence_{0};
+        bool ice_gathering_complete_{false};
         std::string peer_state_{"new"};
         bool active_{true};
         bool sending_active_{false};
