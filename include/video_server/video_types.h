@@ -18,6 +18,7 @@ namespace video_server
         GRAY8,
         GRAY10LE,
         GRAY12LE,
+        GRAY14LE,
         GRAY16LE,
         NV12,
         I420

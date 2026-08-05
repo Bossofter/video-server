@@ -193,6 +193,7 @@ Managed/raw-frame ingest and latest-frame transforms currently accept:
 - `GRAY8`
 - `GRAY10LE`
 - `GRAY12LE`
+- `GRAY14LE`
 - `GRAY16LE`
 
 Config parsing also accepts grayscale aliases `GRAY10`, `GRAY12`, and `GRAY16`, which normalize to the explicit little-endian enum values.
