@@ -171,6 +171,16 @@ namespace video_server
                                        uint64_t frame_id);
 
         /**
+         * @brief Records wall-clock transform duration for debug observability.
+         */
+        bool record_transform_timing(const std::string &stream_id, uint64_t elapsed_us);
+
+        /**
+         * @brief Records wall-clock raw-to-H.264 encode duration for debug observability.
+         */
+        bool record_encode_timing(const std::string &stream_id, uint64_t elapsed_us);
+
+        /**
          * @brief Handles a synthetic HTTP request without opening a socket, for tests.
          *
          * @param method HTTP method to emulate.

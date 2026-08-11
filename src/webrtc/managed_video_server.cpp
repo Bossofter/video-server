@@ -1132,12 +1132,18 @@ namespace video_server
 
                 RgbImage transformed;
                 const auto transform_started_at = std::chrono::steady_clock::now();
-                if (!apply_display_transform(pending.view(), output_config, transformed))
+                const bool transform_ok = apply_display_transform(pending.view(), output_config, transformed);
+                const auto transform_finished_at = std::chrono::steady_clock::now();
+                server_.record_transform_timing(
+                    stream_id,
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                              transform_finished_at - transform_started_at)
+                                              .count()));
+                if (!transform_ok)
                 {
                     server_.note_frame_dropped(stream_id);
                     return StreamStepResult::Progressed;
                 }
-                const auto transform_finished_at = std::chrono::steady_clock::now();
 
                 bool pipeline_reconfigured = false;
                 double pipeline_setup_ms = 0.0;
@@ -1171,12 +1177,18 @@ namespace video_server
                     {
                         hook(stream_id);
                     }
-                    if (!state->pipeline->push_frame(transformed_view, &error))
+                    const bool encode_ok = state->pipeline->push_frame(transformed_view, &error);
+                    const auto encode_finished_at = std::chrono::steady_clock::now();
+                    server_.record_encode_timing(
+                        stream_id,
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                  encode_finished_at - encode_started_at)
+                                                  .count()));
+                    if (!encode_ok)
                     {
                         spdlog::error("managed pipeline encode failed for {}: {}", stream_id, error);
                         return StreamStepResult::Failed;
                     }
-                    const auto encode_finished_at = std::chrono::steady_clock::now();
                     encode_ms = std::chrono::duration<double, std::milli>(encode_finished_at - encode_started_at).count();
                 }
 

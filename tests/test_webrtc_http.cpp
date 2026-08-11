@@ -1788,6 +1788,8 @@ TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability)
     EXPECT_NE(response.body.find("\"active_encoder\":\"\""), std::string::npos);
     EXPECT_NE(response.body.find("\"hardware_accelerated\":false"), std::string::npos);
     EXPECT_NE(response.body.find("\"hardware_device\":\"\""), std::string::npos);
+    EXPECT_NE(response.body.find("\"transform_timing\""), std::string::npos);
+    EXPECT_NE(response.body.find("\"encode_timing\""), std::string::npos);
 }
 
 TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrectKey)

@@ -1,6 +1,7 @@
 #include "video_server_core.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <memory>
 
@@ -16,6 +17,7 @@ namespace video_server
         constexpr uint32_t kMaxOutputDimension = 3840;
         constexpr double kMinOutputFps = 1.0;
         constexpr double kMaxOutputFps = 120.0;
+        constexpr auto kRunningFpsWindow = std::chrono::seconds(2);
 
         void fill_stream_debug_snapshot(const VideoServerCore::StreamState &stream, StreamDebugSnapshot &snapshot)
         {
@@ -34,6 +36,12 @@ namespace video_server
             snapshot.total_frames_transformed = stream.info.frames_transformed;
             snapshot.total_frames_dropped = stream.info.frames_dropped;
             snapshot.total_access_units_received = stream.info.access_units_received;
+            snapshot.running_fps = stream.info.running_fps;
+            snapshot.running_input_fps = stream.info.running_input_fps;
+            snapshot.running_output_fps = stream.info.running_output_fps;
+            snapshot.running_encoded_fps = stream.info.running_encoded_fps;
+            snapshot.transform_timing = stream.transform_timing;
+            snapshot.encode_timing = stream.encode_timing;
 
             if (stream.latest_frame && stream.latest_frame->valid)
             {
@@ -108,6 +116,9 @@ namespace video_server
             StreamState &stream = it->second;
             ++stream.info.frames_received;
             stream.info.last_input_timestamp_ns = frame.timestamp_ns;
+            const auto now = std::chrono::steady_clock::now();
+            record_rate_sample(stream.input_frame_times, now);
+            refresh_running_rates(stream, now);
 
             if (output_config_snapshot.output_fps > 0.0)
             {
@@ -176,6 +187,9 @@ namespace video_server
         info.last_encoded_size_bytes = access_unit.size_bytes;
         info.last_encoded_keyframe = access_unit.keyframe;
         info.last_encoded_codec_config = access_unit.codec_config;
+        const auto now = std::chrono::steady_clock::now();
+        record_rate_sample(stream.encoded_unit_times, now);
+        refresh_running_rates(stream, now);
         return true;
     }
 
@@ -241,6 +255,9 @@ namespace video_server
 
         ++it->second.info.frames_received;
         it->second.info.last_input_timestamp_ns = timestamp_ns;
+        const auto now = std::chrono::steady_clock::now();
+        record_rate_sample(it->second.input_frame_times, now);
+        refresh_running_rates(it->second, now);
         return true;
     }
 
@@ -289,16 +306,31 @@ namespace video_server
         info.last_frame_timestamp_ns = timestamp_ns;
         info.last_frame_id = frame_id;
         info.has_latest_frame = true;
+        const auto now = std::chrono::steady_clock::now();
+        record_rate_sample(stream.output_frame_times, now);
+        refresh_running_rates(stream, now);
         return true;
+    }
+
+    bool VideoServerCore::record_transform_timing(const std::string &stream_id, uint64_t elapsed_us)
+    {
+        return record_stage_timing(stream_id, &StreamState::transform_timing, elapsed_us);
+    }
+
+    bool VideoServerCore::record_encode_timing(const std::string &stream_id, uint64_t elapsed_us)
+    {
+        return record_stage_timing(stream_id, &StreamState::encode_timing, elapsed_us);
     }
 
     std::vector<VideoStreamInfo> VideoServerCore::list_streams() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
         std::vector<VideoStreamInfo> output;
         output.reserve(streams_.size());
-        for (const auto &[_, stream] : streams_)
+        for (auto &[_, stream] : streams_)
         {
+            refresh_running_rates(stream, now);
             output.push_back(stream.info);
         }
         return output;
@@ -312,6 +344,7 @@ namespace video_server
         {
             return std::nullopt;
         }
+        refresh_running_rates(it->second, std::chrono::steady_clock::now());
         return it->second.info;
     }
 
@@ -339,6 +372,60 @@ namespace video_server
         it->second.next_allowed_output_timestamp_ns = 0;
         it->second.latest_frame.reset();
         it->second.info.has_latest_frame = false;
+        return true;
+    }
+
+    void VideoServerCore::record_rate_sample(std::deque<std::chrono::steady_clock::time_point> &samples,
+                                             std::chrono::steady_clock::time_point now)
+    {
+        samples.push_back(now);
+        while (!samples.empty() && now - samples.front() > kRunningFpsWindow)
+        {
+            samples.pop_front();
+        }
+    }
+
+    void VideoServerCore::refresh_running_rates(StreamState &stream, std::chrono::steady_clock::time_point now)
+    {
+        auto rate = [now](std::deque<std::chrono::steady_clock::time_point> &samples) {
+            while (!samples.empty() && now - samples.front() > kRunningFpsWindow)
+            {
+                samples.pop_front();
+            }
+            if (samples.size() < 2)
+            {
+                return 0.0;
+            }
+            const auto elapsed = std::chrono::duration<double>(samples.back() - samples.front()).count();
+            return elapsed > 0.0 ? static_cast<double>(samples.size() - 1) / elapsed : 0.0;
+        };
+
+        stream.info.running_input_fps = rate(stream.input_frame_times);
+        stream.info.running_output_fps = rate(stream.output_frame_times);
+        stream.info.running_encoded_fps = rate(stream.encoded_unit_times);
+        stream.info.running_fps = stream.info.has_latest_encoded_unit ? stream.info.running_encoded_fps
+                                                                      : stream.info.running_output_fps;
+    }
+
+    void VideoServerCore::record_timing(StageTimingCounters &counters, uint64_t elapsed_us)
+    {
+        ++counters.samples;
+        counters.total_time_us += elapsed_us;
+        counters.last_time_us = elapsed_us;
+        counters.max_time_us = std::max(counters.max_time_us, elapsed_us);
+    }
+
+    bool VideoServerCore::record_stage_timing(const std::string &stream_id,
+                                              StageTimingCounters StreamState::*field,
+                                              uint64_t elapsed_us)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(stream_id);
+        if (it == streams_.end())
+        {
+            return false;
+        }
+        record_timing(it->second.*field, elapsed_us);
         return true;
     }
 
@@ -381,12 +468,13 @@ namespace video_server
     std::optional<StreamDebugSnapshot> VideoServerCore::get_stream_debug_snapshot(const std::string &stream_id) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = streams_.find(stream_id);
+        auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
             return std::nullopt;
         }
 
+        refresh_running_rates(it->second, std::chrono::steady_clock::now());
         StreamDebugSnapshot snapshot;
         fill_stream_debug_snapshot(it->second, snapshot);
         return snapshot;
@@ -395,10 +483,12 @@ namespace video_server
     std::vector<StreamDebugSnapshot> VideoServerCore::list_stream_debug_snapshots() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
         std::vector<StreamDebugSnapshot> snapshots;
         snapshots.reserve(streams_.size());
-        for (const auto &[_, stream] : streams_)
+        for (auto &[_, stream] : streams_)
         {
+            refresh_running_rates(stream, now);
             StreamDebugSnapshot snapshot;
             fill_stream_debug_snapshot(stream, snapshot);
             snapshots.push_back(std::move(snapshot));

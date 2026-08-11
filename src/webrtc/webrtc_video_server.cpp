@@ -750,6 +750,22 @@ namespace video_server
             return out.str();
         }
 
+        std::string stage_timing_counters_json(const StageTimingCounters &counters)
+        {
+            std::ostringstream out;
+            out << "{"
+                << "\"samples\":" << counters.samples << ","
+                << "\"total_time_us\":" << counters.total_time_us << ","
+                << "\"last_time_us\":" << counters.last_time_us << ","
+                << "\"max_time_us\":" << counters.max_time_us << ","
+                << "\"avg_time_us\":"
+                << (counters.samples > 0 ? static_cast<double>(counters.total_time_us) /
+                                               static_cast<double>(counters.samples)
+                                         : 0.0)
+                << "}";
+            return out.str();
+        }
+
         std::string sender_debug_counters_json(const SenderDebugCounters &counters)
         {
             std::ostringstream out;
@@ -769,7 +785,8 @@ namespace video_server
                 << "\"skipped_track_not_open\":" << counters.skipped_track_not_open << ","
                 << "\"skipped_codec_config_wait\":" << counters.skipped_codec_config_wait << ","
                 << "\"skipped_keyframe_wait\":" << counters.skipped_keyframe_wait << ","
-                << "\"skipped_startup_idr_wait\":" << counters.skipped_startup_idr_wait << "}";
+                << "\"skipped_startup_idr_wait\":" << counters.skipped_startup_idr_wait << ","
+                << "\"rtp_send_timing\":" << stage_timing_counters_json(counters.rtp_send_timing) << "}";
             return out.str();
         }
 
@@ -971,6 +988,12 @@ namespace video_server
                 << "\"total_frames_transformed\":" << stream.total_frames_transformed << ","
                 << "\"total_frames_dropped\":" << stream.total_frames_dropped << ","
                 << "\"total_access_units_received\":" << stream.total_access_units_received << ","
+                << "\"running_fps\":" << stream.running_fps << ","
+                << "\"running_input_fps\":" << stream.running_input_fps << ","
+                << "\"running_output_fps\":" << stream.running_output_fps << ","
+                << "\"running_encoded_fps\":" << stream.running_encoded_fps << ","
+                << "\"transform_timing\":" << stage_timing_counters_json(stream.transform_timing) << ","
+                << "\"encode_timing\":" << stage_timing_counters_json(stream.encode_timing) << ","
                 << "\"current_session\":";
             if (stream.current_session.has_value())
             {
@@ -1164,7 +1187,8 @@ namespace video_server
                     session.media_source.encoded_sender.skipped_track_not_open,
                     session.media_source.encoded_sender.skipped_codec_config_wait,
                     session.media_source.encoded_sender.skipped_keyframe_wait,
-                    session.media_source.encoded_sender.skipped_startup_idr_wait};
+                    session.media_source.encoded_sender.skipped_startup_idr_wait,
+                    session.media_source.encoded_sender.rtp_send_timing};
                 auto existing = sessions_by_stream.find(session.stream_id);
                 if (existing == sessions_by_stream.end() ||
                     existing->second.session_generation < session_snapshot.session_generation)
@@ -1384,7 +1408,8 @@ namespace video_server
                     if (i != 0)
                         out << ',';
                     out << "{\"stream_id\":\"" << json_escape(streams[i].stream_id) << "\",\"label\":\""
-                        << json_escape(streams[i].label) << "\",\"active\":" << bool_to_json(streams[i].active) << '}';
+                        << json_escape(streams[i].label) << "\",\"active\":" << bool_to_json(streams[i].active)
+                        << ",\"running_fps\":" << streams[i].running_fps << '}';
                 }
                 out << "]}";
                 return finalize(HttpResponse{200, out.str(), "application/json"});
@@ -1444,6 +1469,10 @@ namespace video_server
                         << "\"frames_transformed\":" << info->frames_transformed << ','
                         << "\"frames_dropped\":" << info->frames_dropped << ','
                         << "\"access_units_received\":" << info->access_units_received << ','
+                        << "\"running_fps\":" << info->running_fps << ','
+                        << "\"running_input_fps\":" << info->running_input_fps << ','
+                        << "\"running_output_fps\":" << info->running_output_fps << ','
+                        << "\"running_encoded_fps\":" << info->running_encoded_fps << ','
                         << "\"last_input_timestamp_ns\":" << info->last_input_timestamp_ns << ','
                         << "\"last_output_timestamp_ns\":" << info->last_output_timestamp_ns << ','
                         << "\"last_frame_id\":" << info->last_frame_id << ','
@@ -1874,6 +1903,16 @@ namespace video_server
                                                       uint64_t frame_id)
     {
         return impl_->publish_transformed_frame(stream_id, std::move(rgb_bytes), width, height, timestamp_ns, frame_id);
+    }
+
+    bool WebRtcVideoServer::record_transform_timing(const std::string &stream_id, uint64_t elapsed_us)
+    {
+        return impl_->core_.record_transform_timing(stream_id, elapsed_us);
+    }
+
+    bool WebRtcVideoServer::record_encode_timing(const std::string &stream_id, uint64_t elapsed_us)
+    {
+        return impl_->core_.record_encode_timing(stream_id, elapsed_us);
     }
 
     ServerDebugSnapshot WebRtcVideoServer::get_debug_snapshot() const { return impl_->get_debug_snapshot(); }

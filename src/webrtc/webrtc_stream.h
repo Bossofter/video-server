@@ -88,6 +88,7 @@ namespace video_server
         bool last_contains_pps{false};
         bool last_contains_idr{false};
         bool last_contains_non_idr{false};
+        StageTimingCounters rtp_send_timing;
         int negotiated_h264_payload_type{0};
         std::string negotiated_h264_fmtp;
         std::string last_packetization_status;

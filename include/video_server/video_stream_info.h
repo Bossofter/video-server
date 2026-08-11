@@ -25,6 +25,10 @@ namespace video_server
         uint64_t frames_transformed{0};                  /**< Total frames emitted by the transform stage. */
         uint64_t frames_dropped{0};                      /**< Total frames dropped by output throttling or gating. */
         uint64_t access_units_received{0};               /**< Total encoded access units accepted for the stream. */
+        double running_fps{0.0};                         /**< Rolling output FPS, preferring encoded units when available. */
+        double running_input_fps{0.0};                   /**< Rolling raw-frame ingest FPS. */
+        double running_output_fps{0.0};                  /**< Rolling transformed-frame publish FPS. */
+        double running_encoded_fps{0.0};                 /**< Rolling encoded access-unit ingest FPS. */
         uint64_t last_frame_timestamp_ns{0};             /**< Timestamp of the latest raw frame. */
         uint64_t last_input_timestamp_ns{0};             /**< Timestamp of the latest admitted input. */
         uint64_t last_output_timestamp_ns{0};            /**< Timestamp of the latest transformed output. */
