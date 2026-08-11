@@ -10,6 +10,17 @@ namespace video_server
 {
 
     /**
+     * @brief Cumulative wall-clock timing counters for a repeated processing stage.
+     */
+    struct StageTimingCounters
+    {
+        uint64_t samples{0};       /**< Number of timed stage executions. */
+        uint64_t total_time_us{0}; /**< Total wall-clock time spent in this stage. */
+        uint64_t last_time_us{0};  /**< Most recent stage duration. */
+        uint64_t max_time_us{0};   /**< Largest observed stage duration. */
+    };
+
+    /**
      * @brief Sender-side counters exposed for diagnostics and soak reporting.
      */
     struct SenderDebugCounters
@@ -30,6 +41,7 @@ namespace video_server
         uint64_t skipped_codec_config_wait{0};     /**< Total units skipped while waiting for codec config. */
         uint64_t skipped_keyframe_wait{0};         /**< Total units skipped while waiting for a keyframe. */
         uint64_t skipped_startup_idr_wait{0};      /**< Total units skipped while waiting for startup IDR delivery. */
+        StageTimingCounters rtp_send_timing;       /**< Wall-clock timing for RTP packetization and track send. */
     };
 
     /**
@@ -88,6 +100,12 @@ namespace video_server
         uint64_t total_frames_transformed{0};                      /**< Total frames emitted by the transform stage. */
         uint64_t total_frames_dropped{0};                          /**< Total frames dropped by throttling or gating. */
         uint64_t total_access_units_received{0};                   /**< Total encoded access units received. */
+        double running_fps{0.0};                                   /**< Rolling output FPS, preferring encoded units when available. */
+        double running_input_fps{0.0};                             /**< Rolling raw-frame ingest FPS. */
+        double running_output_fps{0.0};                            /**< Rolling transformed-frame publish FPS. */
+        double running_encoded_fps{0.0};                           /**< Rolling encoded access-unit ingest FPS. */
+        StageTimingCounters transform_timing;                      /**< Wall-clock timing for display transform work. */
+        StageTimingCounters encode_timing;                         /**< Wall-clock timing for raw-to-H.264 encode work. */
         std::optional<StreamSessionDebugSnapshot> current_session; /**< Current session snapshot when present. */
     };
 

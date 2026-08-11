@@ -1,0 +1,56 @@
+execution_mode = "manual_step"
+http_poll_timeout_ms = 5
+max_streams_per_step = 0
+
+[webrtc]
+execution_mode = "manual_step"
+http_host = "127.0.0.1"
+http_port = 8090
+enable_http_api = true
+enable_debug_api = false
+enable_runtime_config_api = true
+allow_unsafe_public_routes = false
+enable_shared_key_auth = false
+shared_key = ""
+ip_allowlist = []
+cors_allowed_origins = []
+max_http_request_bytes = 262144
+max_json_body_bytes = 16384
+max_signaling_sdp_bytes = 131072
+max_signaling_candidate_bytes = 8192
+max_pending_candidates_per_stream = 32
+ice_transport_policy = "relay"
+ice_bind_address = ""
+# ice_port_range_begin = 49152
+# ice_port_range_end = 49200
+#
+ice_servers = [
+  { uri = "turn:192.168.0.63:3478?transport=udp" }
+]
+signaling_rate_limit_window_seconds = 10
+signaling_rate_limit_max_requests = 60
+config_rate_limit_window_seconds = 10
+config_rate_limit_max_requests = 20
+debug_rate_limit_window_seconds = 10
+debug_rate_limit_max_requests = 60
+http_poll_timeout_ms = 5
+max_http_connections_per_step = 1
+
+[[streams]]
+stream_id = "alpha"
+label = "Synthetic demo alpha sweep grayscale"
+width = 640
+height = 360
+nominal_fps = 30.0
+input_pixel_format = "GRAY8"
+max_subscribers = 4
+
+[default_raw_pipelines.default]
+encoder = "automatic"
+encoder_preset = "ultrafast"
+encoder_tune = "zerolatency"
+encoder_profile = "baseline"
+encoder_crf = 28
+encoder_threads = 8
+repeat_headers = true
+emit_access_unit_delimiters = true

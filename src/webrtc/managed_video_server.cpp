@@ -204,6 +204,19 @@ namespace video_server
                 }
                 config.encoder_crf = *encoder_crf;
             }
+            if (const auto *encoder_threads_node = table.get("encoder_threads"))
+            {
+                const auto encoder_threads = encoder_threads_node->value<uint32_t>();
+                if (!encoder_threads.has_value())
+                {
+                    throw std::runtime_error("pipeline encoder_threads must be an integer in the range 0..256");
+                }
+                if (*encoder_threads > 256)
+                {
+                    throw std::runtime_error("pipeline encoder_threads must be in the range 0..256");
+                }
+                config.encoder_threads = *encoder_threads;
+            }
             config.repeat_headers = table["repeat_headers"].value_or(config.repeat_headers);
             config.emit_access_unit_delimiters =
                 table["emit_access_unit_delimiters"].value_or(config.emit_access_unit_delimiters);
@@ -676,6 +689,13 @@ namespace video_server
                 return true;
             }
 
+            static uint64_t elapsed_us(std::chrono::steady_clock::time_point started_at,
+                                       std::chrono::steady_clock::time_point finished_at)
+            {
+                return static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(finished_at - started_at).count());
+            }
+
             StreamStepResult process_stream(const std::string &stream_id)
             {
                 StreamOutputConfig output_config;
@@ -716,7 +736,11 @@ namespace video_server
                 }
 
                 RgbImage transformed;
-                if (!apply_display_transform(pending.view(), output_config, transformed))
+                const auto transform_started_at = std::chrono::steady_clock::now();
+                const bool transform_ok = apply_display_transform(pending.view(), output_config, transformed);
+                server_.record_transform_timing(stream_id,
+                                                elapsed_us(transform_started_at, std::chrono::steady_clock::now()));
+                if (!transform_ok)
                 {
                     server_.note_frame_dropped(stream_id);
                     return StreamStepResult::Progressed;
@@ -743,7 +767,11 @@ namespace video_server
                         pending.timestamp_ns,
                         pending.frame_id};
                     std::string error;
-                    if (!it->second.pipeline->push_frame(transformed_view, &error))
+                    const auto encode_started_at = std::chrono::steady_clock::now();
+                    const bool encode_ok = it->second.pipeline->push_frame(transformed_view, &error);
+                    const uint64_t encode_elapsed_us = elapsed_us(encode_started_at, std::chrono::steady_clock::now());
+                    server_.record_encode_timing(stream_id, encode_elapsed_us);
+                    if (!encode_ok)
                     {
                         spdlog::error("managed pipeline encode failed for {}: {}", stream_id, error);
                         return StreamStepResult::Failed;

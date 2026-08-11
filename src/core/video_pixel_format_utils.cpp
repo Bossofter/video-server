@@ -10,7 +10,7 @@ namespace video_server
     namespace
     {
 
-        constexpr std::array<VideoPixelFormatDescriptor, 10> kVideoPixelFormatDescriptors{{
+        constexpr std::array<VideoPixelFormatDescriptor, 11> kVideoPixelFormatDescriptors{{
             {VideoPixelFormat::RGB24, "RGB24", VideoPixelFormatStorage::Packed, 3, 8, false, true, true},
             {VideoPixelFormat::BGR24, "BGR24", VideoPixelFormatStorage::Packed, 3, 8, false, true, true},
             {VideoPixelFormat::RGBA32, "RGBA32", VideoPixelFormatStorage::Packed, 4, 8, false, true, true},
@@ -18,6 +18,7 @@ namespace video_server
             {VideoPixelFormat::GRAY8, "GRAY8", VideoPixelFormatStorage::Packed, 1, 8, true, true, true},
             {VideoPixelFormat::GRAY10LE, "GRAY10LE", VideoPixelFormatStorage::Packed, 2, 10, true, true, true},
             {VideoPixelFormat::GRAY12LE, "GRAY12LE", VideoPixelFormatStorage::Packed, 2, 12, true, true, true},
+            {VideoPixelFormat::GRAY14LE, "GRAY14LE", VideoPixelFormatStorage::Packed, 2, 14, true, true, true},
             {VideoPixelFormat::GRAY16LE, "GRAY16LE", VideoPixelFormatStorage::Packed, 2, 16, true, true, true},
             {VideoPixelFormat::NV12, "NV12", VideoPixelFormatStorage::Planar, 0, 8, false, false, true},
             {VideoPixelFormat::I420, "I420", VideoPixelFormatStorage::Planar, 0, 8, false, false, true},
@@ -154,6 +155,7 @@ namespace video_server
             return row[x];
         case VideoPixelFormat::GRAY10LE:
         case VideoPixelFormat::GRAY12LE:
+        case VideoPixelFormat::GRAY14LE:
         case VideoPixelFormat::GRAY16LE:
         {
             const size_t offset = static_cast<size_t>(x) * 2u;

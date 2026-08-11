@@ -16,6 +16,7 @@ TEST(VideoTypesTest, ConvertsPixelFormatsToStrings)
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::GRAY8)), "GRAY8");
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::GRAY10LE)), "GRAY10LE");
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::GRAY12LE)), "GRAY12LE");
+    EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::GRAY14LE)), "GRAY14LE");
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::GRAY16LE)), "GRAY16LE");
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::NV12)), "NV12");
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::I420)), "I420");
@@ -41,7 +42,6 @@ TEST(VideoTypesTest, ParsesPixelFormatsFromStringsAndGrayscaleAliases)
     EXPECT_EQ(*video_server::video_pixel_format_from_string("nv12"), VideoPixelFormat::NV12);
     ASSERT_TRUE(video_server::video_pixel_format_from_string("i420").has_value());
     EXPECT_EQ(*video_server::video_pixel_format_from_string("i420"), VideoPixelFormat::I420);
-    EXPECT_FALSE(video_server::video_pixel_format_from_string("gray14").has_value());
     EXPECT_FALSE(video_server::video_pixel_format_from_string(nullptr).has_value());
 }
 

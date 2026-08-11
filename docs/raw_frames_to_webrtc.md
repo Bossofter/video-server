@@ -115,6 +115,7 @@ max_subscribers = 4
 [default_raw_pipelines.default]
 encoder = "automatic"
 encoder_crf = 23
+encoder_threads = 0
 ```
 
 Notes:
@@ -125,6 +126,7 @@ Notes:
 - the managed TOML loader supports the full meaningful `WebRtcVideoServerConfig` HTTP/security/rate-limit surface
 - `max_subscribers` defaults to `1`, which preserves the old single-viewer behavior unless you opt into fanout
 - `encoder_crf` is forwarded to libx264 when available; lower values improve image quality at higher bitrate/CPU cost, and valid values are `0..51`
+- `encoder_threads` is forwarded to libav as the encoder thread count; `0` keeps the backend default/auto behavior, while positive values request an explicit thread count
 
 ## Encoder Profile Examples
 
@@ -193,6 +195,7 @@ Managed/raw-frame ingest and latest-frame transforms currently accept:
 - `GRAY8`
 - `GRAY10LE`
 - `GRAY12LE`
+- `GRAY14LE`
 - `GRAY16LE`
 
 Config parsing also accepts grayscale aliases `GRAY10`, `GRAY12`, and `GRAY16`, which normalize to the explicit little-endian enum values.

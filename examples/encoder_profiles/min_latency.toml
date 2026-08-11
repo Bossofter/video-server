@@ -51,5 +51,6 @@ encoder_preset = "ultrafast"
 encoder_tune = "zerolatency"
 encoder_profile = "baseline"
 encoder_crf = 28
+encoder_threads = 0
 repeat_headers = true
 emit_access_unit_delimiters = true

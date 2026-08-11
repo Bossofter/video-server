@@ -29,21 +29,30 @@ namespace video_server
             return AV_PIX_FMT_GRAY8;
         case VideoPixelFormat::GRAY10LE:
 #ifdef AV_PIX_FMT_GRAY10LE
-            return AV_PIX_FMT_GRAY10LE;
+        return AV_PIX_FMT_GRAY10LE;
 #else
-            return std::nullopt;
+        return std::nullopt;
 #endif
-        case VideoPixelFormat::GRAY12LE:
+
+    case VideoPixelFormat::GRAY12LE:
 #ifdef AV_PIX_FMT_GRAY12LE
-            return AV_PIX_FMT_GRAY12LE;
+        return AV_PIX_FMT_GRAY12LE;
 #else
-            return std::nullopt;
+        return std::nullopt;
 #endif
-        case VideoPixelFormat::GRAY16LE:
+
+    case VideoPixelFormat::GRAY14LE:
 #ifdef AV_PIX_FMT_GRAY16LE
-            return AV_PIX_FMT_GRAY16LE;
+        return AV_PIX_FMT_GRAY16LE;
 #else
-            return std::nullopt;
+        return std::nullopt;
+#endif
+
+    case VideoPixelFormat::GRAY16LE:
+#ifdef AV_PIX_FMT_GRAY16LE
+        return AV_PIX_FMT_GRAY16LE;
+#else
+        return std::nullopt;
 #endif
         case VideoPixelFormat::NV12:
             return AV_PIX_FMT_NV12;
