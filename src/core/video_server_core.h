@@ -6,6 +6,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <chrono>
+#include <deque>
 
 #include "video_server/observability.h"
 #include "video_server/video_server.h"
@@ -131,6 +133,16 @@ namespace video_server
                                        uint64_t frame_id);
 
         /**
+         * @brief Records wall-clock transform duration for debug observability.
+         */
+        bool record_transform_timing(const std::string &stream_id, uint64_t elapsed_us);
+
+        /**
+         * @brief Records wall-clock raw-to-H.264 encode duration for debug observability.
+         */
+        bool record_encode_timing(const std::string &stream_id, uint64_t elapsed_us);
+
+        /**
          * @brief Returns a snapshot of every registered stream.
          *
          * @return Stream info records for all registered streams.
@@ -203,6 +215,11 @@ namespace video_server
             VideoStreamInfo info;
             std::shared_ptr<const LatestFrame> latest_frame;
             std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit;
+            std::deque<std::chrono::steady_clock::time_point> input_frame_times;
+            std::deque<std::chrono::steady_clock::time_point> output_frame_times;
+            std::deque<std::chrono::steady_clock::time_point> encoded_unit_times;
+            StageTimingCounters transform_timing;
+            StageTimingCounters encode_timing;
             uint64_t next_allowed_output_timestamp_ns{0};
         };
 
@@ -248,8 +265,16 @@ namespace video_server
          */
         static uint32_t bytes_per_pixel(VideoPixelFormat pixel_format);
 
+        static void record_rate_sample(std::deque<std::chrono::steady_clock::time_point> &samples,
+                                       std::chrono::steady_clock::time_point now);
+        static void refresh_running_rates(StreamState &stream, std::chrono::steady_clock::time_point now);
+        static void record_timing(StageTimingCounters &counters, uint64_t elapsed_us);
+        bool record_stage_timing(const std::string &stream_id,
+                                 StageTimingCounters StreamState::*field,
+                                 uint64_t elapsed_us);
+
         mutable std::mutex mutex_;
-        std::unordered_map<std::string, StreamState> streams_;
+        mutable std::unordered_map<std::string, StreamState> streams_;
     };
 
 } // namespace video_server

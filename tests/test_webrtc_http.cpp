@@ -1422,6 +1422,10 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow)
     const std::string stream_resp = send_raw_request(host, port, http_request("GET", "/api/video/streams/stream-1"));
     CHECK_TRUE(stream_resp.find("200 OK") != std::string::npos);
     CHECK_TRUE(stream_resp.find("frames_received") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_fps\"") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_input_fps\"") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_output_fps\"") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_encoded_fps\"") != std::string::npos);
     assert_json_response_headers(stream_resp);
 
     std::array<uint8_t, 7> initial_access_unit_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00};
@@ -1784,6 +1788,8 @@ TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability)
     EXPECT_NE(response.body.find("\"stream_id\":\"bravo\""), std::string::npos);
     EXPECT_NE(response.body.find("\"latest_raw_frame_available\":true"), std::string::npos);
     EXPECT_NE(response.body.find("\"total_access_units_received\":1"), std::string::npos);
+    EXPECT_NE(response.body.find("\"transform_timing\""), std::string::npos);
+    EXPECT_NE(response.body.find("\"encode_timing\""), std::string::npos);
 }
 
 TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrectKey)

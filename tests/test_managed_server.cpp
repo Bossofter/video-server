@@ -219,6 +219,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
         out << "encoder = \"libx264\"\n";
         out << "encoder_preset = \"veryfast\"\n";
         out << "encoder_crf = 18\n";
+        out << "encoder_threads = 4\n";
     }
 
     const auto config = video_server::load_managed_video_server_config(path);
@@ -257,6 +258,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_preset, "veryfast");
     ASSERT_TRUE(config.default_raw_pipelines.at("default").encoder_crf.has_value());
     EXPECT_EQ(*config.default_raw_pipelines.at("default").encoder_crf, 18u);
+    EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_threads, 4u);
 
     std::remove(path.c_str());
 }

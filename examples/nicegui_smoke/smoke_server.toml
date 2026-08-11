@@ -5,7 +5,7 @@ max_streams_per_step = 0
 [webrtc]
 execution_mode = "manual_step"
 http_host = "127.0.0.1"
-http_port = 8080
+http_port = 8090
 enable_http_api = true
 enable_debug_api = false
 enable_runtime_config_api = true
@@ -45,29 +45,12 @@ nominal_fps = 30.0
 input_pixel_format = "GRAY8"
 max_subscribers = 4
 
-[[streams]]
-stream_id = "bravo"
-label = "Synthetic demo bravo orbit"
-width = 1280
-height = 720
-nominal_fps = 30.0
-input_pixel_format = "RGB24"
-max_subscribers = 4
-
-[[streams]]
-stream_id = "charlie"
-label = "Synthetic demo charlie checker"
-width = 320
-height = 240
-nominal_fps = 30.0
-input_pixel_format = "RGB24"
-max_subscribers = 4
-
 [default_raw_pipelines.default]
 encoder = "automatic"
 encoder_preset = "ultrafast"
 encoder_tune = "zerolatency"
 encoder_profile = "baseline"
-encoder_crf = 23
+encoder_crf = 28
+encoder_threads = 8
 repeat_headers = true
 emit_access_unit_delimiters = true
