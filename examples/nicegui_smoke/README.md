@@ -42,7 +42,7 @@ By default, the smoke harness launches the managed smoke server with `examples/n
 - `bravo`: `1280x720 @ 30 fps` with the orbit-style synthetic pattern
 - `charlie`: `320x240 @ 30 fps` with the checker-style synthetic pattern
 
-Each stream gets its own raw-frame generator, libav-backed raw pipeline, server registration, and WebRTC signaling/session slot.
+Each stream gets its own raw-frame generator, libav-backed raw pipeline, server registration, and WebRTC signaling/fanout path.
 
 ## Custom multi-stream launch
 
@@ -94,5 +94,5 @@ python examples/nicegui_smoke/app.py --video-server-url http://127.0.0.1:8080 --
 - This is a debug harness, not a production UI.
 - It targets local/manual validation, including same-LAN smoke testing.
 - `--lan-only` enables permissive CORS and unsafe public routes on the synthetic smoke server; do not treat that configuration as production-safe.
-- The current backend still exposes one active WebRTC session slot per stream.
+- Concurrent viewers are limited by each stream's configured `max_subscribers`.
 - Session and stats polling are lightweight but still periodic; increase the poll interval if you want less churn.

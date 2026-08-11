@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This project has a simple top-level shape:
+The useful mental model is raw frames in, H.264 WebRTC out:
 
 ```text
 raw frames or H.264 access units
@@ -54,16 +54,16 @@ When a managed config sets `max_streams_per_step`, that budget applies to stream
 
 Encoded H.264 data is stored as the latest immutable access-unit snapshot per stream. The WebRTC sender consumes those snapshots and packetizes them for browser delivery.
 
-### WebRTC sender and session
+### WebRTC senders and sessions
 
-Each stream currently has one active session slot. A new offer replaces the previous session for that stream and increments `session_generation`.
+Each stream can have multiple active recipient sessions up to `StreamConfig.max_subscribers`. Encoding still happens once per stream; the latest encoded access units are fanned out to active recipients.
 
-The session owns:
+Each recipient session owns:
 
 - a `rtc::PeerConnection`
 - a negotiated H.264 video track
 - sender state and counters
-- the bridge to the latest encoded access-unit snapshot
+- the bridge to the encoded access-unit delivery path
 
 ### Browser playback
 
@@ -78,6 +78,5 @@ The browser uses the HTTP signaling API to exchange SDP and ICE, then plays the 
 
 ## Current High-Level Limits
 
-- one active WebRTC session slot per stream
 - H.264 is the encoded media path
 - the first raw pipeline expects tightly packed raw buffers

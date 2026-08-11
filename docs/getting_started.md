@@ -1,6 +1,8 @@
 # Getting Started
 
-This guide gets a new developer from a fresh clone to visible browser video.
+This guide gets a fresh clone to visible browser video.
+
+Current version: `1.3.0`
 
 ## Prerequisites
 
@@ -26,7 +28,7 @@ If `/opt/vcpkg` exists, `./build.sh` uses it automatically when `VCPKG_ROOT` is 
 
 ## 2. Fastest End-To-End Flow
 
-This is the recommended first run because it starts both the C++ smoke server and the NiceGUI browser harness.
+This starts both the C++ smoke server and the NiceGUI browser harness.
 
 ```bash
 python3 -m venv .venv
@@ -51,7 +53,7 @@ What happens:
 
 ## 3. Verify That Video Works
 
-Use this checklist:
+Quick checklist:
 
 - the page loads without a server error
 - the status row shows a connected session
@@ -59,7 +61,7 @@ Use this checklist:
 - the widget or smoke tab starts rendering video
 - the selected stream reports an increasing session/debug state instead of staying idle
 
-If you want a simple API check before opening the page:
+Simple API check:
 
 ```bash
 curl http://127.0.0.1:8080/api/video/streams
@@ -67,7 +69,7 @@ curl http://127.0.0.1:8080/api/video/streams
 
 You should get a JSON list of the registered demo streams.
 
-## 4. Run The Smoke Server Manually
+## 4. Manual Two-Terminal Run
 
 Use this when you want the server and browser harness in separate terminals.
 
@@ -108,7 +110,7 @@ In the NiceGUI page:
 
 ## 6. Run LAN Testing
 
-Launch the harness and the synthetic server in LAN smoke mode:
+Launch the harness and synthetic server in LAN smoke mode:
 
 ```bash
 python examples/nicegui_smoke/app.py \
@@ -132,7 +134,7 @@ Notes:
 - use an explicit non-loopback `--server-host` and matching non-loopback `--video-server-url` only when you intentionally want LAN access
 - the smoke server loads `examples/nicegui_smoke/smoke_server.toml` by default and then applies CLI overrides
 - `--lan-only` enables remote signaling, runtime config, and debug access for LAN smoke testing
-- do not use this mode as a production security model
+- do not use this mode as a production security model; see [Security Model](security_model.md)
 
 ## 7. Use A Shared Key
 
@@ -179,7 +181,7 @@ Another machine cannot connect in LAN mode:
 
 Next documents:
 
+- [Raw Frames To WebRTC](raw_frames_to_webrtc.md)
+- [API Routes](api_routes.md)
 - [Configuration And Filters](configuration_and_filters.md)
 - [Session Lifecycle](session_lifecycle.md)
-- [Security Model](security_model.md)
-- [Soak Testing](soak_testing.md)
