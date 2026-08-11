@@ -1,4 +1,6 @@
 #include <cstdint>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -231,6 +233,48 @@ namespace
 
         EXPECT_TRUE(server.remove_stream(cfg.stream_id));
         EXPECT_FALSE(server.remove_stream(cfg.stream_id));
+    }
+
+    TEST(VideoServerCoreTest, RecordsRunningRatesAndStageTimings)
+    {
+        video_server::VideoServerCore server;
+        const video_server::StreamConfig config{
+            "stats", "Statistics", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8};
+        ASSERT_TRUE(server.register_stream(config));
+
+        const std::vector<uint8_t> pixels{1, 2, 3, 4};
+        ASSERT_TRUE(server.push_frame("stats", make_gray_frame(pixels, 2, 2, 100, 1)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ASSERT_TRUE(server.push_frame("stats", make_gray_frame(pixels, 2, 2, 200, 2)));
+
+        const std::vector<uint8_t> encoded_bytes{0x00, 0x00, 0x00, 0x01, 0x65};
+        video_server::EncodedAccessUnitView encoded{encoded_bytes.data(), encoded_bytes.size(),
+                                                    video_server::VideoCodec::H264, 300, true, false};
+        ASSERT_TRUE(server.push_access_unit("stats", encoded));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        encoded.timestamp_ns = 400;
+        ASSERT_TRUE(server.push_access_unit("stats", encoded));
+
+        EXPECT_TRUE(server.record_transform_timing("stats", 125));
+        EXPECT_TRUE(server.record_transform_timing("stats", 375));
+        EXPECT_TRUE(server.record_encode_timing("stats", 800));
+        EXPECT_FALSE(server.record_transform_timing("missing", 1));
+
+        const auto info = server.get_stream_info("stats");
+        ASSERT_TRUE(info.has_value());
+        EXPECT_GT(info->running_input_fps, 0.0);
+        EXPECT_GT(info->running_output_fps, 0.0);
+        EXPECT_GT(info->running_encoded_fps, 0.0);
+        EXPECT_DOUBLE_EQ(info->running_fps, info->running_encoded_fps);
+
+        const auto snapshot = server.get_stream_debug_snapshot("stats");
+        ASSERT_TRUE(snapshot.has_value());
+        EXPECT_EQ(snapshot->transform_timing.samples, 2u);
+        EXPECT_EQ(snapshot->transform_timing.total_time_us, 500u);
+        EXPECT_EQ(snapshot->transform_timing.last_time_us, 375u);
+        EXPECT_EQ(snapshot->transform_timing.max_time_us, 375u);
+        EXPECT_EQ(snapshot->encode_timing.samples, 1u);
+        EXPECT_EQ(snapshot->encode_timing.total_time_us, 800u);
     }
 
 TEST(VideoServerCoreTest, StreamDebugSnapshotsRemainPerStreamAndStableUnderRepeatedUpdates)

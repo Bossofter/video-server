@@ -180,6 +180,8 @@ namespace video_server
         virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
         /** @brief Applies negotiated AV1 parameters from SDP. */
         virtual void set_negotiated_av1_parameters(int payload_type, std::string fmtp) { (void)payload_type; (void)fmtp; }
+        /** @brief Caches the negotiated video MID for lock-safe diagnostics. */
+        virtual void set_video_mid(std::string video_mid) = 0;
         /** @brief Deactivates the sender permanently for this session. */
         virtual void deactivate(std::string reason) = 0;
         /** @brief Returns a diagnostic sender snapshot. */

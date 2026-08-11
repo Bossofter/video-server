@@ -1419,10 +1419,25 @@ TEST(WebRtcHttpTest, ExercisesHttpAndSignalingFlow)
     CHECK_TRUE(list_resp.find("stream-1") != std::string::npos);
     assert_json_response_headers(list_resp);
 
+    const std::string trailing_slash_list_resp =
+        send_raw_request(host, port, http_request("GET", "/api/video/streams/"));
+    CHECK_TRUE(trailing_slash_list_resp.find("200 OK") != std::string::npos);
+    CHECK_TRUE(trailing_slash_list_resp.find("\"stream_id\":\"stream-1\"") != std::string::npos);
+    CHECK_TRUE(trailing_slash_list_resp.find("stream not found") == std::string::npos);
+
     const std::string stream_resp = send_raw_request(host, port, http_request("GET", "/api/video/streams/stream-1"));
     CHECK_TRUE(stream_resp.find("200 OK") != std::string::npos);
     CHECK_TRUE(stream_resp.find("frames_received") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_fps\"") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_input_fps\"") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_output_fps\"") != std::string::npos);
+    CHECK_TRUE(stream_resp.find("\"running_encoded_fps\"") != std::string::npos);
     assert_json_response_headers(stream_resp);
+
+    const std::string stream_resp_with_query =
+        send_raw_request(host, port, http_request("GET", "/api/video/streams/stream-1?include=statistics"));
+    CHECK_TRUE(stream_resp_with_query.find("200 OK") != std::string::npos);
+    CHECK_TRUE(stream_resp_with_query.find("\"running_fps\"") != std::string::npos);
 
     std::array<uint8_t, 7> initial_access_unit_bytes{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00};
     video_server::EncodedAccessUnitView initial_access_unit{};
@@ -2049,7 +2064,9 @@ TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCohe
 {
     const uint16_t port = static_cast<uint16_t>(23000 + (::getpid() % 10000));
     const std::string host = "127.0.0.1";
-    video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+    auto config = video_server::WebRtcVideoServerConfig{host, port, true};
+    config.enable_debug_api = true;
+    video_server::WebRtcVideoServer server(config);
     video_server::StreamConfig alpha{"alpha", "alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
     video_server::StreamConfig bravo{"bravo", "bravo", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
     ASSERT_TRUE(server.register_stream(alpha));
@@ -2185,6 +2202,11 @@ TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCohe
     EXPECT_TRUE(alpha_debug->current_session->active);
     EXPECT_EQ(bravo_debug->current_session->session_generation, bravo_generation_before_reconnect);
     EXPECT_TRUE(bravo_debug->current_session->active);
+
+    const auto debug_http = server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+    ASSERT_EQ(debug_http.status, 200);
+    EXPECT_NE(debug_http.body.find("\"current_session\""), std::string::npos);
+    EXPECT_NE(debug_http.body.find("\"rtp_send_timing\""), std::string::npos);
 
     server.stop();
 }

@@ -43,7 +43,8 @@ OPTIONS /api/...
 GET /api/video/streams
 ```
 
-Returns registered stream ids, labels, and active state.
+Returns registered stream ids, labels, active state, and rolling output rate. The trailing-slash form
+`GET /api/video/streams/` is accepted as the same collection endpoint.
 
 ```json
 {
@@ -51,7 +52,8 @@ Returns registered stream ids, labels, and active state.
     {
       "stream_id": "alpha",
       "label": "Alpha",
-      "active": true
+      "active": true,
+      "running_fps": 29.97
     }
   ]
 }
@@ -71,6 +73,10 @@ Important fields include:
 - `frames_transformed`
 - `frames_dropped`
 - `access_units_received`
+- `running_fps`: rolling effective output rate, preferring encoded access units when present
+- `running_input_fps`: rolling admitted raw-frame rate
+- `running_output_fps`: rolling transformed-frame publication rate
+- `running_encoded_fps`: rolling encoded access-unit rate
 - `has_latest_frame`
 - `has_latest_encoded_unit`
 - `latest_encoded_codec`
@@ -223,6 +229,9 @@ Returns:
 - security counters
 - per-stream debug snapshots
 - encoder observability, including requested encoder, active encoder, hardware acceleration state, hardware device, and VA-API fallback reason when applicable
+- cumulative transform, encode, and RTP-send timing counters with sample count and total, latest, maximum, and average duration
+
+Running rates use a two-second sampling window and decay to zero when fewer than two samples remain in that window.
 
 ## Status Codes
 

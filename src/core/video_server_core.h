@@ -138,7 +138,7 @@ namespace video_server
         bool record_transform_timing(const std::string &stream_id, uint64_t elapsed_us);
 
         /**
-         * @brief Records wall-clock raw-to-H.264 encode duration for debug observability.
+         * @brief Records wall-clock raw-video encode duration for debug observability.
          */
         bool record_encode_timing(const std::string &stream_id, uint64_t elapsed_us);
 

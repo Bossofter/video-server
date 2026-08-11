@@ -389,6 +389,12 @@ namespace video_server
                 negotiated_h264_fmtp_ = std::move(fmtp);
             }
 
+            void set_video_mid(std::string video_mid) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                video_mid_ = std::move(video_mid);
+            }
+
             void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override
             {
                 if (latest_encoded_unit == nullptr || !latest_encoded_unit->valid)
@@ -745,8 +751,8 @@ namespace video_server
                 snapshot.last_lifecycle_event = last_lifecycle_event_;
                 snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
                 snapshot.codec_config_seen = codec_config_seen_;
-                snapshot.video_track_exists = session_active_ && video_track_sink_ && video_track_sink_->exists();
-                snapshot.video_track_open = session_active_ && video_track_sink_ && video_track_sink_->is_open();
+                snapshot.video_track_exists = session_active_ && video_track_exists_;
+                snapshot.video_track_open = session_active_ && video_track_open_;
                 snapshot.ready_for_video_track = snapshot.video_track_exists && codec_config_seen_ && cached_idr_available_;
                 snapshot.h264_delivery_active = h264_delivery_active_;
                 snapshot.keyframe_seen = keyframe_seen_;
@@ -783,7 +789,7 @@ namespace video_server
                 snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
                 snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
                 snapshot.last_packetization_status = last_packetization_status_;
-                snapshot.video_mid = (session_active_ && video_track_sink_) ? video_track_sink_->mid() : "";
+                snapshot.video_mid = session_active_ ? video_mid_ : "";
                 if (!snapshot.session_active)
                 {
                     snapshot.sender_state = "session-inactive";
@@ -859,6 +865,7 @@ namespace video_server
             bool ready_for_video_track_{false};
             bool video_track_exists_{false};
             bool video_track_open_{false};
+            std::string video_mid_;
             bool h264_delivery_active_{false};
             bool keyframe_seen_{false};
             bool cached_codec_config_available_{false};
@@ -904,6 +911,12 @@ namespace video_server
             }
 
             void set_negotiated_h264_parameters(int, std::string) override {}
+
+            void set_video_mid(std::string video_mid) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                snapshot_.video_mid = std::move(video_mid);
+            }
 
             void set_negotiated_av1_parameters(int payload_type, std::string fmtp) override
             {
@@ -981,6 +994,7 @@ namespace video_server
                     units_to_send.push_back(unit);
                 }
                 uint64_t packet_count = 0;
+                const auto send_started_at = std::chrono::steady_clock::now();
                 try
                 {
                     for (const auto &send_unit : units_to_send)
@@ -1014,6 +1028,15 @@ namespace video_server
                     snapshot_.last_packetization_status = "packetization-failed";
                     return;
                 }
+                const auto send_elapsed_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - send_started_at)
+                        .count());
+                ++snapshot_.rtp_send_timing.samples;
+                snapshot_.rtp_send_timing.total_time_us += send_elapsed_us;
+                snapshot_.rtp_send_timing.last_time_us = send_elapsed_us;
+                snapshot_.rtp_send_timing.max_time_us =
+                    std::max(snapshot_.rtp_send_timing.max_time_us, send_elapsed_us);
                 started_ = true;
                 snapshot_.first_decodable_frame_sent = true;
                 snapshot_.startup_sequence_sent = true;
@@ -1037,11 +1060,10 @@ namespace video_server
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto result = snapshot_;
-                result.video_track_exists = active_ && sink_ && sink_->exists();
-                result.video_track_open = active_ && sink_ && sink_->is_open();
+                result.video_track_exists = active_ && result.video_track_exists;
+                result.video_track_open = active_ && result.video_track_open;
                 result.negotiated_h264_payload_type = negotiated_payload_type_;
                 result.negotiated_h264_fmtp = negotiated_fmtp_;
-                result.video_mid = result.video_track_exists ? sink_->mid() : "";
                 return result;
             }
 
@@ -1083,6 +1105,11 @@ namespace video_server
             { h264_->set_negotiated_h264_parameters(pt, std::move(fmtp)); }
             void set_negotiated_av1_parameters(int pt, std::string fmtp) override
             { av1_->set_negotiated_av1_parameters(pt, std::move(fmtp)); }
+            void set_video_mid(std::string video_mid) override
+            {
+                h264_->set_video_mid(video_mid);
+                av1_->set_video_mid(std::move(video_mid));
+            }
             void deactivate(std::string reason) override
             { h264_->deactivate(reason); av1_->deactivate(std::move(reason)); }
             EncodedVideoSenderSnapshot snapshot() const override
@@ -1538,6 +1565,7 @@ namespace video_server
     }
     local_video.addSSRC(video_ssrc_, "video-server-video", stream_id_, "encoded-video-track");
     track->setDescription(local_video);
+    encoded_sender_->set_video_mid(track->mid());
     spdlog::info("[signaling] activated negotiated video section stream={} mid={} codecs={}{} ssrc={}",
                  stream_id_, track->mid(), enable_h264 ? "H264" : "", enable_av1 ? (enable_h264 ? ",AV1" : "AV1") : "",
                  video_ssrc_);

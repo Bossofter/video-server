@@ -46,9 +46,21 @@ namespace
         explicit FakeEncodedVideoTrackSink(bool open = true, std::string mid = "video", bool exists = true)
             : exists_(exists), open_(open), mid_(std::move(mid)) {}
 
-        bool exists() const override { return exists_; }
-        bool is_open() const override { return open_; }
-        std::string mid() const override { return mid_; }
+        bool exists() const override
+        {
+            ++exists_queries;
+            return exists_;
+        }
+        bool is_open() const override
+        {
+            ++open_queries;
+            return open_;
+        }
+        std::string mid() const override
+        {
+            ++mid_queries;
+            return mid_;
+        }
         void send(const std::byte *data, size_t size) override
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -72,6 +84,9 @@ namespace
         std::mutex mutex;
         std::vector<std::vector<std::byte>> sent_packets;
         size_t send_attempts{0};
+        mutable size_t exists_queries{0};
+        mutable size_t open_queries{0};
+        mutable size_t mid_queries{0};
 
     private:
         bool exists_{true};
@@ -94,6 +109,7 @@ namespace
         EXPECT_EQ(snapshot.sender_state, "sending-av1-rtp");
         EXPECT_TRUE(snapshot.first_decodable_frame_sent);
         EXPECT_GT(snapshot.packets_attempted, 0u);
+        EXPECT_EQ(snapshot.rtp_send_timing.samples, 1u);
         EXPECT_EQ(snapshot.negotiated_h264_payload_type, 104);
 
         std::lock_guard<std::mutex> lock(track_sink->mutex);
@@ -138,6 +154,46 @@ namespace
         EXPECT_FALSE(bravo_snapshot.cached_idr_available);
         EXPECT_NE(alpha_snapshot.sender_state, bravo_snapshot.sender_state);
         EXPECT_NE(alpha_snapshot.last_delivered_timestamp_ns, bravo_snapshot.last_delivered_timestamp_ns);
+    }
+
+    TEST(WebRtcStreamSessionTest, SenderSnapshotsUseCachedTrackStateWithoutQueryingSink)
+    {
+        auto h264_track = std::make_shared<FakeEncodedVideoTrackSink>(true, "h264-mid", true);
+        auto h264_sender = video_server::make_h264_encoded_video_sender(h264_track, 1111);
+        h264_sender->set_video_mid("h264-mid");
+        h264_sender->on_encoded_access_unit(make_encoded_unit(
+            {0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+             0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06, 0xe2,
+             0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84},
+            1000, true, true));
+        const auto h264_exists_queries = h264_track->exists_queries;
+        const auto h264_open_queries = h264_track->open_queries;
+        const auto h264_mid_queries = h264_track->mid_queries;
+
+        const auto h264_snapshot = h264_sender->snapshot();
+        EXPECT_TRUE(h264_snapshot.video_track_exists);
+        EXPECT_TRUE(h264_snapshot.video_track_open);
+        EXPECT_EQ(h264_snapshot.video_mid, "h264-mid");
+        EXPECT_EQ(h264_track->exists_queries, h264_exists_queries);
+        EXPECT_EQ(h264_track->open_queries, h264_open_queries);
+        EXPECT_EQ(h264_track->mid_queries, h264_mid_queries);
+
+        auto av1_track = std::make_shared<FakeEncodedVideoTrackSink>(true, "av1-mid", true);
+        auto av1_sender = video_server::make_av1_encoded_video_sender(av1_track, 2222);
+        av1_sender->set_video_mid("av1-mid");
+        av1_sender->on_encoded_access_unit(make_encoded_unit(
+            {0x12, 0x00, 0x32, 0x02, 0x00, 0x00}, 2000, true, true, video_server::VideoCodec::AV1));
+        const auto av1_exists_queries = av1_track->exists_queries;
+        const auto av1_open_queries = av1_track->open_queries;
+        const auto av1_mid_queries = av1_track->mid_queries;
+
+        const auto av1_snapshot = av1_sender->snapshot();
+        EXPECT_TRUE(av1_snapshot.video_track_exists);
+        EXPECT_TRUE(av1_snapshot.video_track_open);
+        EXPECT_EQ(av1_snapshot.video_mid, "av1-mid");
+        EXPECT_EQ(av1_track->exists_queries, av1_exists_queries);
+        EXPECT_EQ(av1_track->open_queries, av1_open_queries);
+        EXPECT_EQ(av1_track->mid_queries, av1_mid_queries);
     }
 
     TEST(WebRtcStreamSessionTest, EncodedUnitDeliveryPathConsumesLatestH264Unit)
@@ -233,6 +289,7 @@ namespace
         EXPECT_FALSE(before_bind.ready_for_video_track);
 
         track_sink->set_exists(true);
+        sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
 
         const auto after_exists = sender->snapshot();
         EXPECT_EQ(after_exists.sender_state, "waiting-for-decoded-startup-idr");
@@ -243,6 +300,7 @@ namespace
         EXPECT_FALSE(after_exists.first_decodable_frame_sent);
 
         track_sink->set_open(true);
+        sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
 
         const auto after_open = sender->snapshot();
         EXPECT_EQ(after_open.sender_state, "waiting-for-decoded-startup-idr");

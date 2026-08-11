@@ -126,7 +126,7 @@ namespace video_server
         double running_output_fps{0.0};                            /**< Rolling transformed-frame publish FPS. */
         double running_encoded_fps{0.0};                           /**< Rolling encoded access-unit ingest FPS. */
         StageTimingCounters transform_timing;                      /**< Wall-clock timing for display transform work. */
-        StageTimingCounters encode_timing;                         /**< Wall-clock timing for raw-to-H.264 encode work. */
+        StageTimingCounters encode_timing;                         /**< Wall-clock timing for raw-video encode work. */
         std::optional<StreamSessionDebugSnapshot> current_session; /**< Current session snapshot when present. */
     };
 
