@@ -239,7 +239,7 @@ namespace video_server
                 codec_context->framerate = frame_rate;
                 codec_context->gop_size = std::max(1, static_cast<int>(std::lround(configured_output_fps)));
                 codec_context->max_b_frames = 0;
-                codec_context->thread_count = 1;
+                codec_context->thread_count = static_cast<int>(config_.encoder_threads);
 
                 selected_encoder_name_ = codec->name != nullptr ? codec->name : "unknown";
                 encoder_options_ = build_libav_h264_encoder_backend_options(config_, selected_encoder_name_);
@@ -692,6 +692,11 @@ namespace video_server
                 if (config_.encoder_crf.has_value() && *config_.encoder_crf > 51)
                 {
                     set_error_locked("encoder_crf must be in the range 0..51 when provided", error_message);
+                    return false;
+                }
+                if (config_.encoder_threads > 256)
+                {
+                    set_error_locked("encoder_threads must be in the range 0..256", error_message);
                     return false;
                 }
                 return true;

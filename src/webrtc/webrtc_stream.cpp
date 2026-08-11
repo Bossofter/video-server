@@ -598,6 +598,7 @@ namespace video_server
 
                 uint64_t packet_count = 0;
                 uint64_t startup_packet_count = 0;
+                const auto send_started_at = std::chrono::steady_clock::now();
                 try
                 {
                     for (size_t nal_index = 0; nal_index < nalus_to_send.size(); ++nal_index)
@@ -669,6 +670,14 @@ namespace video_server
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    const auto send_elapsed_us = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - send_started_at)
+                            .count());
+                    ++rtp_send_timing_.samples;
+                    rtp_send_timing_.total_time_us += send_elapsed_us;
+                    rtp_send_timing_.last_time_us = send_elapsed_us;
+                    rtp_send_timing_.max_time_us = std::max(rtp_send_timing_.max_time_us, send_elapsed_us);
                     packets_attempted_ += packet_count;
                     packets_sent_after_track_open_ += packet_count;
                     if (sent_startup_sequence)
@@ -763,6 +772,7 @@ namespace video_server
                 snapshot.last_contains_pps = last_contains_pps_;
                 snapshot.last_contains_idr = last_contains_idr_;
                 snapshot.last_contains_non_idr = last_contains_non_idr_;
+                snapshot.rtp_send_timing = rtp_send_timing_;
                 snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
                 snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
                 snapshot.last_packetization_status = last_packetization_status_;
@@ -873,6 +883,7 @@ namespace video_server
             bool last_contains_pps_{false};
             bool last_contains_idr_{false};
             bool last_contains_non_idr_{false};
+            StageTimingCounters rtp_send_timing_;
             std::string last_packetization_status_{"awaiting-encoded-input"};
         };
 
