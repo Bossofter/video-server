@@ -27,6 +27,7 @@ namespace video_server
     {
         X264,
         OpenH264,
+        Vaapi,
         Generic
     };
 
@@ -106,7 +107,30 @@ namespace video_server
          * @return Encoder family associated with the active backend.
          */
         virtual RawH264EncoderFamily encoder_family() const = 0;
+
+        /**
+         * @brief Returns active encoder runtime diagnostics.
+         *
+         * @return Runtime encoder details.
+         */
+        virtual RawH264EncoderRuntimeInfo runtime_info() const = 0;
     };
+
+    /**
+     * @brief Returns whether VA-API encoder support was compiled into this binary.
+     *
+     * @return True when the VA-API backend code is enabled at compile time.
+     */
+    bool raw_h264_vaapi_compiled_support();
+
+    /**
+     * @brief Lightweight VA-API H.264 usability probe.
+     *
+     * @param hardware_device Requested render node path. Empty uses the backend default.
+     * @param error_message Optional destination for a human-readable failure reason.
+     * @return True when h264_vaapi, device creation, and frames initialization all work.
+     */
+    bool probe_raw_h264_vaapi_encoder(const std::string &hardware_device, std::string *error_message = nullptr);
 
     /**
      * @brief Builds libav-specific backend options from the public pipeline config.

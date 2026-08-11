@@ -74,9 +74,16 @@ namespace
             return avcodec_find_encoder_by_name("libx264");
         case video_server::RawH264Encoder::LibOpenH264:
             return avcodec_find_encoder_by_name("libopenh264");
+        case video_server::RawH264Encoder::Vaapi:
+            return avcodec_find_encoder_by_name("h264_vaapi");
         case video_server::RawH264Encoder::Automatic:
         {
-            const AVCodec *codec = avcodec_find_encoder_by_name("libx264");
+            const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
+            if (codec != nullptr)
+            {
+                return codec;
+            }
+            codec = avcodec_find_encoder_by_name("libx264");
             if (codec != nullptr)
             {
                 return codec;

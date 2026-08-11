@@ -158,6 +158,94 @@ namespace
         EXPECT_FALSE(std::any_of(openh264_options.private_options.begin(), openh264_options.private_options.end(),
                                  [](const video_server::RawH264EncoderOption &option)
                                  { return option.key == "crf"; }));
+
+        const auto vaapi_options = video_server::build_libav_h264_encoder_backend_options(config, "h264_vaapi");
+        EXPECT_EQ(vaapi_options.family, video_server::RawH264EncoderFamily::Vaapi);
+        EXPECT_TRUE(std::any_of(vaapi_options.private_options.begin(), vaapi_options.private_options.end(),
+                                [](const video_server::RawH264EncoderOption &option)
+                                { return option.key == "aud"; }));
+    }
+
+    TEST(RawToH264PipelineTest, ReportsVaapiCompileSupport)
+    {
+        std::string error;
+        if (video_server::raw_h264_vaapi_compiled_support())
+        {
+            EXPECT_TRUE(error.empty());
+        }
+        else
+        {
+            EXPECT_FALSE(video_server::probe_raw_h264_vaapi_encoder("/dev/dri/renderD128", &error));
+            EXPECT_NE(error.find("not compiled"), std::string::npos);
+        }
+    }
+
+    TEST(RawToH264PipelineTest, AutoFallsBackToSoftwareWhenVaapiProbeFails)
+    {
+        std::vector<std::vector<uint8_t>> access_units;
+        auto config = make_default_config();
+        config.encoder = video_server::RawH264Encoder::Automatic;
+        config.hardware_device = "/dev/dri/video-server-test-missing-render-node";
+
+        auto pipeline = video_server::make_raw_to_h264_pipeline(
+            "auto-fallback", config,
+            [&access_units](const video_server::EncodedAccessUnitView &access_unit)
+            {
+                access_units.emplace_back(static_cast<const uint8_t *>(access_unit.data),
+                                          static_cast<const uint8_t *>(access_unit.data) + access_unit.size_bytes);
+                return true;
+            });
+
+        std::string error;
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        const auto runtime = pipeline->encoder_runtime_info();
+        EXPECT_EQ(runtime.requested_encoder, "Automatic");
+        EXPECT_FALSE(runtime.hardware_accelerated);
+        EXPECT_TRUE(runtime.hardware_device.empty());
+        EXPECT_EQ(runtime.active_encoder, "libopenh264");
+        pipeline->stop();
+    }
+
+    TEST(RawToH264PipelineTest, ExplicitOpenH264DoesNotAutoPromoteToVaapi)
+    {
+        auto config = make_default_config(256, 128);
+        config.encoder = video_server::RawH264Encoder::LibOpenH264;
+        config.hardware_device = "/dev/dri/renderD128";
+
+        auto pipeline = video_server::make_raw_to_h264_pipeline("explicit-openh264", config,
+                                                                [](const video_server::EncodedAccessUnitView &)
+                                                                { return true; });
+
+        std::string error;
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        const auto runtime = pipeline->encoder_runtime_info();
+        EXPECT_EQ(runtime.requested_encoder, "LibOpenH264");
+        EXPECT_EQ(runtime.active_encoder, "libopenh264");
+        EXPECT_FALSE(runtime.hardware_accelerated);
+        EXPECT_TRUE(runtime.hardware_device.empty());
+        pipeline->stop();
+    }
+
+    TEST(RawToH264PipelineTest, ExplicitVaapiFailsWhenUnavailable)
+    {
+        auto config = make_default_config();
+        config.encoder = video_server::RawH264Encoder::Vaapi;
+        config.hardware_device = "/dev/dri/video-server-test-missing-render-node";
+        auto pipeline = video_server::make_raw_to_h264_pipeline("explicit-vaapi-missing", config,
+                                                                [](const video_server::EncodedAccessUnitView &)
+                                                                { return true; });
+
+        std::string error;
+        EXPECT_FALSE(pipeline->start(&error));
+        if (video_server::raw_h264_vaapi_compiled_support())
+        {
+            EXPECT_TRUE(error.find("could not be opened") != std::string::npos ||
+                        error.find("h264_vaapi encoder unavailable") != std::string::npos);
+        }
+        else
+        {
+            EXPECT_NE(error.find("not compiled"), std::string::npos);
+        }
     }
 
     TEST(RawToH264PipelineTest, UsesEncoderBackendFactorySeamToProduceOutput)
@@ -188,6 +276,74 @@ namespace
 
         ASSERT_FALSE(access_units.empty());
         EXPECT_TRUE(contains_start_code(access_units.front()));
+    }
+
+    TEST(RawToH264PipelineTest, VaapiHardwareEncodeSmokeSkipsWhenUnavailable)
+    {
+        std::string probe_error;
+        if (!video_server::probe_raw_h264_vaapi_encoder("/dev/dri/renderD128", &probe_error))
+        {
+            GTEST_SKIP() << "VA-API H264 unavailable: " << probe_error;
+        }
+
+        std::vector<std::vector<uint8_t>> access_units;
+        auto config = make_default_config(256, 128);
+        config.encoder = video_server::RawH264Encoder::Vaapi;
+        config.hardware_device = "/dev/dri/renderD128";
+
+        auto pipeline = video_server::make_raw_to_h264_pipeline(
+            "vaapi-smoke", config,
+            [&access_units](const video_server::EncodedAccessUnitView &access_unit)
+            {
+                access_units.emplace_back(static_cast<const uint8_t *>(access_unit.data),
+                                          static_cast<const uint8_t *>(access_unit.data) + access_unit.size_bytes);
+                return true;
+            });
+
+        std::string error;
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        const auto runtime = pipeline->encoder_runtime_info();
+        EXPECT_EQ(runtime.active_encoder, "h264_vaapi");
+        EXPECT_TRUE(runtime.hardware_accelerated);
+        EXPECT_EQ(runtime.hardware_device, "/dev/dri/renderD128");
+        for (uint64_t i = 0; i < 8; ++i)
+        {
+            auto frame = make_rgb_frame(config.input_width, config.input_height, i + 201);
+            ASSERT_TRUE(pipeline->push_frame(
+                make_rgb_view(frame, config.input_width, config.input_height, 7000000000ull + i * 33333333ull, i + 1),
+                &error))
+                << error;
+        }
+        pipeline->stop();
+
+        ASSERT_FALSE(access_units.empty());
+        EXPECT_TRUE(contains_start_code(access_units.front()));
+    }
+
+    TEST(RawToH264PipelineTest, AutomaticUsesVaapiWhenHardwareProbeSucceeds)
+    {
+        std::string probe_error;
+        if (!video_server::probe_raw_h264_vaapi_encoder("/dev/dri/renderD128", &probe_error))
+        {
+            GTEST_SKIP() << "VA-API H264 unavailable: " << probe_error;
+        }
+
+        auto config = make_default_config(256, 128);
+        config.encoder = video_server::RawH264Encoder::Automatic;
+        config.hardware_device = "/dev/dri/renderD128";
+
+        auto pipeline = video_server::make_raw_to_h264_pipeline("auto-vaapi", config,
+                                                                [](const video_server::EncodedAccessUnitView &)
+                                                                { return true; });
+
+        std::string error;
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        const auto runtime = pipeline->encoder_runtime_info();
+        EXPECT_EQ(runtime.requested_encoder, "Automatic");
+        EXPECT_EQ(runtime.active_encoder, "h264_vaapi");
+        EXPECT_TRUE(runtime.hardware_accelerated);
+        EXPECT_EQ(runtime.hardware_device, "/dev/dri/renderD128");
+        pipeline->stop();
     }
 
     TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromRawFrames)

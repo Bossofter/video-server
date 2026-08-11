@@ -45,9 +45,34 @@ Custom stream mix:
   --duration 30m
 ```
 
+Managed split-step run with one caller-owned API thread and two caller-owned stream threads:
+
+```bash
+./build/video_server_soak_runner \
+  --api-mode manual \
+  --streams 10 \
+  --stream-groups 0,1,2,3,4:5,6,7,8,9 \
+  --rate-hz 120 \
+  --duration-sec 3600
+```
+
+Managed API-thread run where the library owns API progression and the runner owns only stream-group threads:
+
+```bash
+./build/video_server_soak_runner \
+  --api-mode managed \
+  --api-cpu 2 \
+  --streams 10 \
+  --stream-groups 0,1,2,3,4:5,6,7,8,9 \
+  --rate-hz 120 \
+  --duration-sec 3600
+```
+
 ## What It Exercises
 
 - multiple concurrent streams
+- caller-defined managed stream groups
+- manual API stepping or managed API-thread progression
 - real WebRTC offer/answer and candidate exchange
 - periodic reconnect churn
 - periodic per-stream runtime config churn
@@ -75,10 +100,23 @@ Per stream, the runner records samples including:
 - `sender_state`
 - `last_packetization_status`
 
+The runner also reports step latency summaries:
+
+- API loop latency in manual API mode
+- per stream-group `step_streams()` latency
+- requested, successful, and failed step counts
+- deadline misses where one step takes longer than the configured cadence
+- achieved step frequency
+- p50, p95, p99, and max step duration
+
+In managed API-thread mode, API loop latency is not sampled because the loop is owned internally by the library. Stream-group latency is still sampled and is the primary signal for production, transform, upload, and encoder cost.
+
 Reports can be written as:
 
 - JSON summary plus full sample set
 - CSV sample stream for plotting or spreadsheet review
+
+Latency summaries are included in the JSON report under `latency`.
 
 ## How To Interpret Results
 
@@ -113,6 +151,7 @@ Typical final lines look like:
 ```text
 [soak] completed duration=60.0s success=true failures=0
 [soak] scenario_coverage reconnect=all-streams config=all-streams
+[soak] latency name=stream-group-0 requested=7200 ok=7200 failed=0 deadline_misses=0 achieved_hz=120.0 p50_ms=4.1 p95_ms=5.8 p99_ms=7.2 max_ms=12.4 streams=stream0,stream1
 ```
 
 Short runs can still pass with partial churn coverage if they are not long enough to cycle through every stream.

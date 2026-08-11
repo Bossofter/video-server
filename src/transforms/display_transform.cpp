@@ -23,6 +23,43 @@ namespace video_server
             return static_cast<uint8_t>(std::lround(clamp01(value) * 255.0F));
         }
 
+        bool can_use_unscaled_unrotated_passthrough(const VideoFrameView &frame, const StreamOutputConfig &config)
+        {
+            const uint32_t target_width = config.output_width > 0 ? config.output_width : frame.width;
+            const uint32_t target_height = config.output_height > 0 ? config.output_height : frame.height;
+            return config.rotation_degrees == 0 && !config.mirrored && target_width == frame.width &&
+                   target_height == frame.height;
+        }
+
+        bool apply_fast_gray8_passthrough(const VideoFrameView &frame, const StreamOutputConfig &config, RgbImage &out)
+        {
+            if (frame.pixel_format != VideoPixelFormat::GRAY8 ||
+                !(config.display_mode == VideoDisplayMode::Passthrough ||
+                  config.display_mode == VideoDisplayMode::Grayscale) ||
+                !can_use_unscaled_unrotated_passthrough(frame, config))
+            {
+                return false;
+            }
+
+            out.width = frame.width;
+            out.height = frame.height;
+            out.rgb.resize(static_cast<size_t>(out.width) * out.height * 3);
+            const auto *input = static_cast<const uint8_t *>(frame.data);
+            for (uint32_t y = 0; y < frame.height; ++y)
+            {
+                const auto *src = input + static_cast<size_t>(y) * frame.stride_bytes;
+                auto *dst = out.rgb.data() + static_cast<size_t>(y) * frame.width * 3;
+                for (uint32_t x = 0; x < frame.width; ++x)
+                {
+                    const uint8_t v = src[x];
+                    dst[x * 3 + 0] = v;
+                    dst[x * 3 + 1] = v;
+                    dst[x * 3 + 2] = v;
+                }
+            }
+            return true;
+        }
+
         void rainbow_map(float x, uint8_t &r, uint8_t &g, uint8_t &b)
         {
             const float t = clamp01(x);
@@ -160,6 +197,11 @@ namespace video_server
               config.rotation_degrees == 270))
         {
             return false;
+        }
+
+        if (apply_fast_gray8_passthrough(frame, config, out))
+        {
+            return true;
         }
 
         const uint32_t rotated_width =

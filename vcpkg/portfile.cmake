@@ -1,10 +1,10 @@
-vcpkg_from_github(
-    OUT_SOURCE_PATH SOURCE_PATH
-    REPO Bossofter/video-server
-    REF "v1.1.1"
-    SHA512 0
-    HEAD_REF main
-)
+set(SOURCE_PATH "${CMAKE_CURRENT_LIST_DIR}/..")
+
+if("vaapi" IN_LIST FEATURES)
+    set(VIDEO_SERVER_VAAPI_OPTION ON)
+else()
+    set(VIDEO_SERVER_VAAPI_OPTION OFF)
+endif()
 
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
@@ -12,6 +12,7 @@ vcpkg_cmake_configure(
         -DENABLE_VIDEO_SERVER=ON
         -DENABLE_WEBRTC_BACKEND=ON
         -DBUILD_TESTING=OFF
+        -DVIDEO_SERVER_ENABLE_VAAPI=${VIDEO_SERVER_VAAPI_OPTION}
 )
 
 vcpkg_cmake_install()

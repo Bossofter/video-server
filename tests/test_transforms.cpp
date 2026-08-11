@@ -117,4 +117,24 @@ namespace
         EXPECT_EQ(at_rgb(out, 1, 0), (std::array<uint8_t, 3>{40, 50, 60}));
     }
 
+    TEST(DisplayTransformTest, FastGray8PassthroughHonorsStride)
+    {
+        const std::vector<uint8_t> gray = {
+            1, 2, 3, 99,
+            4, 5, 6, 99,
+        };
+        video_server::VideoFrameView frame{gray.data(), 3, 2, 4, video_server::VideoPixelFormat::GRAY8, 12, 4};
+        video_server::StreamOutputConfig cfg;
+        cfg.display_mode = video_server::VideoDisplayMode::Passthrough;
+
+        video_server::RgbImage out;
+        ASSERT_TRUE(video_server::apply_display_transform(frame, cfg, out));
+        EXPECT_EQ(out.width, 3u);
+        EXPECT_EQ(out.height, 2u);
+        EXPECT_EQ(at_rgb(out, 0, 0), (std::array<uint8_t, 3>{1, 1, 1}));
+        EXPECT_EQ(at_rgb(out, 2, 0), (std::array<uint8_t, 3>{3, 3, 3}));
+        EXPECT_EQ(at_rgb(out, 0, 1), (std::array<uint8_t, 3>{4, 4, 4}));
+        EXPECT_EQ(at_rgb(out, 2, 1), (std::array<uint8_t, 3>{6, 6, 6}));
+    }
+
 } // namespace

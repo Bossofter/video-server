@@ -1,5 +1,7 @@
 #include <atomic>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -68,6 +70,48 @@ namespace
               next_frame_at(start_time) {}
     };
 
+    struct StepStats
+    {
+        uint64_t count{0};
+        uint64_t failed{0};
+        uint64_t deadline_misses{0};
+        double total_ms{0.0};
+        double max_ms{0.0};
+        std::vector<double> samples_ms;
+
+        void record(double elapsed_ms, bool ok, bool deadline_missed)
+        {
+            ++count;
+            if (!ok)
+            {
+                ++failed;
+            }
+            if (deadline_missed)
+            {
+                ++deadline_misses;
+            }
+            total_ms += elapsed_ms;
+            max_ms = std::max(max_ms, elapsed_ms);
+            samples_ms.push_back(elapsed_ms);
+        }
+
+        double percentile(double p) const
+        {
+            if (samples_ms.empty())
+            {
+                return 0.0;
+            }
+            auto sorted = samples_ms;
+            std::sort(sorted.begin(), sorted.end());
+            const auto index = static_cast<size_t>(std::min<double>(
+                static_cast<double>(sorted.size() - 1),
+                std::ceil((p / 100.0) * static_cast<double>(sorted.size())) - 1.0));
+            return sorted[index];
+        }
+
+        double mean_ms() const { return count == 0 ? 0.0 : total_ms / static_cast<double>(count); }
+    };
+
     bool parse_uint16(const char *value, uint16_t &out)
     {
         char *end = nullptr;
@@ -78,6 +122,11 @@ namespace
         }
         out = static_cast<uint16_t>(parsed);
         return true;
+    }
+
+    double average_ms(double total_ms, uint64_t count)
+    {
+        return count == 0 ? 0.0 : total_ms / static_cast<double>(count);
     }
 
     bool parse_uint32(const char *value, uint32_t &out)
@@ -387,6 +436,7 @@ int main(int argc, char **argv)
     }
 
     config.execution_mode = video_server::ExecutionMode::ManualStep;
+    config.api_execution.mode = video_server::ManagedApiExecutionMode::ManagedThread;
     if (!options->host.empty())
     {
         config.webrtc.http_host = options->host;
@@ -462,6 +512,20 @@ int main(int argc, char **argv)
                  config.webrtc.http_host, config.webrtc.http_port, streams.size(), options->config_path);
 
     std::atomic<bool> stop_requested{false};
+    std::vector<std::string> managed_stream_ids;
+    managed_stream_ids.reserve(config.streams.size());
+    for (const auto &stream_config : config.streams)
+    {
+        managed_stream_ids.push_back(stream_config.stream_id);
+    }
+    auto stream_group = server->register_streams(std::move(managed_stream_ids));
+    if (!stream_group)
+    {
+        spdlog::error("Failed to register managed stream group");
+        server->stop();
+        return 1;
+    }
+
     std::thread stdin_thread;
     if (options->duration_seconds <= 0.0)
     {
@@ -478,12 +542,18 @@ int main(int argc, char **argv)
     const auto stop_at = options->duration_seconds > 0.0
                              ? run_started_at + std::chrono::duration<double>(options->duration_seconds)
                              : Clock::time_point::max();
+    StepStats stream_step_stats;
+    const auto stream_step_interval = streams.empty() ? Clock::duration{std::chrono::milliseconds(1)}
+                                                      : streams.front().frame_interval;
 
     while (!stop_requested.load() && Clock::now() < stop_at)
     {
         const auto now = Clock::now();
+        bool pushed_frame = false;
+        auto next_frame_at = Clock::time_point::max();
         for (auto &stream : streams)
         {
+            next_frame_at = std::min(next_frame_at, stream.next_frame_at);
             while (stream.next_frame_at <= now)
             {
                 const auto raw_frame = stream.generator.next_frame();
@@ -491,15 +561,40 @@ int main(int argc, char **argv)
                 {
                     spdlog::warn("Failed to push synthetic frame for {}", stream.config.stream_id);
                 }
+                pushed_frame = true;
                 stream.next_frame_at += stream.frame_interval;
+                next_frame_at = std::min(next_frame_at, stream.next_frame_at);
             }
         }
 
-        if (!server->step())
+        if (pushed_frame)
         {
-            spdlog::error("Managed server step failed");
-            stop_requested = true;
-            break;
+            const auto step_started_at = Clock::now();
+            const bool step_ok = stream_group->step_streams();
+            const auto step_finished_at = Clock::now();
+            const auto step_elapsed = step_finished_at - step_started_at;
+            stream_step_stats.record(std::chrono::duration<double, std::milli>(step_elapsed).count(),
+                                     step_ok,
+                                     step_elapsed > stream_step_interval);
+            if (!step_ok)
+            {
+                spdlog::error("Managed stream-group step failed");
+                stop_requested = true;
+                break;
+            }
+        }
+        else if (next_frame_at != Clock::time_point::max())
+        {
+            const auto sleep_for = std::min(std::chrono::milliseconds(1),
+                                            std::chrono::duration_cast<std::chrono::milliseconds>(next_frame_at - now));
+            if (sleep_for.count() > 0)
+            {
+                std::this_thread::sleep_for(sleep_for);
+            }
+            else
+            {
+                std::this_thread::yield();
+            }
         }
 
         if (options->print_observability_summary && Clock::now() >= next_stats_at)
@@ -507,6 +602,11 @@ int main(int argc, char **argv)
             const auto snapshot = server->get_debug_snapshot();
             spdlog::info("[smoke-server] observability summary streams={} active_sessions={}", snapshot.stream_count,
                          snapshot.active_session_count);
+            spdlog::info(
+                "[smoke-server] stream-step latency count={} failed={} deadline_misses={} mean_ms={:.3f} p50_ms={:.3f} p95_ms={:.3f} p99_ms={:.3f} max_ms={:.3f}",
+                stream_step_stats.count, stream_step_stats.failed, stream_step_stats.deadline_misses,
+                stream_step_stats.mean_ms(), stream_step_stats.percentile(50.0), stream_step_stats.percentile(95.0),
+                stream_step_stats.percentile(99.0), stream_step_stats.max_ms);
             for (const auto &stream : snapshot.streams)
             {
                 const auto &session = stream.current_session;
@@ -517,6 +617,25 @@ int main(int argc, char **argv)
                     session ? session->counters.packets_sent_after_track_open : 0,
                     session ? session->counters.startup_sequence_injections : 0,
                     session ? session->counters.track_closed_events : 0);
+                spdlog::info(
+                    "[smoke-server] stream={} phase-ms steps={} total_avg={:.3f} total_last={:.3f} total_max={:.3f} transform_avg={:.3f} transform_last={:.3f} transform_max={:.3f} setup_avg={:.3f} setup_last={:.3f} setup_max={:.3f} encode_avg={:.3f} encode_last={:.3f} encode_max={:.3f} publish_avg={:.3f} publish_last={:.3f} publish_max={:.3f}",
+                    stream.stream_id,
+                    stream.stream_step_count,
+                    average_ms(stream.stream_step_total_ms, stream.stream_step_count),
+                    stream.stream_step_last_ms,
+                    stream.stream_step_max_ms,
+                    average_ms(stream.stream_step_transform_total_ms, stream.stream_step_count),
+                    stream.stream_step_transform_last_ms,
+                    stream.stream_step_transform_max_ms,
+                    average_ms(stream.stream_step_pipeline_setup_total_ms, stream.stream_step_count),
+                    stream.stream_step_pipeline_setup_last_ms,
+                    stream.stream_step_pipeline_setup_max_ms,
+                    average_ms(stream.stream_step_encode_total_ms, stream.stream_step_count),
+                    stream.stream_step_encode_last_ms,
+                    stream.stream_step_encode_max_ms,
+                    average_ms(stream.stream_step_publish_total_ms, stream.stream_step_count),
+                    stream.stream_step_publish_last_ms,
+                    stream.stream_step_publish_max_ms);
             }
             next_stats_at = Clock::now() + std::chrono::duration<double>(options->stats_interval_seconds);
         }
@@ -528,6 +647,36 @@ int main(int argc, char **argv)
         stdin_thread.detach();
     }
 
+    spdlog::info(
+        "[smoke-server] final stream-step latency count={} failed={} deadline_misses={} mean_ms={:.3f} p50_ms={:.3f} p95_ms={:.3f} p99_ms={:.3f} max_ms={:.3f}",
+        stream_step_stats.count, stream_step_stats.failed, stream_step_stats.deadline_misses,
+        stream_step_stats.mean_ms(), stream_step_stats.percentile(50.0), stream_step_stats.percentile(95.0),
+        stream_step_stats.percentile(99.0), stream_step_stats.max_ms);
+    {
+        const auto snapshot = server->get_debug_snapshot();
+        for (const auto &stream : snapshot.streams)
+        {
+            spdlog::info(
+                "[smoke-server] final stream={} phase-ms steps={} total_avg={:.3f} total_last={:.3f} total_max={:.3f} transform_avg={:.3f} transform_last={:.3f} transform_max={:.3f} setup_avg={:.3f} setup_last={:.3f} setup_max={:.3f} encode_avg={:.3f} encode_last={:.3f} encode_max={:.3f} publish_avg={:.3f} publish_last={:.3f} publish_max={:.3f}",
+                stream.stream_id,
+                stream.stream_step_count,
+                average_ms(stream.stream_step_total_ms, stream.stream_step_count),
+                stream.stream_step_last_ms,
+                stream.stream_step_max_ms,
+                average_ms(stream.stream_step_transform_total_ms, stream.stream_step_count),
+                stream.stream_step_transform_last_ms,
+                stream.stream_step_transform_max_ms,
+                average_ms(stream.stream_step_pipeline_setup_total_ms, stream.stream_step_count),
+                stream.stream_step_pipeline_setup_last_ms,
+                stream.stream_step_pipeline_setup_max_ms,
+                average_ms(stream.stream_step_encode_total_ms, stream.stream_step_count),
+                stream.stream_step_encode_last_ms,
+                stream.stream_step_encode_max_ms,
+                average_ms(stream.stream_step_publish_total_ms, stream.stream_step_count),
+                stream.stream_step_publish_last_ms,
+                stream.stream_step_publish_max_ms);
+        }
+    }
     server->stop();
     spdlog::info("[smoke-server] stopped");
     return 0;

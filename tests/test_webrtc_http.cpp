@@ -1784,6 +1784,10 @@ TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability)
     EXPECT_NE(response.body.find("\"stream_id\":\"bravo\""), std::string::npos);
     EXPECT_NE(response.body.find("\"latest_raw_frame_available\":true"), std::string::npos);
     EXPECT_NE(response.body.find("\"total_access_units_received\":1"), std::string::npos);
+    EXPECT_NE(response.body.find("\"requested_encoder\":\"\""), std::string::npos);
+    EXPECT_NE(response.body.find("\"active_encoder\":\"\""), std::string::npos);
+    EXPECT_NE(response.body.find("\"hardware_accelerated\":false"), std::string::npos);
+    EXPECT_NE(response.body.find("\"hardware_device\":\"\""), std::string::npos);
 }
 
 TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrectKey)

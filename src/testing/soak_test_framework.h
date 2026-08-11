@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -15,11 +16,10 @@
 #include <rtc/peerconnection.hpp>
 
 #include "video_server/observability.h"
-#include "video_server/raw_video_pipeline.h"
 #include "video_server/stream_config.h"
 #include "video_server/stream_output_config.h"
 #include "video_server/video_types.h"
-#include "video_server/webrtc_video_server.h"
+#include "video_server/managed_video_server.h"
 #include "synthetic_frame_generator.h"
 
 namespace video_server
@@ -44,9 +44,13 @@ namespace video_server
         /** @brief Runner configuration for the embedded server, churn, and reports. */
         struct RunnerOptions
         {
+            ManagedApiExecutionMode api_mode{ManagedApiExecutionMode::ManualStep};
+            std::vector<int> api_cpu_affinity;
+            std::optional<int> api_scheduling_priority;
             std::string host{"127.0.0.1"};
             uint16_t port{0};
             std::chrono::seconds duration{std::chrono::minutes(10)};
+            double stream_step_rate_hz{0.0};
             std::chrono::milliseconds poll_interval{1000};
             std::chrono::seconds summary_interval{std::chrono::seconds(5)};
             std::chrono::seconds reconnect_interval{std::chrono::seconds(25)};
@@ -65,6 +69,7 @@ namespace video_server
             std::string json_report_path;
             std::string csv_report_path;
             std::vector<StreamSpec> streams;
+            std::vector<std::vector<std::string>> stream_groups;
         };
 
         /** @brief Parsed subset of the session HTTP endpoint used by the runner. */
@@ -140,6 +145,22 @@ namespace video_server
             uint64_t final_total_frames_dropped{0};
         };
 
+        /** @brief Latency distribution summary for one repeatedly stepped loop. */
+        struct StepLatencySummary
+        {
+            std::string name;
+            std::vector<std::string> stream_ids;
+            uint64_t requested_steps{0};
+            uint64_t successful_steps{0};
+            uint64_t failed_steps{0};
+            uint64_t deadline_misses{0};
+            double achieved_hz{0.0};
+            double p50_ms{0.0};
+            double p95_ms{0.0};
+            double p99_ms{0.0};
+            double max_ms{0.0};
+        };
+
         /** @brief Final run summary including stream coverage and failures. */
         struct RunSummary
         {
@@ -148,6 +169,8 @@ namespace video_server
             bool all_streams_saw_reconnect_churn{false};
             bool all_streams_saw_config_churn{false};
             std::vector<StreamRunSummary> streams;
+            StepLatencySummary api_latency;
+            std::vector<StepLatencySummary> stream_group_latencies;
             std::vector<std::string> streams_missing_reconnect_churn;
             std::vector<std::string> streams_missing_config_churn;
             std::vector<FailureRecord> failures;
@@ -207,7 +230,9 @@ namespace video_server
             bool write_json_report(const std::string &path,
                                    double total_duration_seconds,
                                    const std::vector<FailureRecord> &failures,
-                                   const std::unordered_map<std::string, StreamChurnSummary> &churn_by_stream = {}) const;
+                                   const std::unordered_map<std::string, StreamChurnSummary> &churn_by_stream = {},
+                                   const StepLatencySummary &api_latency = {},
+                                   const std::vector<StepLatencySummary> &stream_group_latencies = {}) const;
             /** @brief Writes a CSV sample report to disk. */
             bool write_csv_report(const std::string &path) const;
 
@@ -312,11 +337,27 @@ namespace video_server
             void stop();
             /** @brief Returns an asynchronous background error when one occurred. */
             std::optional<std::string> background_error() const;
+            /** @brief Returns latency summaries for the API loop and stream group loops. */
+            std::pair<StepLatencySummary, std::vector<StepLatencySummary>> latency_summary(
+                double total_duration_seconds) const;
 
             /** @brief Returns the embedded server instance. */
-            WebRtcVideoServer &server() { return server_; }
+            IManagedVideoServer &server() { return *server_; }
             /** @brief Returns the options used to configure the harness. */
             const RunnerOptions &options() const { return options_; }
+
+            /** @brief Thread-safe step latency sample accumulator used by harness workers. */
+            struct LatencyRecorder
+            {
+                std::string name;
+                std::vector<std::string> stream_ids;
+                uint64_t requested_steps{0};
+                uint64_t successful_steps{0};
+                uint64_t failed_steps{0};
+                uint64_t deadline_misses{0};
+                std::vector<double> samples_ms;
+                mutable std::mutex mutex;
+            };
 
         private:
             /** @brief Runtime state for one synthetic stream. */
@@ -326,21 +367,17 @@ namespace video_server
 
                 StreamConfig config;
                 SyntheticFrameGenerator generator;
-                RawVideoPipelineConfig pipeline_config;
-                std::unique_ptr<IRawVideoPipeline> pipeline;
-                std::thread frame_thread;
-                std::string pipeline_error;
-                uint64_t pipeline_config_generation{0};
             };
 
-            static RawVideoPipelineConfig make_pipeline_config(const RunningStream &stream,
-                                                               const StreamOutputConfig &output_config,
-                                                               uint32_t width,
-                                                               uint32_t height);
-
             RunnerOptions options_;
-            WebRtcVideoServer server_;
+            std::unique_ptr<IManagedVideoServer> server_;
             std::vector<std::unique_ptr<RunningStream>> streams_;
+            std::unordered_map<std::string, RunningStream *> streams_by_id_;
+            std::vector<std::shared_ptr<IManagedStreamGroup>> stream_groups_;
+            std::vector<std::shared_ptr<LatencyRecorder>> stream_group_latency_;
+            std::shared_ptr<LatencyRecorder> api_latency_;
+            std::vector<std::thread> stream_group_threads_;
+            std::thread api_thread_;
             std::atomic<bool> stop_requested_{false};
             mutable std::mutex background_error_mutex_;
             std::optional<std::string> background_error_;

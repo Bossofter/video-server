@@ -57,6 +57,37 @@ int main(int argc, char **argv)
             }
         }
         std::cout << '\n';
+        const auto print_latency = [](const video_server::soak::StepLatencySummary &latency)
+        {
+            std::cout << "[soak] latency name=" << latency.name
+                      << " requested=" << latency.requested_steps
+                      << " ok=" << latency.successful_steps
+                      << " failed=" << latency.failed_steps
+                      << " deadline_misses=" << latency.deadline_misses
+                      << " achieved_hz=" << latency.achieved_hz
+                      << " p50_ms=" << latency.p50_ms
+                      << " p95_ms=" << latency.p95_ms
+                      << " p99_ms=" << latency.p99_ms
+                      << " max_ms=" << latency.max_ms;
+            if (!latency.stream_ids.empty())
+            {
+                std::cout << " streams=";
+                for (size_t i = 0; i < latency.stream_ids.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        std::cout << ',';
+                    }
+                    std::cout << latency.stream_ids[i];
+                }
+            }
+            std::cout << '\n';
+        };
+        print_latency(summary.api_latency);
+        for (const auto &latency : summary.stream_group_latencies)
+        {
+            print_latency(latency);
+        }
         for (const auto &stream : summary.streams)
         {
             std::cout << "[soak] stream=" << stream.stream_id
