@@ -265,6 +265,69 @@ namespace video_server
 #endif
         }
 
+        bool probe_vaapi_encoder_for_size(const std::string &hardware_device,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          std::string *error_message)
+        {
+#if VIDEO_SERVER_ENABLE_VAAPI
+            const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
+            if (codec == nullptr)
+            {
+                set_error_value(error_message, "h264_vaapi encoder unavailable in the linked libavcodec build");
+                return false;
+            }
+
+            std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context(avcodec_alloc_context3(codec));
+            if (!codec_context)
+            {
+                set_error_value(error_message, "failed to allocate h264_vaapi probe codec context");
+                return false;
+            }
+
+            codec_context->codec_type = AVMEDIA_TYPE_VIDEO;
+            codec_context->codec_id = codec->id;
+            codec_context->width = static_cast<int>(width);
+            codec_context->height = static_cast<int>(height);
+            codec_context->pix_fmt = AV_PIX_FMT_VAAPI;
+            codec_context->time_base = AVRational{1, 30};
+            codec_context->framerate = AVRational{30, 1};
+            codec_context->gop_size = 30;
+            codec_context->max_b_frames = 0;
+            codec_context->thread_count = 1;
+
+            std::unique_ptr<AVBufferRef, AvBufferRefDeleter> device;
+            std::unique_ptr<AVBufferRef, AvBufferRefDeleter> frames;
+            const std::string device_path = hardware_device.empty() ? std::string(kDefaultVaapiDevice) : hardware_device;
+            if (!initialize_vaapi_device_and_frames(device_path, codec_context->width, codec_context->height,
+                                                    &device, &frames, error_message))
+            {
+                return false;
+            }
+            codec_context->hw_frames_ctx = av_buffer_ref(frames.get());
+            if (codec_context->hw_frames_ctx == nullptr)
+            {
+                set_error_value(error_message, "failed to attach VA-API frames context to h264_vaapi probe encoder");
+                return false;
+            }
+
+            const int rc = avcodec_open2(codec_context.get(), codec, nullptr);
+            if (rc < 0)
+            {
+                set_error_value(error_message, "h264_vaapi encoder unusable for " + std::to_string(width) + "x" +
+                                                   std::to_string(height) + ": " + av_error_string(rc));
+                return false;
+            }
+            return true;
+#else
+            (void)hardware_device;
+            (void)width;
+            (void)height;
+            set_error_value(error_message, "VA-API H264 encoder support was not compiled into video-server");
+            return false;
+#endif
+        }
+
         class LibavH264EncoderBackend final : public IRawH264EncoderBackend
         {
         public:
@@ -290,7 +353,18 @@ namespace video_server
                 bool select_vaapi = config_.encoder == RawH264Encoder::Vaapi;
                 if (config_.encoder == RawH264Encoder::Automatic)
                 {
-                    select_vaapi = probe_raw_h264_vaapi_encoder(vaapi_device, &vaapi_unavailable_reason);
+                    if (output_width < 256 || output_height < 128)
+                    {
+                        vaapi_unavailable_reason = "output size " + std::to_string(output_width) + "x" +
+                                                   std::to_string(output_height) +
+                                                   " is below the conservative VA-API H264 auto-selection minimum";
+                        select_vaapi = false;
+                    }
+                    else
+                    {
+                        select_vaapi = probe_vaapi_encoder_for_size(vaapi_device, output_width, output_height,
+                                                                    &vaapi_unavailable_reason);
+                    }
                 }
                 if (select_vaapi && !raw_h264_vaapi_compiled_support())
                 {
