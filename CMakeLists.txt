@@ -23,6 +23,7 @@ if(ENABLE_WEBRTC_BACKEND AND NOT ENABLE_VIDEO_SERVER)
 endif()
 
 if(ENABLE_VIDEO_SERVER)
+  find_package(spdlog CONFIG REQUIRED)
   find_package(FFMPEG MODULE REQUIRED COMPONENTS avcodec avutil swscale)
 
   add_library(video_server_ffmpeg INTERFACE)
@@ -63,6 +64,8 @@ if(ENABLE_VIDEO_SERVER)
     PUBLIC
       "$<BUILD_INTERFACE:video_server_ffmpeg>"
       "$<INSTALL_INTERFACE:video_server::ffmpeg>"
+    PRIVATE
+      spdlog::spdlog
   )
 
   target_compile_definitions(video_server_core
@@ -79,7 +82,6 @@ if(ENABLE_VIDEO_SERVER)
 endif()
 
 if(ENABLE_WEBRTC_BACKEND)
-  find_package(spdlog CONFIG REQUIRED)
   find_package(tomlplusplus CONFIG REQUIRED)
   find_package(OpenSSL REQUIRED)
   find_package(LibDataChannel CONFIG REQUIRED)

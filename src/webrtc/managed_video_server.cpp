@@ -8,11 +8,13 @@
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -26,6 +28,7 @@
 
 #include "../core/video_pixel_format_utils.h"
 #include "../transforms/display_transform.h"
+#include "encoded_access_unit_handoff.h"
 
 namespace video_server
 {
@@ -345,20 +348,35 @@ namespace video_server
 
         class ManagedVideoServer final : public IManagedVideoServer
         {
+            struct ManagedServerAccess
+            {
+                std::mutex mutex;
+                ManagedVideoServer *owner{nullptr};
+            };
+
             class StreamGroupHandle;
 
         public:
             explicit ManagedVideoServer(ManagedVideoServerConfig config)
                 : config_(std::move(config)),
-                  server_(validated_webrtc_config(config_))
+                  server_(validated_webrtc_config(config_)),
+                  access_(std::make_shared<ManagedServerAccess>())
             {
+                access_->owner = this;
                 for (const auto &stream : config_.streams)
                 {
                     add_stream_state_locked(stream);
                 }
             }
 
-            ~ManagedVideoServer() override { stop(); }
+            ~ManagedVideoServer() override
+            {
+                {
+                    std::lock_guard<std::mutex> access_lock(access_->mutex);
+                    access_->owner = nullptr;
+                }
+                stop();
+            }
 
             bool start() override
             {
@@ -534,7 +552,7 @@ namespace video_server
                 {
                     streams_.at(stream_id)->owner_group_id = group_id;
                 }
-                return std::make_shared<StreamGroupHandle>(*this, group_id, std::move(stream_ids));
+                return std::make_shared<StreamGroupHandle>(access_, group_id, std::move(stream_ids));
             }
 
             ServerDebugSnapshot get_debug_snapshot() const override
@@ -553,7 +571,7 @@ namespace video_server
                     stream.active_encoder = it->second->encoder_runtime_info.active_encoder;
                     stream.hardware_accelerated = it->second->encoder_runtime_info.hardware_accelerated;
                     stream.hardware_device = it->second->encoder_runtime_info.hardware_device;
-                    stream.encoded_handoff_dropped = it->second->encoded_handoff_dropped;
+                    stream.encoded_handoff_dropped = it->second->encoded_handoff.dropped_count();
                     const auto &timing = it->second->step_timing;
                     stream.stream_step_count = timing.count;
                     stream.stream_step_total_ms = timing.total_ms;
@@ -772,8 +790,7 @@ namespace video_server
                 std::optional<PendingFrame> pending_frame;
                 std::unique_ptr<IRawVideoPipeline> pipeline;
                 RawH264EncoderRuntimeInfo encoder_runtime_info;
-                std::deque<EncodedAccessUnitStorage> encoded_handoff;
-                uint64_t encoded_handoff_dropped{0};
+                webrtc_internal::EncodedAccessUnitHandoff<EncodedAccessUnitStorage> encoded_handoff;
                 uint64_t next_due_timestamp_ns{0};
                 uint64_t pipeline_config_generation{0};
                 uint32_t pipeline_width{0};
@@ -786,10 +803,20 @@ namespace video_server
             class StreamGroupHandle final : public IManagedStreamGroup
             {
             public:
-                StreamGroupHandle(ManagedVideoServer &owner, uint64_t group_id, std::vector<std::string> stream_ids)
-                    : owner_(owner), group_id_(group_id), stream_ids_(std::move(stream_ids)) {}
+                StreamGroupHandle(std::weak_ptr<ManagedServerAccess> access, uint64_t group_id, std::vector<std::string> stream_ids)
+                    : access_(std::move(access)), group_id_(group_id), stream_ids_(std::move(stream_ids)) {}
 
-                ~StreamGroupHandle() override { owner_.release_stream_group(group_id_, stream_ids_); }
+                ~StreamGroupHandle() override
+                {
+                    if (const auto access = access_.lock())
+                    {
+                        std::lock_guard<std::mutex> access_lock(access->mutex);
+                        if (access->owner != nullptr)
+                        {
+                            access->owner->release_stream_group(group_id_, stream_ids_);
+                        }
+                    }
+                }
 
                 bool step_streams() override
                 {
@@ -799,17 +826,25 @@ namespace video_server
                         spdlog::warn("managed stream group concurrent step rejected group={}", group_id_);
                         return false;
                     }
-                    const auto reset = [this]()
-                    { stepping_.store(false); };
-                    bool ok = owner_.step_stream_ids(stream_ids_);
-                    reset();
-                    return ok;
+                    struct StepGuard
+                    {
+                        std::atomic<bool> &flag;
+                        ~StepGuard() { flag.store(false); }
+                    } guard{stepping_};
+
+                    const auto access = access_.lock();
+                    if (!access)
+                    {
+                        return false;
+                    }
+                    std::lock_guard<std::mutex> access_lock(access->mutex);
+                    return access->owner != nullptr && access->owner->step_stream_ids(stream_ids_);
                 }
 
                 std::vector<std::string> stream_ids() const override { return stream_ids_; }
 
             private:
-                ManagedVideoServer &owner_;
+                std::weak_ptr<ManagedServerAccess> access_;
                 uint64_t group_id_{0};
                 std::vector<std::string> stream_ids_;
                 std::atomic<bool> stepping_{false};
@@ -912,13 +947,7 @@ namespace video_server
                         storage.timestamp_ns = access_unit.timestamp_ns;
                         storage.keyframe = access_unit.keyframe;
                         storage.codec_config = access_unit.codec_config;
-                        constexpr size_t kMaxEncodedHandoffUnits = 4;
-                        if (state->encoded_handoff.size() >= kMaxEncodedHandoffUnits)
-                        {
-                            state->encoded_handoff.pop_front();
-                            ++state->encoded_handoff_dropped;
-                        }
-                        state->encoded_handoff.push_back(std::move(storage));
+                        state->encoded_handoff.push(std::move(storage));
                         return true;
                     });
 
@@ -1105,24 +1134,32 @@ namespace video_server
                     spdlog::warn("managed API concurrent step rejected");
                     return false;
                 }
-                const bool ok = step_api_impl();
-                api_step_active_.store(false);
-                return ok;
+                struct StepGuard
+                {
+                    std::atomic<bool> &flag;
+                    ~StepGuard() { flag.store(false); }
+                } guard{api_step_active_};
+                return step_api_impl();
             }
 
             bool step_api_impl()
             {
                 std::vector<std::pair<std::string, EncodedAccessUnitStorage>> units;
+                std::vector<std::pair<std::string, std::shared_ptr<ManagedStreamState>>> stream_states;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     for (auto &[stream_id, state] : streams_)
                     {
-                        std::lock_guard<std::mutex> stream_lock(state->mutex);
-                        while (!state->encoded_handoff.empty())
-                        {
-                            units.emplace_back(stream_id, std::move(state->encoded_handoff.front()));
-                            state->encoded_handoff.pop_front();
-                        }
+                        stream_states.emplace_back(stream_id, state);
+                    }
+                }
+
+                for (auto &[stream_id, state] : stream_states)
+                {
+                    std::lock_guard<std::mutex> stream_lock(state->mutex);
+                    for (auto &unit : state->encoded_handoff.drain())
+                    {
+                        units.emplace_back(stream_id, std::move(unit));
                     }
                 }
 
@@ -1203,6 +1240,7 @@ namespace video_server
 
             ManagedVideoServerConfig config_;
             WebRtcVideoServer server_;
+            std::shared_ptr<ManagedServerAccess> access_;
             mutable std::mutex mutex_;
             std::unordered_map<std::string, std::shared_ptr<ManagedStreamState>> streams_;
             std::vector<std::string> stream_order_;

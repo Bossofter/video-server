@@ -8,10 +8,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <spdlog/spdlog.h>
 
 extern "C"
 {
@@ -191,19 +192,7 @@ namespace video_server
             case RawH264Encoder::Vaapi:
                 return avcodec_find_encoder_by_name("h264_vaapi");
             case RawH264Encoder::Automatic:
-            {
-                const AVCodec *codec = avcodec_find_encoder_by_name("libx264");
-                if (codec != nullptr)
-                {
-                    return codec;
-                }
-                codec = avcodec_find_encoder_by_name("libopenh264");
-                if (codec != nullptr)
-                {
-                    return codec;
-                }
-                return avcodec_find_encoder(AV_CODEC_ID_H264);
-            }
+                return avcodec_find_encoder_by_name("libopenh264");
             }
             return nullptr;
         }
@@ -353,18 +342,8 @@ namespace video_server
                 bool select_vaapi = config_.encoder == RawH264Encoder::Vaapi;
                 if (config_.encoder == RawH264Encoder::Automatic)
                 {
-                    if (output_width < 256 || output_height < 128)
-                    {
-                        vaapi_unavailable_reason = "output size " + std::to_string(output_width) + "x" +
-                                                   std::to_string(output_height) +
-                                                   " is below the conservative VA-API H264 auto-selection minimum";
-                        select_vaapi = false;
-                    }
-                    else
-                    {
-                        select_vaapi = probe_vaapi_encoder_for_size(vaapi_device, output_width, output_height,
-                                                                    &vaapi_unavailable_reason);
-                    }
+                    select_vaapi = probe_vaapi_encoder_for_size(vaapi_device, output_width, output_height,
+                                                                &vaapi_unavailable_reason);
                 }
                 if (select_vaapi && !raw_h264_vaapi_compiled_support())
                 {
@@ -547,24 +526,26 @@ namespace video_server
 
                 if (config_.encoder == RawH264Encoder::Automatic && select_vaapi)
                 {
-                    std::cerr << "[encoder] stream=" << stream_id_ << " requested=" << requested_name
-                              << " selected=" << selected_encoder_name_ << " device=" << vaapi_device << "\n";
+                    spdlog::info("[encoder] stream={} requested={} selected={} device={}", stream_id_, requested_name,
+                                 selected_encoder_name_, vaapi_device);
                 }
                 else if (config_.encoder == RawH264Encoder::Automatic)
                 {
-                    std::cerr << "[encoder] stream=" << stream_id_ << " requested=" << requested_name
-                              << " vaapi-unavailable=\"" << vaapi_unavailable_reason << "\" selected="
-                              << selected_encoder_name_ << "\n";
+                    spdlog::info("[encoder] stream={} requested={} vaapi-unavailable=\"{}\" selected={}", stream_id_,
+                                 requested_name, vaapi_unavailable_reason, selected_encoder_name_);
                 }
                 else
                 {
-                    std::cerr << "[encoder] stream=" << stream_id_ << " requested=" << requested_name
-                              << " selected=" << selected_encoder_name_;
                     if (select_vaapi)
                     {
-                        std::cerr << " device=" << vaapi_device;
+                        spdlog::info("[encoder] stream={} requested={} selected={} device={}", stream_id_,
+                                     requested_name, selected_encoder_name_, vaapi_device);
                     }
-                    std::cerr << "\n";
+                    else
+                    {
+                        spdlog::info("[encoder] stream={} requested={} selected={}", stream_id_, requested_name,
+                                     selected_encoder_name_);
+                    }
                 }
 
                 next_frame_index_ = 0;
@@ -605,6 +586,10 @@ namespace video_server
             bool flush(std::string *error_message = nullptr) override
             {
                 if (!is_open())
+                {
+                    return true;
+                }
+                if (next_frame_index_ == 0)
                 {
                     return true;
                 }
@@ -1085,17 +1070,8 @@ namespace video_server
     bool probe_raw_h264_vaapi_encoder(const std::string &hardware_device, std::string *error_message)
     {
 #if VIDEO_SERVER_ENABLE_VAAPI
-        const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
-        if (codec == nullptr)
-        {
-            set_error_value(error_message, "h264_vaapi encoder unavailable in the linked libavcodec build");
-            return false;
-        }
-
-        std::unique_ptr<AVBufferRef, AvBufferRefDeleter> device;
-        std::unique_ptr<AVBufferRef, AvBufferRefDeleter> frames;
         const std::string device_path = hardware_device.empty() ? std::string(kDefaultVaapiDevice) : hardware_device;
-        return initialize_vaapi_device_and_frames(device_path, 256, 128, &device, &frames, error_message);
+        return probe_vaapi_encoder_for_size(device_path, 256, 128, error_message);
 #else
         (void)hardware_device;
         set_error_value(error_message, "VA-API H264 encoder support was not compiled into video-server");

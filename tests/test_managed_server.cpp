@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "video_server/managed_video_server.h"
+#include "../src/webrtc/encoded_access_unit_handoff.h"
 
 namespace
 {
@@ -37,6 +38,25 @@ namespace
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         return predicate();
+    }
+
+    video_server::ManagedVideoServerConfig make_software_managed_config(const std::string &stream_id,
+                                                                        uint32_t width,
+                                                                        uint32_t height,
+                                                                        double fps)
+    {
+        video_server::ManagedVideoServerConfig config;
+        config.webrtc.enable_http_api = false;
+        config.streams.push_back({stream_id, stream_id, width, height, fps, video_server::VideoPixelFormat::GRAY8});
+        video_server::RawVideoPipelineConfig pipeline_config;
+        pipeline_config.encoder = video_server::RawH264Encoder::LibOpenH264;
+        config.default_raw_pipelines.emplace("default", pipeline_config);
+        return config;
+    }
+
+    uint64_t timestamp_for_frame(uint64_t index, double fps)
+    {
+        return static_cast<uint64_t>((static_cast<long double>(index) * 1000000000.0L) / fps);
     }
 
 } // namespace
@@ -191,6 +211,120 @@ TEST(ManagedVideoServerTest, RejectsRemoveWhileStreamGroupOwnsStreamAndAllowsAft
     EXPECT_TRUE(server->remove_stream("alpha"));
 
     server->stop();
+}
+
+TEST(ManagedVideoServerTest, StreamGroupCanOutliveServerWithoutDanglingRelease)
+{
+    std::shared_ptr<video_server::IManagedStreamGroup> group;
+    {
+        video_server::ManagedVideoServerConfig config;
+        config.webrtc.enable_http_api = false;
+        config.streams.push_back({"alpha", "Alpha", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+        auto server = video_server::CreateManagedVideoServer(config);
+        ASSERT_TRUE(server->start());
+        group = server->register_streams({"alpha"});
+        ASSERT_NE(group, nullptr);
+    }
+
+    EXPECT_FALSE(group->step_streams());
+    group.reset();
+    SUCCEED();
+}
+
+TEST(ManagedVideoServerTest, EncodedHandoffOverflowRetainsDecoderStartState)
+{
+    struct TestUnit
+    {
+        int id{0};
+        bool keyframe{false};
+        bool codec_config{false};
+    };
+
+    video_server::webrtc_internal::EncodedAccessUnitHandoff<TestUnit> handoff(4);
+    handoff.push(TestUnit{1, false, true});
+    handoff.push(TestUnit{2, true, false});
+    for (int id = 3; id <= 8; ++id)
+    {
+        handoff.push(TestUnit{id, false, false});
+    }
+
+    EXPECT_GT(handoff.dropped_count(), 0u);
+    EXPECT_LE(handoff.pending_count(), 4u);
+
+    const auto drained = handoff.drain();
+    ASSERT_GE(drained.size(), 2u);
+    EXPECT_TRUE(drained[0].codec_config);
+    EXPECT_TRUE(drained[1].keyframe);
+    EXPECT_EQ(drained[1].id, 2);
+    EXPECT_EQ(drained.back().id, 8);
+}
+
+TEST(ManagedVideoServerTest, HighRateStreamProgressionIsNotImplicitlyCappedAt30Fps)
+{
+    // Protects against a previously observed managed-loop regression that capped stream progression near 30 FPS.
+    struct Case
+    {
+        double source_fps;
+        uint64_t submitted_frames;
+        double output_fps;
+        uint64_t expected_transformed;
+    };
+
+    const std::vector<Case> cases{
+        {30.0, 30, 0.0, 30},
+        {60.0, 60, 0.0, 60},
+        {75.0, 75, 0.0, 75},
+        {120.0, 120, 0.0, 120},
+        {120.0, 120, 30.0, 30},
+    };
+
+    for (const auto &test_case : cases)
+    {
+        SCOPED_TRACE("source_fps=" + std::to_string(test_case.source_fps) +
+                     " submitted=" + std::to_string(test_case.submitted_frames) +
+                     " output_fps=" + std::to_string(test_case.output_fps));
+        auto config = make_software_managed_config("alpha", 64, 48, test_case.source_fps);
+        auto server = video_server::CreateManagedVideoServer(config);
+        ASSERT_TRUE(server->start());
+        auto group = server->register_streams({"alpha"});
+        ASSERT_NE(group, nullptr);
+
+        if (test_case.output_fps > 0.0)
+        {
+            video_server::StreamOutputConfig output_config;
+            output_config.output_fps = test_case.output_fps;
+            ASSERT_TRUE(server->set_stream_output_config("alpha", output_config));
+        }
+
+        for (uint64_t i = 0; i < test_case.submitted_frames; ++i)
+        {
+            std::vector<uint8_t> frame(64u * 48u, static_cast<uint8_t>((i * 17u) & 0xffu));
+            ASSERT_TRUE(server->push_frame("alpha",
+                                           make_gray_frame_view(frame, 64, 48,
+                                                                timestamp_for_frame(i, test_case.source_fps), i + 1)));
+            ASSERT_TRUE(group->step_streams());
+        }
+
+        const auto info = server->get_stream_info("alpha");
+        ASSERT_TRUE(info.has_value());
+        EXPECT_EQ(info->frames_received, test_case.submitted_frames)
+            << "source_fps=" << test_case.source_fps << " output_fps=" << test_case.output_fps;
+        EXPECT_EQ(info->frames_transformed, test_case.expected_transformed)
+            << "source_fps=" << test_case.source_fps << " submitted=" << test_case.submitted_frames
+            << " dropped=" << info->frames_dropped << " output_fps=" << test_case.output_fps;
+        if (test_case.output_fps == 0.0)
+        {
+            EXPECT_EQ(info->frames_dropped, 0u);
+        }
+        else
+        {
+            EXPECT_GE(info->frames_dropped + 1u, test_case.submitted_frames - test_case.expected_transformed)
+                << "one throttled frame may remain latched as pending after the final synchronous step";
+        }
+
+        server->stop();
+    }
 }
 
 TEST(ManagedVideoServerTest, StepStreamsAdvancesOnlyOwnedStreamsAndApiDrainsEncodedHandoff)

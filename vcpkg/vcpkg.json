@@ -14,8 +14,7 @@
         {
             "name": "ffmpeg",
             "features": [
-                "openh264",
-                "vaapi"
+                "openh264"
             ]
         },
         {

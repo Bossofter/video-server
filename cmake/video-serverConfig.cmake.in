@@ -64,8 +64,11 @@ unset(_video_server_ffmpeg_found)
 unset(_video_server_ffmpeg_module_dir)
 unset(_video_server_ffmpeg_uses_pkg_config)
 
-if(@ENABLE_WEBRTC_BACKEND@)
+if(@ENABLE_VIDEO_SERVER@)
   find_dependency(spdlog CONFIG REQUIRED)
+endif()
+
+if(@ENABLE_WEBRTC_BACKEND@)
   find_dependency(tomlplusplus CONFIG REQUIRED)
   find_dependency(OpenSSL REQUIRED)
   find_dependency(LibDataChannel CONFIG REQUIRED)
