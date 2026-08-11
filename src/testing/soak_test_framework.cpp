@@ -14,16 +14,17 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #include <rtc/description.hpp>
 
 #include <spdlog/spdlog.h>
 
-#include "../transforms/display_transform.h"
 #include "../webrtc/logging_utils.h"
 
 namespace video_server
@@ -309,6 +310,238 @@ namespace video_server
                 return static_cast<size_t>(parsed);
             }
 
+            std::optional<int> parse_int_value(const char *value)
+            {
+                char *end = nullptr;
+                const long parsed = std::strtol(value, &end, 10);
+                if (end == value || *end != '\0' || parsed < std::numeric_limits<int>::min() ||
+                    parsed > std::numeric_limits<int>::max())
+                {
+                    return std::nullopt;
+                }
+                return static_cast<int>(parsed);
+            }
+
+            std::optional<double> parse_positive_double(const char *value)
+            {
+                char *end = nullptr;
+                const double parsed = std::strtod(value, &end);
+                if (end == value || *end != '\0' || parsed <= 0.0)
+                {
+                    return std::nullopt;
+                }
+                return parsed;
+            }
+
+            std::vector<StreamSpec> generated_stream_specs(size_t count, double fps)
+            {
+                std::vector<StreamSpec> specs;
+                specs.reserve(count);
+                for (size_t i = 0; i < count; ++i)
+                {
+                    StreamSpec spec;
+                    spec.stream_id = "stream" + std::to_string(i);
+                    spec.label = "Soak stream " + std::to_string(i);
+                    spec.width = 640;
+                    spec.height = 360;
+                    spec.fps = fps;
+                    spec.pixel_format = VideoPixelFormat::GRAY8;
+                    specs.push_back(std::move(spec));
+                }
+                return specs;
+            }
+
+            std::vector<std::string> split_tokens(const std::string &value, char delimiter)
+            {
+                std::stringstream input(value);
+                std::string token;
+                std::vector<std::string> tokens;
+                while (std::getline(input, token, delimiter))
+                {
+                    if (!token.empty())
+                    {
+                        tokens.push_back(token);
+                    }
+                }
+                return tokens;
+            }
+
+            bool is_decimal_index(const std::string &value)
+            {
+                return !value.empty() &&
+                       std::all_of(value.begin(), value.end(), [](unsigned char c)
+                                   { return c >= '0' && c <= '9'; });
+            }
+
+            std::optional<std::vector<std::vector<std::string>>> parse_stream_groups_spec(
+                const std::string &value,
+                const std::vector<StreamSpec> &streams,
+                std::string *error_message)
+            {
+                std::vector<std::vector<std::string>> groups;
+                std::unordered_set<std::string> seen;
+                const auto group_tokens = split_tokens(value, ':');
+                if (group_tokens.empty())
+                {
+                    if (error_message)
+                    {
+                        *error_message = "invalid --stream-groups value";
+                    }
+                    return std::nullopt;
+                }
+
+                for (const auto &group_token : group_tokens)
+                {
+                    std::vector<std::string> group;
+                    for (const auto &item : split_tokens(group_token, ','))
+                    {
+                        std::string stream_id = item;
+                        if (is_decimal_index(item))
+                        {
+                            const auto index = parse_size_t_value(item.c_str());
+                            if (!index.has_value() || *index >= streams.size())
+                            {
+                                if (error_message)
+                                {
+                                    *error_message = "stream group index out of range: " + item;
+                                }
+                                return std::nullopt;
+                            }
+                            stream_id = streams[*index].stream_id;
+                        }
+                        if (!seen.insert(stream_id).second)
+                        {
+                            if (error_message)
+                            {
+                                *error_message = "duplicate stream in --stream-groups: " + stream_id;
+                            }
+                            return std::nullopt;
+                        }
+                        group.push_back(std::move(stream_id));
+                    }
+                    if (group.empty())
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "empty group in --stream-groups";
+                        }
+                        return std::nullopt;
+                    }
+                    groups.push_back(std::move(group));
+                }
+                return groups;
+            }
+
+            std::vector<std::vector<std::string>> default_stream_groups_for(const std::vector<StreamSpec> &streams)
+            {
+                std::vector<std::string> all_streams;
+                all_streams.reserve(streams.size());
+                for (const auto &stream : streams)
+                {
+                    all_streams.push_back(stream.stream_id);
+                }
+                return {std::move(all_streams)};
+            }
+
+            ManagedVideoServerConfig make_managed_config(const RunnerOptions &options)
+            {
+                ManagedVideoServerConfig config;
+                config.execution_mode = ExecutionMode::ManualStep;
+                config.api_execution.mode = options.api_mode;
+                config.api_execution.thread.cpu_affinity = options.api_cpu_affinity;
+                config.api_execution.thread.scheduling_priority = options.api_scheduling_priority;
+                config.webrtc.http_host = options.host;
+                config.webrtc.http_port = options.port;
+                config.webrtc.enable_http_api = true;
+                config.webrtc.enable_debug_api = options.enable_debug_api;
+                config.webrtc.execution_mode = ExecutionMode::ManualStep;
+                config.webrtc.http_poll_timeout_ms = 0;
+                config.http_poll_timeout_ms = 0;
+                for (const auto &spec : options.streams)
+                {
+                    StreamConfig stream;
+                    stream.stream_id = spec.stream_id;
+                    stream.label = spec.label;
+                    stream.width = spec.width;
+                    stream.height = spec.height;
+                    stream.nominal_fps = spec.fps;
+                    stream.input_pixel_format = spec.pixel_format;
+                    config.streams.push_back(std::move(stream));
+                    RawVideoPipelineConfig pipeline;
+                    pipeline.input_width = spec.width;
+                    pipeline.input_height = spec.height;
+                    pipeline.input_pixel_format = spec.pixel_format;
+                    pipeline.input_fps = spec.fps;
+                    pipeline.output_fps = spec.fps;
+                    config.default_raw_pipelines[spec.stream_id] = pipeline;
+                }
+                return config;
+            }
+
+            StepLatencySummary summarize_latency_samples(const SyntheticServerHarness::LatencyRecorder &recorder,
+                                                         double total_duration_seconds)
+            {
+                StepLatencySummary summary;
+                std::vector<double> samples;
+                {
+                    std::lock_guard<std::mutex> lock(recorder.mutex);
+                    summary.name = recorder.name;
+                    summary.stream_ids = recorder.stream_ids;
+                    summary.requested_steps = recorder.requested_steps;
+                    summary.successful_steps = recorder.successful_steps;
+                    summary.failed_steps = recorder.failed_steps;
+                    summary.deadline_misses = recorder.deadline_misses;
+                    samples = recorder.samples_ms;
+                }
+                if (total_duration_seconds > 0.0)
+                {
+                    summary.achieved_hz = static_cast<double>(summary.successful_steps) / total_duration_seconds;
+                }
+                if (samples.empty())
+                {
+                    return summary;
+                }
+                std::sort(samples.begin(), samples.end());
+                const auto percentile = [&samples](double p)
+                {
+                    const auto index = static_cast<size_t>(std::min<double>(
+                        static_cast<double>(samples.size() - 1),
+                        std::ceil((p / 100.0) * static_cast<double>(samples.size())) - 1.0));
+                    return samples[index];
+                };
+                summary.p50_ms = percentile(50.0);
+                summary.p95_ms = percentile(95.0);
+                summary.p99_ms = percentile(99.0);
+                summary.max_ms = samples.back();
+                return summary;
+            }
+
+            void record_step_latency(const std::shared_ptr<SyntheticServerHarness::LatencyRecorder> &recorder,
+                                     bool success,
+                                     double elapsed_ms,
+                                     bool deadline_missed)
+            {
+                if (!recorder)
+                {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(recorder->mutex);
+                recorder->requested_steps += 1;
+                if (success)
+                {
+                    recorder->successful_steps += 1;
+                }
+                else
+                {
+                    recorder->failed_steps += 1;
+                }
+                if (deadline_missed)
+                {
+                    recorder->deadline_misses += 1;
+                }
+                recorder->samples_ms.push_back(elapsed_ms);
+            }
+
             std::vector<VideoDisplayMode> display_modes()
             {
                 return {
@@ -387,6 +620,30 @@ namespace video_server
             {
                 out.open(path, std::ios::out | std::ios::trunc);
                 return out.is_open();
+            }
+
+            void write_step_latency_json(std::ostream &out, const StepLatencySummary &summary)
+            {
+                out << "{\"name\":\"" << json_escape(summary.name) << "\","
+                    << "\"stream_ids\":[";
+                for (size_t i = 0; i < summary.stream_ids.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        out << ',';
+                    }
+                    out << '"' << json_escape(summary.stream_ids[i]) << '"';
+                }
+                out << "],"
+                    << "\"requested_steps\":" << summary.requested_steps << ','
+                    << "\"successful_steps\":" << summary.successful_steps << ','
+                    << "\"failed_steps\":" << summary.failed_steps << ','
+                    << "\"deadline_misses\":" << summary.deadline_misses << ','
+                    << "\"achieved_hz\":" << std::fixed << std::setprecision(3) << summary.achieved_hz << ','
+                    << "\"p50_ms\":" << summary.p50_ms << ','
+                    << "\"p95_ms\":" << summary.p95_ms << ','
+                    << "\"p99_ms\":" << summary.p99_ms << ','
+                    << "\"max_ms\":" << summary.max_ms << "}";
             }
 
         } // namespace
@@ -527,7 +784,9 @@ namespace video_server
         bool MetricsCollector::write_json_report(const std::string &path,
                                                  double total_duration_seconds,
                                                  const std::vector<FailureRecord> &failures,
-                                                 const std::unordered_map<std::string, StreamChurnSummary> &churn_by_stream) const
+                                                 const std::unordered_map<std::string, StreamChurnSummary> &churn_by_stream,
+                                                 const StepLatencySummary &api_latency,
+                                                 const std::vector<StepLatencySummary> &stream_group_latencies) const
         {
             std::ofstream out;
             if (!open_output_file(path, out))
@@ -559,6 +818,18 @@ namespace video_server
                     out << ',';
                 }
                 out << '"' << json_escape(summary.streams_missing_config_churn[i]) << '"';
+            }
+            out << "]},\"latency\":{";
+            out << "\"api\":";
+            write_step_latency_json(out, api_latency);
+            out << ",\"stream_groups\":[";
+            for (size_t i = 0; i < stream_group_latencies.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    out << ',';
+                }
+                write_step_latency_json(out, stream_group_latencies[i]);
             }
             out << "]},";
             out << "\"streams\":[";
@@ -1042,33 +1313,9 @@ namespace video_server
             : config{spec.stream_id, spec.label, spec.width, spec.height, spec.fps, spec.pixel_format},
               generator(config) {}
 
-        RawVideoPipelineConfig SyntheticServerHarness::make_pipeline_config(const RunningStream &stream,
-                                                                            const StreamOutputConfig &output_config,
-                                                                            uint32_t width,
-                                                                            uint32_t height)
-        {
-            RawVideoPipelineConfig config;
-            config.input_width = width;
-            config.input_height = height;
-            config.input_pixel_format = VideoPixelFormat::RGB24;
-            config.input_fps = stream.config.nominal_fps;
-            if (output_config.output_fps > 0.0)
-            {
-                config.output_fps = output_config.output_fps;
-            }
-            return config;
-        }
-
         SyntheticServerHarness::SyntheticServerHarness(RunnerOptions options)
             : options_(std::move(options)),
-              server_([this]()
-                      {
-        WebRtcVideoServerConfig config;
-        config.http_host = options_.host;
-        config.http_port = options_.port;
-        config.enable_http_api = true;
-        config.enable_debug_api = options_.enable_debug_api;
-        return config; }()) {}
+              server_(CreateManagedVideoServer(make_managed_config(options_))) {}
 
         SyntheticServerHarness::~SyntheticServerHarness() { stop(); }
 
@@ -1086,77 +1333,120 @@ namespace video_server
             for (const auto &spec : options_.streams)
             {
                 streams_.push_back(std::make_unique<RunningStream>(spec));
-                if (!server_.register_stream(streams_.back()->config))
-                {
-                    if (error_message)
-                    {
-                        *error_message = "failed to register stream " + spec.stream_id;
-                    }
-                    return false;
-                }
+                streams_by_id_[spec.stream_id] = streams_.back().get();
             }
-            if (!server_.start())
+            if (!server_->start())
             {
                 if (error_message)
                 {
-                    *error_message = "failed to start embedded WebRTC server";
+                    *error_message = "failed to start embedded managed server";
                 }
                 return false;
             }
 
             stop_requested_ = false;
             background_error_.reset();
-            for (auto &stream : streams_)
+            api_latency_ = std::make_shared<LatencyRecorder>();
+            api_latency_->name = options_.api_mode == ManagedApiExecutionMode::ManualStep ? "api-manual" : "api-managed-thread";
+            const auto groups = options_.stream_groups.empty() ? default_stream_groups_for(options_.streams) : options_.stream_groups;
+            for (size_t group_index = 0; group_index < groups.size(); ++group_index)
             {
-                stream->frame_thread = std::thread([this, stream = stream.get()]()
+                const auto &stream_ids = groups[group_index];
+                auto handle = server_->register_streams(stream_ids);
+                if (!handle)
+                {
+                    if (error_message)
+                    {
+                        *error_message = "failed to register soak stream group";
+                    }
+                    stop();
+                    return false;
+                }
+                auto latency = std::make_shared<LatencyRecorder>();
+                latency->name = "stream-group-" + std::to_string(group_index);
+                latency->stream_ids = handle->stream_ids();
+                stream_groups_.push_back(std::move(handle));
+                stream_group_latency_.push_back(std::move(latency));
+            }
+
+            if (options_.api_mode == ManagedApiExecutionMode::ManualStep)
+            {
+                api_thread_ = std::thread([this]()
+                                          {
+                    try {
+                        const auto target_interval = std::chrono::milliseconds(1);
+                        while (!stop_requested_.load()) {
+                            const auto started_at = SteadyClock::now();
+                            const bool ok = server_->step_api();
+                            const auto finished_at = SteadyClock::now();
+                            const auto elapsed = finished_at - started_at;
+                            record_step_latency(api_latency_, ok,
+                                                std::chrono::duration<double, std::milli>(elapsed).count(),
+                                                elapsed > target_interval);
+                            if (!ok) {
+                                throw std::runtime_error("step_api failed");
+                            }
+                            std::this_thread::sleep_for(target_interval);
+                        }
+                    } catch (const std::exception &ex) {
+                        {
+                            std::lock_guard<std::mutex> lock(background_error_mutex_);
+                            background_error_ = std::string("api: ") + ex.what();
+                        }
+                        stop_requested_ = true;
+                    } });
+            }
+
+            for (size_t group_index = 0; group_index < stream_groups_.size(); ++group_index)
+            {
+                const auto group = stream_groups_[group_index];
+                const auto latency = stream_group_latency_[group_index];
+                stream_group_threads_.emplace_back([this, group, latency]()
                                                    {
-      try {
-        const auto frame_interval = std::chrono::duration<double>(1.0 / stream->config.nominal_fps);
-        while (!stop_requested_.load()) {
-          const auto raw_frame = stream->generator.next_frame();
-          if (!server_.push_frame(stream->config.stream_id, raw_frame)) {
-            throw std::runtime_error("failed to push synthetic frame");
-          }
-
-          const auto output_config = server_.get_stream_output_config(stream->config.stream_id);
-          if (!output_config.has_value()) {
-            throw std::runtime_error("missing output config");
-          }
-
-          RgbImage transformed;
-          if (!apply_display_transform(raw_frame, *output_config, transformed)) {
-            throw std::runtime_error("display transform failed");
-          }
-
-          if (!stream->pipeline || stream->pipeline_config_generation != output_config->config_generation) {
-            if (stream->pipeline) {
-              stream->pipeline->stop();
-              stream->pipeline.reset();
-            }
-            stream->pipeline_config = make_pipeline_config(*stream, *output_config, transformed.width, transformed.height);
-            stream->pipeline = make_raw_to_h264_pipeline_for_server(stream->config.stream_id, stream->pipeline_config, server_);
-            if (!stream->pipeline->start(&stream->pipeline_error)) {
-              throw std::runtime_error("failed to start raw-to-h264 pipeline: " + stream->pipeline_error);
-            }
-            stream->pipeline_config_generation = output_config->config_generation;
-          }
-
-          const VideoFrameView transformed_frame{
-              transformed.rgb.data(), transformed.width, transformed.height, transformed.width * 3u,
-              VideoPixelFormat::RGB24, raw_frame.timestamp_ns, raw_frame.frame_id};
-          if (!stream->pipeline->push_frame(transformed_frame, &stream->pipeline_error)) {
-            throw std::runtime_error("failed to push transformed frame: " + stream->pipeline_error);
-          }
-
-          std::this_thread::sleep_for(frame_interval);
-        }
-      } catch (const std::exception& ex) {
-        {
-          std::lock_guard<std::mutex> lock(background_error_mutex_);
-          background_error_ = stream->config.stream_id + ": " + ex.what();
-        }
-        stop_requested_ = true;
-      } });
+                    try {
+                        double fps = options_.stream_step_rate_hz;
+                        if (fps <= 0.0) {
+                            for (const auto &stream_id : group->stream_ids()) {
+                                const auto it = streams_by_id_.find(stream_id);
+                                if (it != streams_by_id_.end()) {
+                                    fps = std::max(fps, it->second->config.nominal_fps);
+                                }
+                            }
+                        }
+                        if (fps <= 0.0) {
+                            fps = 30.0;
+                        }
+                        const auto frame_interval = std::chrono::duration<double>(1.0 / fps);
+                        while (!stop_requested_.load()) {
+                            for (const auto &stream_id : group->stream_ids()) {
+                                const auto it = streams_by_id_.find(stream_id);
+                                if (it == streams_by_id_.end()) {
+                                    throw std::runtime_error("unknown stream in group: " + stream_id);
+                                }
+                                const auto raw_frame = it->second->generator.next_frame();
+                                if (!server_->push_frame(stream_id, raw_frame)) {
+                                    throw std::runtime_error("failed to push synthetic frame for " + stream_id);
+                                }
+                            }
+                            const auto started_at = SteadyClock::now();
+                            const bool ok = group->step_streams();
+                            const auto finished_at = SteadyClock::now();
+                            const auto elapsed = finished_at - started_at;
+                            record_step_latency(latency, ok,
+                                                std::chrono::duration<double, std::milli>(elapsed).count(),
+                                                elapsed > frame_interval);
+                            if (!ok) {
+                                throw std::runtime_error("step_streams failed");
+                            }
+                            std::this_thread::sleep_for(frame_interval);
+                        }
+                    } catch (const std::exception& ex) {
+                        {
+                            std::lock_guard<std::mutex> lock(background_error_mutex_);
+                            background_error_ = std::string("stream group: ") + ex.what();
+                        }
+                        stop_requested_ = true;
+                    } });
             }
             return true;
         }
@@ -1164,28 +1454,46 @@ namespace video_server
         void SyntheticServerHarness::stop()
         {
             stop_requested_ = true;
-            for (auto &stream : streams_)
+            if (api_thread_.joinable())
             {
-                if (stream->frame_thread.joinable())
+                api_thread_.join();
+            }
+            for (auto &thread : stream_group_threads_)
+            {
+                if (thread.joinable())
                 {
-                    stream->frame_thread.join();
+                    thread.join();
                 }
             }
-            for (auto &stream : streams_)
+            stream_group_threads_.clear();
+            stream_groups_.clear();
+            if (server_)
             {
-                if (stream->pipeline)
-                {
-                    stream->pipeline->stop();
-                    stream->pipeline.reset();
-                }
+                server_->stop();
             }
-            server_.stop();
         }
 
         std::optional<std::string> SyntheticServerHarness::background_error() const
         {
             std::lock_guard<std::mutex> lock(background_error_mutex_);
             return background_error_;
+        }
+
+        std::pair<StepLatencySummary, std::vector<StepLatencySummary>> SyntheticServerHarness::latency_summary(
+            double total_duration_seconds) const
+        {
+            StepLatencySummary api;
+            if (api_latency_)
+            {
+                api = summarize_latency_samples(*api_latency_, total_duration_seconds);
+            }
+            std::vector<StepLatencySummary> groups;
+            groups.reserve(stream_group_latency_.size());
+            for (const auto &recorder : stream_group_latency_)
+            {
+                groups.push_back(summarize_latency_samples(*recorder, total_duration_seconds));
+            }
+            return {std::move(api), std::move(groups)};
         }
 
         SoakRunner::SoakRunner(RunnerOptions options)
@@ -1438,6 +1746,7 @@ namespace video_server
 
             const double total_duration_seconds =
                 std::chrono::duration_cast<std::chrono::duration<double>>(SteadyClock::now() - run_started_at).count();
+            const auto latency = harness_.latency_summary(total_duration_seconds);
             if (options_.write_json_report)
             {
                 std::unordered_map<std::string, StreamChurnSummary> churn_by_stream;
@@ -1450,7 +1759,8 @@ namespace video_server
                         state.observed_config_update_count > 0,
                     };
                 }
-                metrics_.write_json_report(options_.json_report_path, total_duration_seconds, failures_, churn_by_stream);
+                metrics_.write_json_report(options_.json_report_path, total_duration_seconds, failures_, churn_by_stream,
+                                           latency.first, latency.second);
             }
             if (options_.write_csv_report)
             {
@@ -1466,7 +1776,10 @@ namespace video_server
                     state.observed_config_update_count > 0,
                 };
             }
-            return metrics_.build_summary(total_duration_seconds, failures_, churn_by_stream);
+            auto summary = metrics_.build_summary(total_duration_seconds, failures_, churn_by_stream);
+            summary.api_latency = latency.first;
+            summary.stream_group_latencies = latency.second;
+            return summary;
         }
 
         std::optional<RunnerOptions> parse_runner_options(int argc, char **argv, std::string *error_message)
@@ -1513,6 +1826,61 @@ namespace video_server
                     }
                     options.port = *parsed;
                 }
+                else if (arg == "--api-mode")
+                {
+                    const char *value = require_value("--api-mode");
+                    if (!value)
+                        return std::nullopt;
+                    const std::string mode = value;
+                    if (mode == "manual" || mode == "manual_step")
+                    {
+                        options.api_mode = ManagedApiExecutionMode::ManualStep;
+                    }
+                    else if (mode == "managed" || mode == "managed_thread")
+                    {
+                        options.api_mode = ManagedApiExecutionMode::ManagedThread;
+                    }
+                    else
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "invalid --api-mode value";
+                        }
+                        return std::nullopt;
+                    }
+                }
+                else if (arg == "--api-cpu")
+                {
+                    const char *value = require_value("--api-cpu");
+                    if (!value)
+                        return std::nullopt;
+                    const auto parsed = parse_int_value(value);
+                    if (!parsed.has_value() || *parsed < 0)
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "invalid --api-cpu value";
+                        }
+                        return std::nullopt;
+                    }
+                    options.api_cpu_affinity = {*parsed};
+                }
+                else if (arg == "--api-priority")
+                {
+                    const char *value = require_value("--api-priority");
+                    if (!value)
+                        return std::nullopt;
+                    const auto parsed = parse_int_value(value);
+                    if (!parsed.has_value())
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "invalid --api-priority value";
+                        }
+                        return std::nullopt;
+                    }
+                    options.api_scheduling_priority = *parsed;
+                }
                 else if (arg == "--duration")
                 {
                     const char *value = require_value("--duration");
@@ -1528,6 +1896,42 @@ namespace video_server
                         return std::nullopt;
                     }
                     options.duration = std::chrono::duration_cast<std::chrono::seconds>(*duration);
+                }
+                else if (arg == "--duration-sec")
+                {
+                    const char *value = require_value("--duration-sec");
+                    if (!value)
+                        return std::nullopt;
+                    const auto parsed = parse_positive_double(value);
+                    if (!parsed.has_value())
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "invalid --duration-sec value";
+                        }
+                        return std::nullopt;
+                    }
+                    options.duration = std::chrono::seconds(static_cast<int64_t>(*parsed));
+                }
+                else if (arg == "--rate-hz")
+                {
+                    const char *value = require_value("--rate-hz");
+                    if (!value)
+                        return std::nullopt;
+                    const auto parsed = parse_positive_double(value);
+                    if (!parsed.has_value())
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "invalid --rate-hz value";
+                        }
+                        return std::nullopt;
+                    }
+                    options.stream_step_rate_hz = *parsed;
+                    for (auto &stream : options.streams)
+                    {
+                        stream.fps = *parsed;
+                    }
                 }
                 else if (arg == "--poll-interval")
                 {
@@ -1685,6 +2089,36 @@ namespace video_server
                     spec.fps = std::stod(parts[3]);
                     options.streams.push_back(spec);
                 }
+                else if (arg == "--streams")
+                {
+                    const char *value = require_value("--streams");
+                    if (!value)
+                        return std::nullopt;
+                    const auto parsed = parse_size_t_value(value);
+                    if (!parsed.has_value() || *parsed == 0)
+                    {
+                        if (error_message)
+                        {
+                            *error_message = "invalid --streams value";
+                        }
+                        return std::nullopt;
+                    }
+                    const double fps = options.stream_step_rate_hz > 0.0 ? options.stream_step_rate_hz : 30.0;
+                    options.streams = generated_stream_specs(*parsed, fps);
+                    options.stream_groups.clear();
+                }
+                else if (arg == "--stream-groups")
+                {
+                    const char *value = require_value("--stream-groups");
+                    if (!value)
+                        return std::nullopt;
+                    const auto parsed = parse_stream_groups_spec(value, options.streams, error_message);
+                    if (!parsed.has_value())
+                    {
+                        return std::nullopt;
+                    }
+                    options.stream_groups = *parsed;
+                }
                 else if (arg == "--clear-default-streams")
                 {
                     options.streams.clear();
@@ -1719,8 +2153,10 @@ namespace video_server
                     {
                         *error_message =
                             "Usage: video_server_soak_runner [--duration 10m] [--poll-interval 1s] [--summary-interval 5s] "
-                            "[--reconnect-interval 25s] [--config-interval 12s] [--stream id:width:height:fps[:label]] "
-                            "[--clear-default-streams] [--json-report PATH] [--csv-report PATH]";
+                            "[--api-mode manual|managed] [--api-cpu CPU] [--api-priority PRIORITY] [--rate-hz HZ] "
+                            "[--streams COUNT] [--stream-groups 0,1:2,3] [--reconnect-interval 25s] "
+                            "[--config-interval 12s] [--stream id:width:height:fps[:label]] [--clear-default-streams] "
+                            "[--json-report PATH] [--csv-report PATH]";
                     }
                     return std::nullopt;
                 }
@@ -1745,6 +2181,19 @@ namespace video_server
                     *error_message = "at least one stream must be configured";
                 }
                 return std::nullopt;
+            }
+            if (options.api_mode != ManagedApiExecutionMode::ManagedThread &&
+                (!options.api_cpu_affinity.empty() || options.api_scheduling_priority.has_value()))
+            {
+                if (error_message)
+                {
+                    *error_message = "--api-cpu and --api-priority require --api-mode managed";
+                }
+                return std::nullopt;
+            }
+            if (options.stream_groups.empty())
+            {
+                options.stream_groups = default_stream_groups_for(options.streams);
             }
             return options;
         }

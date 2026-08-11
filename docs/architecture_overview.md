@@ -6,12 +6,10 @@ This project has a simple top-level shape:
 raw frames or H.264 access units
             |
             v
-  Managed step / execution policy
+  Managed API progression + stream groups
             |
-            +--> HTTP/WebRTC signaling pump
-            +--> output FPS cadence decision
-            +--> display transform
-            +--> H.264 encode
+            +--> step_api(): HTTP/WebRTC signaling pump and encoded delivery
+            +--> step_streams(): output FPS cadence, display transform, H.264 encode
             v
       VideoServerCore
             |
@@ -32,18 +30,21 @@ raw frames or H.264 access units
 
 ### Managed raw frame ingestion
 
-The preferred path is a managed server with an execution policy. Producers push `VideoFrameView` frames ad hoc, and `step()` progresses the server. In `ManualStep`, no internal worker thread is required.
+The preferred path is a managed server with explicit API and stream progression. Producers push `VideoFrameView` frames ad hoc. The application then either calls `step_api()` from its own API thread or configures one managed API thread, and calls `step_streams()` on exclusive stream-group handles from caller-owned stream threads.
+
+The legacy `step()` method remains as a compatibility wrapper for single-loop callers.
 
 ### Filter and output stage
 
-During `step()`, the managed server:
+During `step_streams()`, the managed server:
 
-- services pending HTTP/signaling work
 - checks per-stream output timing
 - picks the latest pending raw frame for ready streams
 - applies the current `StreamOutputConfig`
 - publishes the transformed RGB result as the canonical latest-frame snapshot
 - encodes H.264 from that same transformed result
+
+Encoded output is stored in a bounded per-stream handoff. `step_api()` drains that handoff and performs the existing WebRTC sender delivery.
 
 This keeps debug/latest-frame output aligned with encoded output.
 

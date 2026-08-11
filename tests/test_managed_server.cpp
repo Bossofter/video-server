@@ -1,9 +1,14 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <atomic>
+#include <chrono>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "video_server/managed_video_server.h"
@@ -19,6 +24,19 @@ namespace
     {
         return video_server::VideoFrameView{
             pixels.data(), width, height, width, video_server::VideoPixelFormat::GRAY8, timestamp_ns, frame_id};
+    }
+
+    bool wait_until(const std::function<bool()> &predicate, int timeout_ms = 1000)
+    {
+        for (int waited = 0; waited < timeout_ms; waited += 10)
+        {
+            if (predicate())
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return predicate();
     }
 
 } // namespace
@@ -103,6 +121,303 @@ TEST(ManagedVideoServerTest, ManualStepAppliesOutputFpsBeforeEncodeWork)
     server->stop();
 }
 
+TEST(ManagedVideoServerTest, DebugSnapshotReportsRequestedAndActiveEncoder)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+    video_server::RawVideoPipelineConfig pipeline_config;
+    pipeline_config.encoder = video_server::RawH264Encoder::Automatic;
+    pipeline_config.hardware_device = "/dev/dri/video-server-test-missing-render-node";
+    config.default_raw_pipelines.emplace("default", pipeline_config);
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+
+    std::vector<uint8_t> frame(32u * 32u, 19u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 32, 32, 1000, 1)));
+    ASSERT_TRUE(server->step());
+
+    const auto snapshot = server->get_debug_snapshot();
+    ASSERT_EQ(snapshot.streams.size(), 1u);
+    EXPECT_EQ(snapshot.streams.front().requested_encoder, "Automatic");
+    EXPECT_FALSE(snapshot.streams.front().active_encoder.empty());
+    EXPECT_FALSE(snapshot.streams.front().hardware_accelerated);
+    EXPECT_TRUE(snapshot.streams.front().hardware_device.empty());
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, RegistersExclusiveStreamGroupsAndReleasesOnDestroy)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+    config.streams.push_back({"bravo", "Bravo", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+
+    EXPECT_EQ(server->register_streams({}), nullptr);
+    EXPECT_EQ(server->register_streams({"missing"}), nullptr);
+    EXPECT_EQ(server->register_streams({"alpha", "alpha"}), nullptr);
+
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+    EXPECT_EQ(group->stream_ids(), std::vector<std::string>{"alpha"});
+    EXPECT_EQ(server->register_streams({"alpha"}), nullptr);
+    EXPECT_EQ(server->register_streams({"bravo", "alpha"}), nullptr);
+
+    group.reset();
+    auto replacement = server->register_streams({"alpha", "bravo"});
+    EXPECT_NE(replacement, nullptr);
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, RejectsRemoveWhileStreamGroupOwnsStreamAndAllowsAfterRelease)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+    EXPECT_FALSE(server->remove_stream("alpha"));
+    group.reset();
+    EXPECT_TRUE(server->remove_stream("alpha"));
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, StepStreamsAdvancesOnlyOwnedStreamsAndApiDrainsEncodedHandoff)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+    config.streams.push_back({"bravo", "Bravo", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+    auto alpha_group = server->register_streams({"alpha"});
+    ASSERT_NE(alpha_group, nullptr);
+
+    std::vector<uint8_t> alpha_frame(32u * 32u, 31u);
+    std::vector<uint8_t> bravo_frame(32u * 32u, 41u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(alpha_frame, 32, 32, 1000, 1)));
+    ASSERT_TRUE(server->push_frame("bravo", make_gray_frame_view(bravo_frame, 32, 32, 1000, 1)));
+
+    ASSERT_TRUE(alpha_group->step_streams());
+
+    auto alpha = server->get_stream_info("alpha");
+    auto bravo = server->get_stream_info("bravo");
+    ASSERT_TRUE(alpha.has_value());
+    ASSERT_TRUE(bravo.has_value());
+    EXPECT_EQ(alpha->frames_transformed, 1u);
+    EXPECT_EQ(bravo->frames_transformed, 0u);
+    EXPECT_EQ(alpha->access_units_received, 0u);
+
+    ASSERT_TRUE(server->step_api());
+    alpha = server->get_stream_info("alpha");
+    ASSERT_TRUE(alpha.has_value());
+    EXPECT_GT(alpha->access_units_received, 0u);
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, SeparateStreamGroupsCanStepSequentially)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+    config.streams.push_back({"bravo", "Bravo", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+    auto alpha_group = server->register_streams({"alpha"});
+    auto bravo_group = server->register_streams({"bravo"});
+    ASSERT_NE(alpha_group, nullptr);
+    ASSERT_NE(bravo_group, nullptr);
+
+    std::vector<uint8_t> alpha_frame(32u * 32u, 7u);
+    std::vector<uint8_t> bravo_frame(32u * 32u, 9u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(alpha_frame, 32, 32, 1000, 1)));
+    ASSERT_TRUE(server->push_frame("bravo", make_gray_frame_view(bravo_frame, 32, 32, 1000, 1)));
+    ASSERT_TRUE(alpha_group->step_streams());
+    ASSERT_TRUE(bravo_group->step_streams());
+    ASSERT_TRUE(server->step_api());
+
+    const auto alpha = server->get_stream_info("alpha");
+    const auto bravo = server->get_stream_info("bravo");
+    ASSERT_TRUE(alpha.has_value());
+    ASSERT_TRUE(bravo.has_value());
+    EXPECT_GT(alpha->access_units_received, 0u);
+    EXPECT_GT(bravo->access_units_received, 0u);
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, EncodedHandoffIsBoundedWhenApiProgressionFallsBehind)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+
+    for (uint64_t i = 0; i < 12; ++i)
+    {
+        std::vector<uint8_t> frame(32u * 32u, static_cast<uint8_t>(i + 1));
+        ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 32, 32, 1000 + i, i + 1)));
+        ASSERT_TRUE(group->step_streams());
+    }
+
+    auto before_api = server->get_stream_info("alpha");
+    ASSERT_TRUE(before_api.has_value());
+    EXPECT_EQ(before_api->frames_transformed, 12u);
+    EXPECT_EQ(before_api->access_units_received, 0u);
+
+    ASSERT_TRUE(server->step_api());
+    const auto after_api = server->get_stream_info("alpha");
+    ASSERT_TRUE(after_api.has_value());
+    EXPECT_GT(after_api->access_units_received, 0u);
+    EXPECT_LE(after_api->access_units_received, 4u);
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, StepApiDoesNotEncodePendingRawFrames)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+
+    std::vector<uint8_t> frame(32u * 32u, 11u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 32, 32, 1000, 1)));
+    ASSERT_TRUE(server->step_api());
+
+    const auto info = server->get_stream_info("alpha");
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->frames_transformed, 0u);
+    EXPECT_EQ(info->access_units_received, 0u);
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, StepApiCanRunConcurrentlyWithStreamGroup)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = true;
+    config.webrtc.http_port = 0;
+    config.webrtc.http_poll_timeout_ms = 50;
+    config.http_poll_timeout_ms = 50;
+    config.webrtc.max_http_connections_per_step = 1;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+
+    std::vector<uint8_t> frame(32u * 32u, 17u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 32, 32, 1000, 1)));
+
+    auto api_step = std::async(std::launch::async, [&server]()
+                               { return server->step_api(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_TRUE(group->step_streams());
+    EXPECT_TRUE(api_step.get());
+
+    ASSERT_TRUE(server->step_api());
+    const auto info = server->get_stream_info("alpha");
+    ASSERT_TRUE(info.has_value());
+    EXPECT_GT(info->access_units_received, 0u);
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, ManagedApiThreadRejectsManualStepApi)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.api_execution.mode = video_server::ManagedApiExecutionMode::ManagedThread;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+    EXPECT_FALSE(server->step_api());
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, ManagedApiThreadDrainsEncodedHandoffWithoutManualStepApi)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.api_execution.mode = video_server::ManagedApiExecutionMode::ManagedThread;
+    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+
+    std::vector<uint8_t> frame(32u * 32u, 13u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 32, 32, 1000, 1)));
+    ASSERT_TRUE(group->step_streams());
+
+    EXPECT_TRUE(wait_until([&server]()
+                           {
+        const auto info = server->get_stream_info("alpha");
+        return info.has_value() && info->access_units_received > 0; }));
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, ManagedApiThreadRejectsInvalidAffinity)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = false;
+    config.api_execution.mode = video_server::ManagedApiExecutionMode::ManagedThread;
+    config.api_execution.thread.cpu_affinity.push_back(-1);
+    config.streams.push_back({"alpha", "Alpha", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    EXPECT_FALSE(server->start());
+}
+
+TEST(ManagedVideoServerTest, ConcurrentStepApiCallsAreRejected)
+{
+    video_server::ManagedVideoServerConfig config;
+    config.webrtc.enable_http_api = true;
+    config.webrtc.http_port = 0;
+    config.webrtc.http_poll_timeout_ms = 50;
+    config.http_poll_timeout_ms = 50;
+    config.webrtc.max_http_connections_per_step = 1;
+    config.streams.push_back({"alpha", "Alpha", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+
+    auto server = video_server::CreateManagedVideoServer(config);
+    ASSERT_TRUE(server->start());
+
+    auto first = std::async(std::launch::async, [&server]()
+                            { return server->step_api(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    const bool second = server->step_api();
+    const bool first_result = first.get();
+
+    EXPECT_TRUE(first_result);
+    EXPECT_FALSE(second);
+
+    server->stop();
+}
+
 TEST(ManagedVideoServerTest, MaxStreamsPerStepCountsOnlyProgressedStreams)
 {
     video_server::ManagedVideoServerConfig config;
@@ -180,6 +495,9 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     {
         std::ofstream out(path);
         out << "execution_mode = \"manual_step\"\n";
+        out << "api_execution = \"managed_thread\"\n";
+        out << "api_cpu_affinity = [0, 1]\n";
+        out << "api_scheduling_priority = 2\n";
         out << "http_poll_timeout_ms = 3\n";
         out << "max_streams_per_step = 4\n";
         out << "\n[webrtc]\n";
@@ -216,13 +534,20 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
         out << "input_pixel_format = \"GRAY8\"\n";
         out << "max_subscribers = 4\n";
         out << "\n[default_raw_pipelines.default]\n";
-        out << "encoder = \"libx264\"\n";
+        out << "encoder = \"vaapi\"\n";
+        out << "hardware_device = \"/dev/dri/renderD129\"\n";
         out << "encoder_preset = \"veryfast\"\n";
         out << "encoder_crf = 18\n";
     }
 
     const auto config = video_server::load_managed_video_server_config(path);
     EXPECT_EQ(config.execution_mode, video_server::ExecutionMode::ManualStep);
+    EXPECT_EQ(config.api_execution.mode, video_server::ManagedApiExecutionMode::ManagedThread);
+    ASSERT_EQ(config.api_execution.thread.cpu_affinity.size(), 2u);
+    EXPECT_EQ(config.api_execution.thread.cpu_affinity[0], 0);
+    EXPECT_EQ(config.api_execution.thread.cpu_affinity[1], 1);
+    ASSERT_TRUE(config.api_execution.thread.scheduling_priority.has_value());
+    EXPECT_EQ(*config.api_execution.thread.scheduling_priority, 2);
     EXPECT_EQ(config.http_poll_timeout_ms, 3u);
     EXPECT_EQ(config.max_streams_per_step, 4u);
     EXPECT_EQ(config.webrtc.execution_mode, video_server::ExecutionMode::ManualStep);
@@ -253,7 +578,8 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     EXPECT_EQ(config.streams.front().input_pixel_format, video_server::VideoPixelFormat::GRAY8);
     EXPECT_EQ(config.streams.front().max_subscribers, 4u);
     ASSERT_TRUE(config.default_raw_pipelines.find("default") != config.default_raw_pipelines.end());
-    EXPECT_EQ(config.default_raw_pipelines.at("default").encoder, video_server::RawH264Encoder::LibX264);
+    EXPECT_EQ(config.default_raw_pipelines.at("default").encoder, video_server::RawH264Encoder::Vaapi);
+    EXPECT_EQ(config.default_raw_pipelines.at("default").hardware_device, "/dev/dri/renderD129");
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_preset, "veryfast");
     ASSERT_TRUE(config.default_raw_pipelines.at("default").encoder_crf.has_value());
     EXPECT_EQ(*config.default_raw_pipelines.at("default").encoder_crf, 18u);

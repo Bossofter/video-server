@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 #include "../src/testing/soak_test_framework.h"
 
@@ -43,6 +44,17 @@ namespace
         return snapshot;
     }
 
+    std::optional<RunnerOptions> parse_options(std::vector<std::string> args, std::string *error)
+    {
+        std::vector<char *> argv;
+        argv.reserve(args.size());
+        for (auto &arg : args)
+        {
+            argv.push_back(arg.data());
+        }
+        return video_server::soak::parse_runner_options(static_cast<int>(argv.size()), argv.data(), error);
+    }
+
 } // namespace
 
 TEST(SoakFrameworkTest, ParseDurationSupportsSecondsMinutesHoursAndMillis)
@@ -73,6 +85,49 @@ TEST(SoakFrameworkTest, SessionHttpParserExtractsExpectedFields)
     EXPECT_EQ(snapshot.encoded_sender_packets_sent_after_track_open, 21u);
     EXPECT_TRUE(snapshot.encoded_sender_video_track_open);
     EXPECT_EQ(snapshot.encoded_sender_state, "sending-h264-rtp");
+}
+
+TEST(SoakFrameworkTest, ParsesManagedApiAndGeneratedStreamGroups)
+{
+    std::string error;
+    auto options = parse_options({"video_server_soak_runner",
+                                  "--api-mode", "managed",
+                                  "--api-cpu", "2",
+                                  "--api-priority", "10",
+                                  "--streams", "10",
+                                  "--stream-groups", "0,1,2,3,4:5,6,7,8,9",
+                                  "--rate-hz", "120",
+                                  "--duration-sec", "3"},
+                                 &error);
+    ASSERT_TRUE(options.has_value()) << error;
+    EXPECT_EQ(options->api_mode, video_server::ManagedApiExecutionMode::ManagedThread);
+    ASSERT_EQ(options->api_cpu_affinity.size(), 1u);
+    EXPECT_EQ(options->api_cpu_affinity.front(), 2);
+    ASSERT_TRUE(options->api_scheduling_priority.has_value());
+    EXPECT_EQ(*options->api_scheduling_priority, 10);
+    ASSERT_EQ(options->streams.size(), 10u);
+    EXPECT_EQ(options->streams[0].stream_id, "stream0");
+    EXPECT_DOUBLE_EQ(options->streams[0].fps, 120.0);
+    ASSERT_EQ(options->stream_groups.size(), 2u);
+    EXPECT_EQ(options->stream_groups[0], (std::vector<std::string>{"stream0", "stream1", "stream2", "stream3", "stream4"}));
+    EXPECT_EQ(options->stream_groups[1], (std::vector<std::string>{"stream5", "stream6", "stream7", "stream8", "stream9"}));
+    EXPECT_EQ(options->duration, std::chrono::seconds(3));
+}
+
+TEST(SoakFrameworkTest, RejectsApiPlacementInManualMode)
+{
+    std::string error;
+    auto options = parse_options({"video_server_soak_runner", "--api-mode", "manual", "--api-cpu", "2"}, &error);
+    EXPECT_FALSE(options.has_value());
+    EXPECT_NE(error.find("require --api-mode managed"), std::string::npos);
+}
+
+TEST(SoakFrameworkTest, RejectsDuplicateStreamGroupMembers)
+{
+    std::string error;
+    auto options = parse_options({"video_server_soak_runner", "--streams", "2", "--stream-groups", "0,1:1"}, &error);
+    EXPECT_FALSE(options.has_value());
+    EXPECT_NE(error.find("duplicate stream"), std::string::npos);
 }
 
 TEST(SoakFrameworkTest, MetricsCollectorBuildsPerStreamSummary)
@@ -167,7 +222,21 @@ TEST(SoakFrameworkTest, JsonReportIncludesChurnCountsAndCoverageFlags)
     };
 
     const auto report_path = std::filesystem::temp_directory_path() / "video_server_soak_report_test.json";
-    ASSERT_TRUE(collector.write_json_report(report_path.string(), 5.0, {}, churn_by_stream));
+    video_server::soak::StepLatencySummary api_latency;
+    api_latency.name = "api-manual";
+    api_latency.requested_steps = 10;
+    api_latency.successful_steps = 10;
+    api_latency.p95_ms = 1.5;
+    video_server::soak::StepLatencySummary group_latency;
+    group_latency.name = "stream-group-0";
+    group_latency.stream_ids = {"alpha", "bravo"};
+    group_latency.requested_steps = 20;
+    group_latency.successful_steps = 19;
+    group_latency.failed_steps = 1;
+    group_latency.deadline_misses = 2;
+    group_latency.p99_ms = 4.5;
+    ASSERT_TRUE(collector.write_json_report(report_path.string(), 5.0, {}, churn_by_stream,
+                                            api_latency, {group_latency}));
 
     std::ifstream input(report_path);
     ASSERT_TRUE(input.is_open());
@@ -185,6 +254,11 @@ TEST(SoakFrameworkTest, JsonReportIncludesChurnCountsAndCoverageFlags)
     EXPECT_NE(json.find("\"config_churn_observed\":true"), std::string::npos);
     EXPECT_NE(json.find("\"final_session_generation\":2"), std::string::npos);
     EXPECT_NE(json.find("\"final_config_generation\":3"), std::string::npos);
+    EXPECT_NE(json.find("\"latency\""), std::string::npos);
+    EXPECT_NE(json.find("\"name\":\"api-manual\""), std::string::npos);
+    EXPECT_NE(json.find("\"name\":\"stream-group-0\""), std::string::npos);
+    EXPECT_NE(json.find("\"deadline_misses\":2"), std::string::npos);
+    EXPECT_NE(json.find("\"p99_ms\":4.500"), std::string::npos);
 
     std::filesystem::remove(report_path);
 }

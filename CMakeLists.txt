@@ -5,6 +5,7 @@ option(ENABLE_VIDEO_SERVER "Build core video server library" ON)
 option(ENABLE_WEBRTC_BACKEND "Build WebRTC backend" ON)
 option(BUILD_TESTING "Build tests" ON)
 option(VIDEO_SERVER_BUILD_PACKAGE_TESTS "Build installed-package consumer smoke tests" ON)
+option(VIDEO_SERVER_ENABLE_VAAPI "Enable VA-API hardware H264 encoder support" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +63,11 @@ if(ENABLE_VIDEO_SERVER)
     PUBLIC
       "$<BUILD_INTERFACE:video_server_ffmpeg>"
       "$<INSTALL_INTERFACE:video_server::ffmpeg>"
+  )
+
+  target_compile_definitions(video_server_core
+    PRIVATE
+      VIDEO_SERVER_ENABLE_VAAPI=$<BOOL:${VIDEO_SERVER_ENABLE_VAAPI}>
   )
 
   install(TARGETS video_server_core

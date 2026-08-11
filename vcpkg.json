@@ -7,7 +7,8 @@
         {
             "name": "ffmpeg",
             "features": [
-                "openh264"
+                "openh264",
+                "vaapi"
             ]
         },
         {
@@ -21,5 +22,20 @@
         "libsrtp",
         "spdlog",
         "tomlplusplus"
-    ]
+    ],
+    "features": {
+        "vaapi": {
+            "description": "Enable VA-API hardware H264 encoding support on Linux",
+            "supports": "linux",
+            "dependencies": [
+                {
+                    "name": "ffmpeg",
+                    "features": [
+                        "vaapi"
+                    ],
+                    "platform": "linux"
+                }
+            ]
+        }
+    }
 }

@@ -50,23 +50,107 @@ Relevant headers:
 
 ## Preferred Integration Path
 
-The preferred producer-facing path is now:
+The preferred producer-facing path for low-latency or multi-core use is now:
 
 1. Load a `ManagedVideoServerConfig` from TOML.
 2. Create an `IManagedVideoServer`.
 3. Start it.
 4. Push raw frames ad hoc with `push_frame(...)`.
-5. Call `step()` from your own loop.
+5. Register one or more exclusive stream groups with `register_streams(...)`.
+6. Progress API work with `step_api()`.
+7. Progress stream work with each group's `step_streams()`.
 
-`step()` owns:
+`step_api()` owns:
 
 - stepped HTTP/WebRTC signaling progress
+- connection and subscriber lifecycle
+- delivery of encoded H.264 units into the WebRTC fanout path
+
+`step_streams()` owns only the streams registered to that handle:
+
 - per-stream output FPS cadence decisions
 - transform/filter application
 - raw-to-H.264 encode
-- forwarding one encoded output stream into the WebRTC fanout path for all active recipients
+- bounded encoded-output handoff to the API path
 
-When `max_streams_per_step` is set, it limits streams that were actually progressed during that call to `step()`. Idle or not-due streams do not consume the budget.
+The older `step()` method remains as a compatibility wrapper. When no stream groups are registered, it performs API progression, stream progression for unregistered streams, then API delivery again so existing single-loop callers still see encoded output after one call. Once a stream belongs to a stream group, only that group can advance it.
+
+When `max_streams_per_step` is set, it limits streams that were actually progressed by the compatibility `step()` wrapper. Idle or not-due streams do not consume the budget.
+
+Stream group rules:
+
+- a stream can belong to only one group at a time
+- registration is atomic and rejects unknown streams, duplicate ids, in-use streams, and empty requests
+- destroying the returned group handle releases its streams
+- a stream cannot be removed while a group handle owns it
+- one group handle must not be stepped concurrently from two threads
+- different group handles may be stepped concurrently
+- all stream work runs on the thread calling `step_streams()`
+
+The application owns stream-thread placement, CPU affinity, cadence, and grouping. The library does not create stream worker pools or assign streams to cores.
+
+## Split-Step Example
+
+```cpp
+auto server = video_server::CreateManagedVideoServer("video_server.toml");
+server->start();
+
+auto group_a = server->register_streams({"camera-1"});
+auto group_b = server->register_streams({"camera-2"});
+
+std::thread api_thread([&] {
+    while (running) {
+        server->step_api();
+    }
+});
+
+std::thread stream_thread_a([&] {
+    while (running) {
+        group_a->step_streams();
+    }
+});
+
+std::thread stream_thread_b([&] {
+    while (running) {
+        group_b->step_streams();
+    }
+});
+```
+
+To step multiple groups from one application thread, call them sequentially:
+
+```cpp
+while (running) {
+    group_a->step_streams();
+    group_b->step_streams();
+}
+```
+
+## Managed API Thread
+
+If you want the library to own API progression, configure:
+
+```cpp
+video_server::ManagedVideoServerConfig config;
+config.api_execution.mode = video_server::ManagedApiExecutionMode::ManagedThread;
+config.api_execution.thread.cpu_affinity = {2};
+config.api_execution.thread.scheduling_priority = 10;
+```
+
+In managed API thread mode:
+
+- startup creates one API progression thread
+- manual `step_api()` calls are rejected
+- stream work still requires caller-owned stream group stepping
+- requested affinity or scheduling priority must be applied successfully or startup fails
+
+TOML equivalents:
+
+```toml
+api_execution = "managed_thread"
+api_cpu_affinity = [2]
+api_scheduling_priority = 10
+```
 
 ## Minimal Example
 
@@ -77,7 +161,7 @@ When `max_streams_per_step` is set, it limits streams that were actually progres
 auto server = video_server::CreateManagedVideoServer("video_server.toml");
 server->start();
 
-// In your frame loop:
+// In a simple compatibility loop:
 video_server::VideoFrameView frame{
     rgb_bytes,
     1280,
@@ -96,6 +180,7 @@ server->step();
 
 ```toml
 execution_mode = "manual_step"
+api_execution = "manual_step"
 http_poll_timeout_ms = 5
 
 [webrtc]
@@ -119,12 +204,79 @@ encoder_crf = 23
 
 Notes:
 
-- `ManagedVideoServerConfig.execution_mode` controls the outer managed policy: `manual_step`, `inline_on_push`, or `worker_thread`
+- `ManagedVideoServerConfig.execution_mode` is retained for compatibility with the older combined `step()` path
+- `api_execution` controls API progression: `manual_step` or `managed_thread`
 - `webrtc.execution_mode` must stay `manual_step` in the managed path because the managed server owns HTTP pumping explicitly
 - `http_poll_timeout_ms` is mirrored into `webrtc.http_poll_timeout_ms`; if both are supplied they must match
 - the managed TOML loader supports the full meaningful `WebRtcVideoServerConfig` HTTP/security/rate-limit surface
 - `max_subscribers` defaults to `1`, which preserves the old single-viewer behavior unless you opt into fanout
 - `encoder_crf` is forwarded to libx264 when available; lower values improve image quality at higher bitrate/CPU cost, and valid values are `0..51`
+
+## H.264 Encoder Selection
+
+Raw pipelines support these encoder values:
+
+- `automatic`: prefers VA-API hardware H.264 when compiled in and usable at runtime, then falls back to the existing software selection
+- `libx264`: software H.264 through FFmpeg/libav's libx264 wrapper
+- `libopenh264`: software H.264 through FFmpeg/libav's OpenH264 wrapper
+- `vaapi`: Linux VA-API hardware H.264 through FFmpeg/libav's `h264_vaapi` encoder
+
+VA-API is for Linux hardware media engines exposed through the VA-API stack, including AMD GPUs/APUs using VCN/VCE and Intel integrated graphics/media engines. A CPU model alone does not imply VA-API H.264 encode support; the host needs a usable GPU/media engine, driver, render node permissions, and an FFmpeg/libav build with `h264_vaapi`.
+
+Example explicit hardware config:
+
+```toml
+[default_raw_pipelines.default]
+encoder = "vaapi"
+hardware_device = "/dev/dri/renderD128"
+```
+
+If `hardware_device` is omitted, the backend uses `/dev/dri/renderD128`. Render nodes (`/dev/dri/renderD*`) are preferred over card nodes.
+
+Selection behavior:
+
+- `automatic` logs why VA-API was unavailable and continues with software
+- explicit `vaapi` fails startup if `VIDEO_SERVER_ENABLE_VAAPI=OFF`, if `h264_vaapi` is missing from linked libavcodec, or if the device/frames context cannot be initialized
+- explicit `libx264` and `libopenh264` preserve the existing software-only behavior
+
+The VA-API path keeps the same in-process libav raw-to-H.264 pipeline. Input `VideoFrameView` formats are converted in system memory to NV12, uploaded to a VA-API surface with libav hardware frame APIs, encoded with `h264_vaapi`, then emitted through the same Annex-B/access-unit path used by software encoders.
+
+Useful Linux checks:
+
+```bash
+ls -l /dev/dri
+vainfo
+ffmpeg -hide_banner -encoders | grep vaapi
+```
+
+`ffmpeg` is only a diagnostic command here; `video-server` does not shell out to the command-line executable at runtime.
+
+Build controls:
+
+```bash
+cmake -S . -B build -DVIDEO_SERVER_ENABLE_VAAPI=ON
+cmake -S . -B build-software -DVIDEO_SERVER_ENABLE_VAAPI=OFF
+```
+
+vcpkg overlay usage:
+
+```bash
+vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
+vcpkg install 'video-server[vaapi]' --overlay-ports="${PWD}/vcpkg"
+```
+
+The `vaapi` feature requests `ffmpeg[vaapi]` on Linux. vcpkg's `libva` port may require system DRM development files such as `libdrm-dev` on Debian/Ubuntu hosts.
+
+Debug stats expose compact encoder fields per managed stream:
+
+```json
+{
+  "requested_encoder": "Automatic",
+  "active_encoder": "h264_vaapi",
+  "hardware_accelerated": true,
+  "hardware_device": "/dev/dri/renderD128"
+}
+```
 
 ## Encoder Profile Examples
 
@@ -151,8 +303,8 @@ The profiler drives synthetic frames through the managed `push_frame()` + `step(
 
 Profiler fields:
 
-- `encoder requested`: the encoder mode requested by the TOML, such as `Automatic`, `LibX264`, or `LibOpenH264`
-- `encoder selected`: the actual libav encoder found on this machine; if `automatic` resolves to `libopenh264`, x264-only settings do not affect the run
+- `encoder requested`: the encoder mode requested by the TOML, such as `Automatic`, `LibX264`, `LibOpenH264`, or `Vaapi`
+- `encoder selected`: the actual libav encoder found on this machine; if `automatic` resolves to `h264_vaapi`, hardware encoding is active, and if it resolves to `libopenh264`, x264-only settings do not affect the run
 - `x264_options_active`: `yes` only when the selected encoder name contains `x264`; `encoder_preset`, `encoder_tune`, `encoder_profile`, and `encoder_crf` are meaningful for that path
 - `elapsed_s`: wall-clock duration of the profile run
 - `frames`: raw synthetic frames pushed into the managed server across all streams
@@ -167,7 +319,7 @@ Profiler fields:
 Interpretation notes:
 
 - Similar `step_us_p95` values across profiles usually mean the profiles resolved to the same underlying encoder path or the tested settings are not supported by the selected encoder.
-- On builds without `libx264`, `automatic` commonly resolves to OpenH264. In that case the example profiles still run, but x264 quality knobs are effectively a no-op and the profiler should report `x264_options_active=no`.
+- On builds without usable VA-API or `libx264`, `automatic` commonly resolves to OpenH264. In that case the example profiles still run, but x264 quality knobs are effectively a no-op and the profiler should report `x264_options_active=no`.
 - The profiler is CPU-side and in-process. It does not measure browser decode, RTP packet delivery, WebRTC jitter, or visual quality.
 - Use longer runs when comparing small deltas, because one-second and short runs can be dominated by startup, scheduling, and synthetic-frame generation noise.
 

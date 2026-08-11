@@ -29,7 +29,19 @@ namespace video_server
     {
         Automatic,
         LibX264,
-        LibOpenH264
+        LibOpenH264,
+        Vaapi
+    };
+
+    /**
+     * @brief Runtime encoder selection details exposed for diagnostics.
+     */
+    struct RawH264EncoderRuntimeInfo
+    {
+        std::string requested_encoder;          /**< Public encoder mode requested by configuration. */
+        std::string active_encoder;             /**< Active libav encoder implementation name. */
+        bool hardware_accelerated{false};       /**< True when frames are encoded through a hardware backend. */
+        std::string hardware_device;            /**< Hardware device path used by the active backend, when any. */
     };
 
     /**
@@ -50,6 +62,7 @@ namespace video_server
         std::string encoder_tune{"zerolatency"};                            /**< Encoder tune when supported by the backend. */
         std::string encoder_profile{"baseline"};                            /**< Encoder profile when supported by the backend. */
         std::optional<uint32_t> encoder_crf;                                 /**< x264 CRF quality target, 0..51, when supported. */
+        std::string hardware_device;                                         /**< Optional hardware encoder device path, such as /dev/dri/renderD128. */
         bool repeat_headers{true};                                          /**< Requests repeated codec headers when supported. */
         bool emit_access_unit_delimiters{true};                             /**< Requests AUD NAL emission when supported. */
     };
@@ -85,6 +98,13 @@ namespace video_server
          * @return True when the frame was accepted, false otherwise.
          */
         virtual bool push_frame(const VideoFrameView &frame, std::string *error_message = nullptr) = 0;
+
+        /**
+         * @brief Returns the active encoder selection details for diagnostics.
+         *
+         * @return Runtime encoder details. Fields other than requested_encoder are populated after start().
+         */
+        virtual RawH264EncoderRuntimeInfo encoder_runtime_info() const = 0;
 
         /**
          * @brief Flushes and releases pipeline resources.

@@ -44,7 +44,10 @@ The repository also includes a local vcpkg overlay port in `vcpkg/` for packagin
 
 ```bash
 vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
+vcpkg install 'video-server[vaapi]' --overlay-ports="${PWD}/vcpkg"
 ```
+
+`video-server[vaapi]` enables optional Linux VA-API H.264 hardware encoding for AMD and Intel VA-API devices. Software-only installs keep using the existing libx264/OpenH264 paths.
 
 ## License
 

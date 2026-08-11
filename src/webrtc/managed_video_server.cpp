@@ -6,14 +6,23 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 
 #include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
+
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#include <string.h>
+#endif
 
 #include "../core/video_pixel_format_utils.h"
 #include "../transforms/display_transform.h"
@@ -53,6 +62,19 @@ namespace video_server
             return std::nullopt;
         }
 
+        std::optional<ManagedApiExecutionMode> parse_api_execution_mode(const std::string &value)
+        {
+            if (value == "manual_step")
+            {
+                return ManagedApiExecutionMode::ManualStep;
+            }
+            if (value == "managed_thread")
+            {
+                return ManagedApiExecutionMode::ManagedThread;
+            }
+            return std::nullopt;
+        }
+
         std::optional<VideoPixelFormat> parse_pixel_format(const std::string &value)
         {
             return video_pixel_format_from_string(value.c_str());
@@ -84,6 +106,10 @@ namespace video_server
             if (value == "libopenh264")
             {
                 return RawH264Encoder::LibOpenH264;
+            }
+            if (value == "vaapi")
+            {
+                return RawH264Encoder::Vaapi;
             }
             return std::nullopt;
         }
@@ -191,6 +217,7 @@ namespace video_server
             config.encoder_preset = table["encoder_preset"].value_or(config.encoder_preset);
             config.encoder_tune = table["encoder_tune"].value_or(config.encoder_tune);
             config.encoder_profile = table["encoder_profile"].value_or(config.encoder_profile);
+            config.hardware_device = table["hardware_device"].value_or(config.hardware_device);
             if (const auto *encoder_crf_node = table.get("encoder_crf"))
             {
                 const auto encoder_crf = encoder_crf_node->value<uint32_t>();
@@ -227,6 +254,31 @@ namespace video_server
                     throw std::runtime_error(std::string(key) + " entries must be strings");
                 }
                 values.push_back(*value);
+            }
+            return values;
+        }
+
+        std::vector<int> parse_int_array(const toml::table &table, const char *key)
+        {
+            std::vector<int> values;
+            const auto *array = table.get_as<toml::array>(key);
+            if (array == nullptr)
+            {
+                return values;
+            }
+            values.reserve(array->size());
+            for (const auto &entry : *array)
+            {
+                const auto value = entry.value<int64_t>();
+                if (!value.has_value())
+                {
+                    throw std::runtime_error(std::string(key) + " entries must be integers");
+                }
+                if (*value < std::numeric_limits<int>::min() || *value > std::numeric_limits<int>::max())
+                {
+                    throw std::runtime_error(std::string(key) + " entries are out of range");
+                }
+                values.push_back(static_cast<int>(*value));
             }
             return values;
         }
@@ -293,6 +345,8 @@ namespace video_server
 
         class ManagedVideoServer final : public IManagedVideoServer
         {
+            class StreamGroupHandle;
+
         public:
             explicit ManagedVideoServer(ManagedVideoServerConfig config)
                 : config_(std::move(config)),
@@ -308,7 +362,7 @@ namespace video_server
 
             bool start() override
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 if (started_)
                 {
                     return false;
@@ -316,12 +370,12 @@ namespace video_server
 
                 for (auto &[stream_id, state] : streams_)
                 {
-                    if (!state.registered_with_server && !server_.register_stream(state.stream_config))
+                    if (!state->registered_with_server && !server_.register_stream(state->stream_config))
                     {
                         spdlog::error("failed to register managed stream {}", stream_id);
                         return false;
                     }
-                    state.registered_with_server = true;
+                    state->registered_with_server = true;
                 }
 
                 if (!server_.start())
@@ -331,10 +385,24 @@ namespace video_server
 
                 stop_requested_ = false;
                 started_ = true;
-                if (config_.execution_mode == ExecutionMode::WorkerThread)
+                if (config_.api_execution.mode == ManagedApiExecutionMode::ManagedThread ||
+                    config_.execution_mode == ExecutionMode::WorkerThread)
                 {
-                    worker_thread_ = std::thread([this]()
-                                                 { this->worker_loop(); });
+                    api_thread_ = std::thread([this]()
+                                              { this->api_loop(); });
+                    if (!apply_api_thread_config())
+                    {
+                        stop_requested_ = true;
+                        lock.unlock();
+                        if (api_thread_.joinable())
+                        {
+                            api_thread_.join();
+                        }
+                        server_.stop();
+                        lock.lock();
+                        started_ = false;
+                        return false;
+                    }
                 }
                 return true;
             }
@@ -342,19 +410,21 @@ namespace video_server
             void stop() override
             {
                 stop_requested_ = true;
-                if (worker_thread_.joinable())
+                if (api_thread_.joinable())
                 {
-                    worker_thread_.join();
+                    api_thread_.join();
                 }
 
                 std::lock_guard<std::mutex> lock(mutex_);
                 for (auto &[_, state] : streams_)
                 {
-                    if (state.pipeline)
+                    std::lock_guard<std::mutex> stream_lock(state->mutex);
+                    if (state->pipeline)
                     {
-                        state.pipeline->stop();
-                        state.pipeline.reset();
+                        state->pipeline->stop();
+                        state->pipeline.reset();
                     }
+                    state->encoded_handoff.clear();
                 }
                 server_.stop();
                 started_ = false;
@@ -362,7 +432,7 @@ namespace video_server
 
             bool step() override
             {
-                if (!server_.step())
+                if (!step_api_compat())
                 {
                     return false;
                 }
@@ -375,7 +445,18 @@ namespace video_server
                     {
                         return true;
                     }
-                    stream_ids = stream_order_;
+                    for (const auto &stream_id : stream_order_)
+                    {
+                        const auto it = streams_.find(stream_id);
+                        if (it != streams_.end() && it->second->owner_group_id == 0)
+                        {
+                            stream_ids.push_back(stream_id);
+                        }
+                    }
+                    if (stream_ids.empty())
+                    {
+                        return true;
+                    }
                     start_index = next_stream_index_ % stream_ids.size();
                 }
 
@@ -412,10 +493,87 @@ namespace video_server
                                                            : ((start_index + 1) % stream_order_.size());
                     }
                 }
-                return true;
+                return step_api_compat();
             }
 
-            ServerDebugSnapshot get_debug_snapshot() const override { return server_.get_debug_snapshot(); }
+            bool step_api() override
+            {
+                if (config_.api_execution.mode == ManagedApiExecutionMode::ManagedThread ||
+                    config_.execution_mode == ExecutionMode::WorkerThread)
+                {
+                    spdlog::warn("manual step_api rejected while managed API thread mode is active");
+                    return false;
+                }
+                return step_api_guarded();
+            }
+
+            std::shared_ptr<IManagedStreamGroup> register_streams(std::vector<std::string> stream_ids) override
+            {
+                if (stream_ids.empty())
+                {
+                    return nullptr;
+                }
+                std::set<std::string> unique_ids(stream_ids.begin(), stream_ids.end());
+                if (unique_ids.size() != stream_ids.size())
+                {
+                    return nullptr;
+                }
+
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (const auto &stream_id : stream_ids)
+                {
+                    const auto it = streams_.find(stream_id);
+                    if (it == streams_.end() || it->second->owner_group_id != 0)
+                    {
+                        return nullptr;
+                    }
+                }
+
+                const uint64_t group_id = next_group_id_++;
+                for (const auto &stream_id : stream_ids)
+                {
+                    streams_.at(stream_id)->owner_group_id = group_id;
+                }
+                return std::make_shared<StreamGroupHandle>(*this, group_id, std::move(stream_ids));
+            }
+
+            ServerDebugSnapshot get_debug_snapshot() const override
+            {
+                ServerDebugSnapshot snapshot = server_.get_debug_snapshot();
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (auto &stream : snapshot.streams)
+                {
+                    const auto it = streams_.find(stream.stream_id);
+                    if (it == streams_.end())
+                    {
+                        continue;
+                    }
+                    std::lock_guard<std::mutex> stream_lock(it->second->mutex);
+                    stream.requested_encoder = it->second->encoder_runtime_info.requested_encoder;
+                    stream.active_encoder = it->second->encoder_runtime_info.active_encoder;
+                    stream.hardware_accelerated = it->second->encoder_runtime_info.hardware_accelerated;
+                    stream.hardware_device = it->second->encoder_runtime_info.hardware_device;
+                    stream.encoded_handoff_dropped = it->second->encoded_handoff_dropped;
+                    const auto &timing = it->second->step_timing;
+                    stream.stream_step_count = timing.count;
+                    stream.stream_step_total_ms = timing.total_ms;
+                    stream.stream_step_max_ms = timing.max_ms;
+                    stream.stream_step_last_ms = timing.last_ms;
+                    stream.stream_step_transform_total_ms = timing.transform_total_ms;
+                    stream.stream_step_transform_max_ms = timing.transform_max_ms;
+                    stream.stream_step_transform_last_ms = timing.transform_last_ms;
+                    stream.stream_step_pipeline_setup_total_ms = timing.pipeline_setup_total_ms;
+                    stream.stream_step_pipeline_setup_max_ms = timing.pipeline_setup_max_ms;
+                    stream.stream_step_pipeline_setup_last_ms = timing.pipeline_setup_last_ms;
+                    stream.stream_step_encode_total_ms = timing.encode_total_ms;
+                    stream.stream_step_encode_max_ms = timing.encode_max_ms;
+                    stream.stream_step_encode_last_ms = timing.encode_last_ms;
+                    stream.stream_step_publish_total_ms = timing.publish_total_ms;
+                    stream.stream_step_publish_max_ms = timing.publish_max_ms;
+                    stream.stream_step_publish_last_ms = timing.publish_last_ms;
+                }
+                return snapshot;
+            }
 
             bool register_stream(const StreamConfig &config) override
             {
@@ -434,7 +592,7 @@ namespace video_server
                         streams_.erase(config.stream_id);
                         return false;
                     }
-                    state.registered_with_server = true;
+                    state->registered_with_server = true;
                 }
                 return true;
             }
@@ -447,12 +605,18 @@ namespace video_server
                 {
                     return false;
                 }
-                if (it->second.pipeline)
+                if (it->second->owner_group_id != 0)
                 {
-                    it->second.pipeline->stop();
-                    it->second.pipeline.reset();
+                    spdlog::warn("remove_stream rejected for {} because it is owned by a stream group", stream_id);
+                    return false;
                 }
-                if (it->second.registered_with_server)
+                std::lock_guard<std::mutex> stream_lock(it->second->mutex);
+                if (it->second->pipeline)
+                {
+                    it->second->pipeline->stop();
+                    it->second->pipeline.reset();
+                }
+                if (it->second->registered_with_server)
                 {
                     server_.remove_stream(stream_id);
                 }
@@ -504,18 +668,21 @@ namespace video_server
                         server_.note_frame_dropped(stream_id);
                         return false;
                     }
-                    if (it->second.pending_frame.has_value())
                     {
-                        server_.note_frame_dropped(stream_id);
+                        std::lock_guard<std::mutex> stream_lock(it->second->mutex);
+                        if (it->second->pending_frame.has_value())
+                        {
+                            server_.note_frame_dropped(stream_id);
+                        }
+                        it->second->pending_frame = std::move(pending);
                     }
-                    it->second.pending_frame = std::move(pending);
                 }
 
                 server_.note_frame_received(stream_id, frame.timestamp_ns);
 
                 if (config_.execution_mode == ExecutionMode::InlineOnPush)
                 {
-                    if (!server_.step())
+                    if (!step_api_compat())
                     {
                         return false;
                     }
@@ -548,6 +715,19 @@ namespace video_server
             }
 
         private:
+            struct EncodedAccessUnitStorage
+            {
+                std::vector<uint8_t> bytes;
+                uint64_t timestamp_ns{0};
+                bool keyframe{false};
+                bool codec_config{false};
+
+                EncodedAccessUnitView view() const
+                {
+                    return EncodedAccessUnitView{bytes.data(), bytes.size(), VideoCodec::H264, timestamp_ns, keyframe, codec_config};
+                }
+            };
+
             struct PendingFrame
             {
                 std::vector<uint8_t> bytes;
@@ -566,15 +746,73 @@ namespace video_server
 
             struct ManagedStreamState
             {
+                struct StepTiming
+                {
+                    uint64_t count{0};
+                    double total_ms{0.0};
+                    double max_ms{0.0};
+                    double last_ms{0.0};
+                    double transform_total_ms{0.0};
+                    double transform_max_ms{0.0};
+                    double transform_last_ms{0.0};
+                    double pipeline_setup_total_ms{0.0};
+                    double pipeline_setup_max_ms{0.0};
+                    double pipeline_setup_last_ms{0.0};
+                    double encode_total_ms{0.0};
+                    double encode_max_ms{0.0};
+                    double encode_last_ms{0.0};
+                    double publish_total_ms{0.0};
+                    double publish_max_ms{0.0};
+                    double publish_last_ms{0.0};
+                };
+
                 StreamConfig stream_config;
                 RawVideoPipelineConfig pipeline_template;
+                mutable std::mutex mutex;
                 std::optional<PendingFrame> pending_frame;
                 std::unique_ptr<IRawVideoPipeline> pipeline;
+                RawH264EncoderRuntimeInfo encoder_runtime_info;
+                std::deque<EncodedAccessUnitStorage> encoded_handoff;
+                uint64_t encoded_handoff_dropped{0};
                 uint64_t next_due_timestamp_ns{0};
                 uint64_t pipeline_config_generation{0};
                 uint32_t pipeline_width{0};
                 uint32_t pipeline_height{0};
                 bool registered_with_server{false};
+                uint64_t owner_group_id{0};
+                StepTiming step_timing;
+            };
+
+            class StreamGroupHandle final : public IManagedStreamGroup
+            {
+            public:
+                StreamGroupHandle(ManagedVideoServer &owner, uint64_t group_id, std::vector<std::string> stream_ids)
+                    : owner_(owner), group_id_(group_id), stream_ids_(std::move(stream_ids)) {}
+
+                ~StreamGroupHandle() override { owner_.release_stream_group(group_id_, stream_ids_); }
+
+                bool step_streams() override
+                {
+                    bool expected = false;
+                    if (!stepping_.compare_exchange_strong(expected, true))
+                    {
+                        spdlog::warn("managed stream group concurrent step rejected group={}", group_id_);
+                        return false;
+                    }
+                    const auto reset = [this]()
+                    { stepping_.store(false); };
+                    bool ok = owner_.step_stream_ids(stream_ids_);
+                    reset();
+                    return ok;
+                }
+
+                std::vector<std::string> stream_ids() const override { return stream_ids_; }
+
+            private:
+                ManagedVideoServer &owner_;
+                uint64_t group_id_{0};
+                std::vector<std::string> stream_ids_;
+                std::atomic<bool> stepping_{false};
             };
 
             enum class StreamStepResult
@@ -605,17 +843,17 @@ namespace video_server
 
             void add_stream_state_locked(const StreamConfig &config)
             {
-                ManagedStreamState state;
-                state.stream_config = config;
+                auto state = std::make_shared<ManagedStreamState>();
+                state->stream_config = config;
                 const auto it = config_.default_raw_pipelines.find(config.stream_id);
                 if (it != config_.default_raw_pipelines.end())
                 {
-                    state.pipeline_template = it->second;
+                    state->pipeline_template = it->second;
                 }
                 else if (const auto default_it = config_.default_raw_pipelines.find("default");
                          default_it != config_.default_raw_pipelines.end())
                 {
-                    state.pipeline_template = default_it->second;
+                    state->pipeline_template = default_it->second;
                 }
                 streams_.emplace(config.stream_id, std::move(state));
                 stream_order_.push_back(config.stream_id);
@@ -638,29 +876,51 @@ namespace video_server
                 return config;
             }
 
+            static void update_timing(double elapsed_ms, double &total_ms, double &max_ms, double &last_ms)
+            {
+                total_ms += elapsed_ms;
+                max_ms = std::max(max_ms, elapsed_ms);
+                last_ms = elapsed_ms;
+            }
+
             bool ensure_pipeline(const std::string &stream_id,
-                                 ManagedStreamState &state,
+                                 const std::shared_ptr<ManagedStreamState> &state,
                                  const StreamOutputConfig &output_config,
                                  uint32_t width,
                                  uint32_t height)
             {
-                if (state.pipeline && state.pipeline_config_generation == output_config.config_generation &&
-                    state.pipeline_width == width && state.pipeline_height == height)
+                if (state->pipeline && state->pipeline_config_generation == output_config.config_generation &&
+                    state->pipeline_width == width && state->pipeline_height == height)
                 {
                     return true;
                 }
 
-                if (state.pipeline)
+                if (state->pipeline)
                 {
-                    state.pipeline->stop();
-                    state.pipeline.reset();
+                    state->pipeline->stop();
+                    state->pipeline.reset();
                 }
 
-                RawVideoPipelineConfig pipeline_config = make_effective_pipeline_config(state, output_config, width, height);
+                RawVideoPipelineConfig pipeline_config = make_effective_pipeline_config(*state, output_config, width, height);
                 auto pipeline = make_raw_to_h264_pipeline(
                     stream_id, pipeline_config,
-                    [this, stream_id](const EncodedAccessUnitView &access_unit)
-                    { return server_.push_access_unit(stream_id, access_unit); });
+                    [state](const EncodedAccessUnitView &access_unit)
+                    {
+                        EncodedAccessUnitStorage storage;
+                        storage.bytes.assign(static_cast<const uint8_t *>(access_unit.data),
+                                             static_cast<const uint8_t *>(access_unit.data) + access_unit.size_bytes);
+                        storage.timestamp_ns = access_unit.timestamp_ns;
+                        storage.keyframe = access_unit.keyframe;
+                        storage.codec_config = access_unit.codec_config;
+                        constexpr size_t kMaxEncodedHandoffUnits = 4;
+                        if (state->encoded_handoff.size() >= kMaxEncodedHandoffUnits)
+                        {
+                            state->encoded_handoff.pop_front();
+                            ++state->encoded_handoff_dropped;
+                        }
+                        state->encoded_handoff.push_back(std::move(storage));
+                        return true;
+                    });
 
                 std::string error;
                 if (!pipeline->start(&error))
@@ -669,21 +929,33 @@ namespace video_server
                     return false;
                 }
 
-                state.pipeline = std::move(pipeline);
-                state.pipeline_config_generation = output_config.config_generation;
-                state.pipeline_width = width;
-                state.pipeline_height = height;
+                state->pipeline = std::move(pipeline);
+                state->encoder_runtime_info = state->pipeline->encoder_runtime_info();
+                state->pipeline_config_generation = output_config.config_generation;
+                state->pipeline_width = width;
+                state->pipeline_height = height;
                 return true;
             }
 
             StreamStepResult process_stream(const std::string &stream_id)
             {
+                const auto step_started_at = std::chrono::steady_clock::now();
                 StreamOutputConfig output_config;
                 PendingFrame pending;
+                std::shared_ptr<ManagedStreamState> state;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     auto it = streams_.find(stream_id);
-                    if (it == streams_.end() || !it->second.pending_frame.has_value())
+                    if (it == streams_.end())
+                    {
+                        return StreamStepResult::Idle;
+                    }
+                    state = it->second;
+                }
+
+                {
+                    std::lock_guard<std::mutex> stream_lock(state->mutex);
+                    if (!state->pending_frame.has_value())
                     {
                         return StreamStepResult::Idle;
                     }
@@ -695,43 +967,51 @@ namespace video_server
                     }
                     output_config = *output_config_opt;
 
-                    if (output_config.output_fps > 0.0 && it->second.next_due_timestamp_ns > 0 &&
-                        it->second.pending_frame->timestamp_ns < it->second.next_due_timestamp_ns)
+                    if (output_config.output_fps > 0.0 && state->next_due_timestamp_ns > 0 &&
+                        state->pending_frame->timestamp_ns < state->next_due_timestamp_ns)
                     {
                         return StreamStepResult::Idle;
                     }
 
-                    pending = std::move(*it->second.pending_frame);
-                    it->second.pending_frame.reset();
+                    pending = std::move(*state->pending_frame);
+                    state->pending_frame.reset();
                     if (output_config.output_fps > 0.0)
                     {
                         const uint64_t frame_interval_ns =
                             static_cast<uint64_t>(std::llround(1000000000.0 / output_config.output_fps));
-                        it->second.next_due_timestamp_ns = pending.timestamp_ns + frame_interval_ns;
+                        state->next_due_timestamp_ns = pending.timestamp_ns + frame_interval_ns;
                     }
                     else
                     {
-                        it->second.next_due_timestamp_ns = 0;
+                        state->next_due_timestamp_ns = 0;
                     }
                 }
 
                 RgbImage transformed;
+                const auto transform_started_at = std::chrono::steady_clock::now();
                 if (!apply_display_transform(pending.view(), output_config, transformed))
                 {
                     server_.note_frame_dropped(stream_id);
                     return StreamStepResult::Progressed;
                 }
+                const auto transform_finished_at = std::chrono::steady_clock::now();
 
+                bool pipeline_reconfigured = false;
+                double pipeline_setup_ms = 0.0;
+                double encode_ms = 0.0;
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    auto it = streams_.find(stream_id);
-                    if (it == streams_.end())
+                    std::lock_guard<std::mutex> stream_lock(state->mutex);
+                    pipeline_reconfigured = !(state->pipeline && state->pipeline_config_generation == output_config.config_generation &&
+                                              state->pipeline_width == transformed.width && state->pipeline_height == transformed.height);
+                    const auto setup_started_at = std::chrono::steady_clock::now();
+                    if (!ensure_pipeline(stream_id, state, output_config, transformed.width, transformed.height))
                     {
                         return StreamStepResult::Failed;
                     }
-                    if (!ensure_pipeline(stream_id, it->second, output_config, transformed.width, transformed.height))
+                    const auto setup_finished_at = std::chrono::steady_clock::now();
+                    if (pipeline_reconfigured)
                     {
-                        return StreamStepResult::Failed;
+                        pipeline_setup_ms = std::chrono::duration<double, std::milli>(setup_finished_at - setup_started_at).count();
                     }
 
                     const VideoFrameView transformed_view{
@@ -743,30 +1023,178 @@ namespace video_server
                         pending.timestamp_ns,
                         pending.frame_id};
                     std::string error;
-                    if (!it->second.pipeline->push_frame(transformed_view, &error))
+                    const auto encode_started_at = std::chrono::steady_clock::now();
+                    if (!state->pipeline->push_frame(transformed_view, &error))
                     {
                         spdlog::error("managed pipeline encode failed for {}: {}", stream_id, error);
                         return StreamStepResult::Failed;
                     }
+                    const auto encode_finished_at = std::chrono::steady_clock::now();
+                    encode_ms = std::chrono::duration<double, std::milli>(encode_finished_at - encode_started_at).count();
                 }
 
+                const auto publish_started_at = std::chrono::steady_clock::now();
                 if (!server_.publish_transformed_frame(stream_id, transformed.rgb, transformed.width, transformed.height,
                                                        pending.timestamp_ns, pending.frame_id))
                 {
                     return StreamStepResult::Failed;
                 }
+                const auto publish_finished_at = std::chrono::steady_clock::now();
+                const auto step_finished_at = publish_finished_at;
+                const double transform_ms =
+                    std::chrono::duration<double, std::milli>(transform_finished_at - transform_started_at).count();
+                const double publish_ms =
+                    std::chrono::duration<double, std::milli>(publish_finished_at - publish_started_at).count();
+                const double step_ms =
+                    std::chrono::duration<double, std::milli>(step_finished_at - step_started_at).count();
+                {
+                    std::lock_guard<std::mutex> stream_lock(state->mutex);
+                    auto &timing = state->step_timing;
+                    ++timing.count;
+                    update_timing(step_ms, timing.total_ms, timing.max_ms, timing.last_ms);
+                    update_timing(transform_ms, timing.transform_total_ms, timing.transform_max_ms, timing.transform_last_ms);
+                    update_timing(pipeline_setup_ms, timing.pipeline_setup_total_ms, timing.pipeline_setup_max_ms,
+                                  timing.pipeline_setup_last_ms);
+                    update_timing(encode_ms, timing.encode_total_ms, timing.encode_max_ms, timing.encode_last_ms);
+                    update_timing(publish_ms, timing.publish_total_ms, timing.publish_max_ms, timing.publish_last_ms);
+                }
                 return StreamStepResult::Progressed;
             }
 
-            void worker_loop()
+            bool step_stream_ids(const std::vector<std::string> &stream_ids)
+            {
+                for (const auto &stream_id : stream_ids)
+                {
+                    const auto result = process_stream(stream_id);
+                    if (result == StreamStepResult::Failed)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            void release_stream_group(uint64_t group_id, const std::vector<std::string> &stream_ids)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (const auto &stream_id : stream_ids)
+                {
+                    const auto it = streams_.find(stream_id);
+                    if (it != streams_.end() && it->second->owner_group_id == group_id)
+                    {
+                        it->second->owner_group_id = 0;
+                    }
+                }
+            }
+
+            bool step_api_compat()
+            {
+                if (config_.api_execution.mode == ManagedApiExecutionMode::ManagedThread ||
+                    config_.execution_mode == ExecutionMode::WorkerThread)
+                {
+                    return true;
+                }
+                return step_api_guarded();
+            }
+
+            bool step_api_guarded()
+            {
+                bool expected = false;
+                if (!api_step_active_.compare_exchange_strong(expected, true))
+                {
+                    spdlog::warn("managed API concurrent step rejected");
+                    return false;
+                }
+                const bool ok = step_api_impl();
+                api_step_active_.store(false);
+                return ok;
+            }
+
+            bool step_api_impl()
+            {
+                std::vector<std::pair<std::string, EncodedAccessUnitStorage>> units;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    for (auto &[stream_id, state] : streams_)
+                    {
+                        std::lock_guard<std::mutex> stream_lock(state->mutex);
+                        while (!state->encoded_handoff.empty())
+                        {
+                            units.emplace_back(stream_id, std::move(state->encoded_handoff.front()));
+                            state->encoded_handoff.pop_front();
+                        }
+                    }
+                }
+
+                for (const auto &entry : units)
+                {
+                    if (!server_.push_access_unit(entry.first, entry.second.view()))
+                    {
+                        return false;
+                    }
+                }
+                return server_.step();
+            }
+
+            bool apply_api_thread_config()
+            {
+                if (!api_thread_.joinable())
+                {
+                    return true;
+                }
+#if defined(__linux__)
+                if (!config_.api_execution.thread.cpu_affinity.empty())
+                {
+                    cpu_set_t cpuset;
+                    CPU_ZERO(&cpuset);
+                    for (const int cpu : config_.api_execution.thread.cpu_affinity)
+                    {
+                        if (cpu < 0)
+                        {
+                            spdlog::error("invalid managed API thread CPU affinity value {}", cpu);
+                            return false;
+                        }
+                        CPU_SET(cpu, &cpuset);
+                    }
+                    const int rc = pthread_setaffinity_np(api_thread_.native_handle(), sizeof(cpu_set_t), &cpuset);
+                    if (rc != 0)
+                    {
+                        spdlog::error("failed to apply managed API thread CPU affinity: {}", strerror(rc));
+                        return false;
+                    }
+                }
+                if (config_.api_execution.thread.scheduling_priority.has_value())
+                {
+                    sched_param params{};
+                    params.sched_priority = *config_.api_execution.thread.scheduling_priority;
+                    const int rc = pthread_setschedparam(api_thread_.native_handle(), SCHED_RR, &params);
+                    if (rc != 0)
+                    {
+                        spdlog::error("failed to apply managed API thread scheduling priority: {}", strerror(rc));
+                        return false;
+                    }
+                }
+                return true;
+#else
+                if (!config_.api_execution.thread.cpu_affinity.empty() ||
+                    config_.api_execution.thread.scheduling_priority.has_value())
+                {
+                    spdlog::error("managed API thread affinity/priority is not supported on this platform");
+                    return false;
+                }
+                return true;
+#endif
+            }
+
+            void api_loop()
             {
                 while (!stop_requested_.load())
                 {
-                    if (!step())
+                    if (!step_api_guarded())
                     {
                         break;
                     }
-                    if (!config_.webrtc.enable_http_api)
+                    if (!config_.webrtc.enable_http_api || config_.webrtc.http_poll_timeout_ms == 0)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(std::max<uint32_t>(1, config_.http_poll_timeout_ms)));
                     }
@@ -776,12 +1204,14 @@ namespace video_server
             ManagedVideoServerConfig config_;
             WebRtcVideoServer server_;
             mutable std::mutex mutex_;
-            std::unordered_map<std::string, ManagedStreamState> streams_;
+            std::unordered_map<std::string, std::shared_ptr<ManagedStreamState>> streams_;
             std::vector<std::string> stream_order_;
             std::atomic<bool> stop_requested_{false};
-            std::thread worker_thread_;
+            std::atomic<bool> api_step_active_{false};
+            std::thread api_thread_;
             bool started_{false};
             size_t next_stream_index_{0};
+            uint64_t next_group_id_{1};
         };
 
     } // namespace
@@ -801,6 +1231,24 @@ namespace video_server
                 throw std::runtime_error("invalid execution_mode: " + *execution_mode);
             }
             config.execution_mode = *parsed;
+        }
+        if (const auto api_execution = table_value<std::string>(table, "api_execution"))
+        {
+            const auto parsed = parse_api_execution_mode(*api_execution);
+            if (!parsed.has_value())
+            {
+                throw std::runtime_error("invalid api_execution: " + *api_execution);
+            }
+            config.api_execution.mode = *parsed;
+        }
+        config.api_execution.thread.cpu_affinity = parse_int_array(table, "api_cpu_affinity");
+        if (const auto value = table_value<int64_t>(table, "api_scheduling_priority"))
+        {
+            if (*value < std::numeric_limits<int>::min() || *value > std::numeric_limits<int>::max())
+            {
+                throw std::runtime_error("api_scheduling_priority is out of range");
+            }
+            config.api_execution.thread.scheduling_priority = static_cast<int>(*value);
         }
         if (const auto value = table_value<uint32_t>(table, "http_poll_timeout_ms"))
         {

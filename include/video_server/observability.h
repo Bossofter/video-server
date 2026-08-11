@@ -84,6 +84,27 @@ namespace video_server
         size_t latest_encoded_size_bytes{0};                       /**< Size of the latest encoded unit in bytes. */
         bool latest_encoded_keyframe{false};                       /**< True when the latest encoded unit is a keyframe. */
         bool latest_encoded_codec_config{false};                   /**< True when the latest encoded unit carries codec config. */
+        std::string requested_encoder;                             /**< Encoder mode requested by the raw pipeline, when managed. */
+        std::string active_encoder;                                /**< Active encoder implementation, when managed. */
+        bool hardware_accelerated{false};                          /**< True when the active encoder uses hardware acceleration. */
+        std::string hardware_device;                               /**< Hardware encoder device path, when any. */
+        uint64_t encoded_handoff_dropped{0};                       /**< Encoded units overwritten before API/WebRTC delivery. */
+        uint64_t stream_step_count{0};                             /**< Managed stream steps that consumed a raw frame. */
+        double stream_step_total_ms{0.0};                           /**< Cumulative managed stream-step wall time. */
+        double stream_step_max_ms{0.0};                             /**< Maximum managed stream-step wall time. */
+        double stream_step_last_ms{0.0};                            /**< Most recent managed stream-step wall time. */
+        double stream_step_transform_total_ms{0.0};                 /**< Cumulative display-transform time in managed stepping. */
+        double stream_step_transform_max_ms{0.0};                   /**< Maximum display-transform time in managed stepping. */
+        double stream_step_transform_last_ms{0.0};                  /**< Most recent display-transform time in managed stepping. */
+        double stream_step_pipeline_setup_total_ms{0.0};            /**< Cumulative pipeline create/reconfigure time in managed stepping. */
+        double stream_step_pipeline_setup_max_ms{0.0};              /**< Maximum pipeline create/reconfigure time in managed stepping. */
+        double stream_step_pipeline_setup_last_ms{0.0};             /**< Most recent pipeline create/reconfigure time in managed stepping. */
+        double stream_step_encode_total_ms{0.0};                    /**< Cumulative raw pipeline push/encode time in managed stepping. */
+        double stream_step_encode_max_ms{0.0};                      /**< Maximum raw pipeline push/encode time in managed stepping. */
+        double stream_step_encode_last_ms{0.0};                     /**< Most recent raw pipeline push/encode time in managed stepping. */
+        double stream_step_publish_total_ms{0.0};                   /**< Cumulative transformed-frame publish time in managed stepping. */
+        double stream_step_publish_max_ms{0.0};                     /**< Maximum transformed-frame publish time in managed stepping. */
+        double stream_step_publish_last_ms{0.0};                    /**< Most recent transformed-frame publish time in managed stepping. */
         uint64_t total_frames_received{0};                         /**< Total raw frames received. */
         uint64_t total_frames_transformed{0};                      /**< Total frames emitted by the transform stage. */
         uint64_t total_frames_dropped{0};                          /**< Total frames dropped by throttling or gating. */
