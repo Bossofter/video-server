@@ -1,25 +1,29 @@
 # video-server
 
-`video-server` is a C++17 server for turning raw frames or H.264 access units into browser-playable WebRTC streams.
+Current version: `1.3.0`
 
-The repo provides:
+`video-server` is a C++17 library and smoke-test harness for getting producer-owned raw frames into browser-playable WebRTC video.
 
-- a producer-facing API for registering streams and pushing frames
-- a raw -> H.264 -> WebRTC delivery path
-- multi-recipient WebRTC fanout with per-stream subscriber caps
-- per-stream runtime output configuration
-- a lightweight HTTP and signaling surface
-- example harnesses for browser, LAN, and soak validation
+The main path is:
 
-## Start Here
+```text
+raw frames
+    -> transform/output config
+    -> H.264 encode
+    -> bounded access-unit handoff
+    -> WebRTC signaling/fanout
+    -> browser <video>
+```
+
+## Documentation
 
 - Build and first run: [docs/getting_started.md](docs/getting_started.md)
 - Integrate your own raw-frame producer: [docs/raw_frames_to_webrtc.md](docs/raw_frames_to_webrtc.md)
-- Runtime config and filters: [docs/configuration_and_filters.md](docs/configuration_and_filters.md)
+- HTTP API and signaling routes: [docs/api_routes.md](docs/api_routes.md)
+- Runtime config fields: [docs/configuration_and_filters.md](docs/configuration_and_filters.md)
 - Session behavior: [docs/session_lifecycle.md](docs/session_lifecycle.md)
-- Security defaults and LAN exposure: [docs/security_model.md](docs/security_model.md)
+- Security defaults: [docs/security_model.md](docs/security_model.md)
 - Soak testing: [docs/soak_testing.md](docs/soak_testing.md)
-- Architecture overview: [docs/architecture_overview.md](docs/architecture_overview.md)
 - NiceGUI harness details: [examples/nicegui_smoke/README.md](examples/nicegui_smoke/README.md)
 
 ## Quick Build
@@ -29,7 +33,7 @@ export VCPKG_ROOT=/path/to/vcpkg
 ./build.sh
 ```
 
-The supported build and first-run workflow is in [docs/getting_started.md](docs/getting_started.md).
+The supported first-run workflow is in [docs/getting_started.md](docs/getting_started.md).
 
 ## CMake Package Consumption
 
@@ -47,7 +51,7 @@ vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
 vcpkg install 'video-server[vaapi]' --overlay-ports="${PWD}/vcpkg"
 ```
 
-`video-server[vaapi]` enables optional Linux VA-API H.264 hardware encoding for AMD and Intel VA-API devices. Software-only installs keep using the existing libx264/OpenH264 paths.
+`video-server[vaapi]` enables optional Linux VA-API H.264 hardware encoding for AMD and Intel VA-API devices. Software-only installs use OpenH264 or explicit libx264 where available.
 
 ## License
 

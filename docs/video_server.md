@@ -1,15 +1,19 @@
 # Video Server Docs
 
-This file is the short entry point for the repo documentation set.
+This is the short entry point for the repo documentation set.
 
-Use these documents in roughly this order:
+For the normal raw-frame-to-browser workflow, use:
 
 - [Getting Started](getting_started.md)
 - [Raw Frames To WebRTC](raw_frames_to_webrtc.md)
-- [Architecture Overview](architecture_overview.md)
+- [API Routes](api_routes.md)
+
+Supporting references:
+
 - [Configuration And Filters](configuration_and_filters.md)
 - [Session Lifecycle](session_lifecycle.md)
 - [Security Model](security_model.md)
 - [Soak Testing](soak_testing.md)
+- [Architecture Overview](architecture_overview.md)
 
-If you only want the fastest path to visible video, start with [Getting Started](getting_started.md) or the repo [README](../README.md).
+If you only want visible video quickly, start with [Getting Started](getting_started.md).
