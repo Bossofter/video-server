@@ -3,9 +3,11 @@
 #include <cstdio>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <fstream>
 #include <functional>
 #include <future>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -13,6 +15,13 @@
 
 #include "video_server/managed_video_server.h"
 #include "../src/webrtc/encoded_access_unit_handoff.h"
+
+namespace video_server::webrtc_internal
+{
+    void set_managed_stream_step_test_hook(std::function<void(const std::string &)> hook);
+    void set_managed_api_step_test_hook(std::function<void()> hook);
+    void set_managed_shutdown_wait_test_hook(std::function<void()> hook);
+}
 
 namespace
 {
@@ -57,6 +66,70 @@ namespace
     uint64_t timestamp_for_frame(uint64_t index, double fps)
     {
         return static_cast<uint64_t>((static_cast<long double>(index) * 1000000000.0L) / fps);
+    }
+
+    class BlockingGate
+    {
+    public:
+        void arrive_and_wait()
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ++entries_;
+            cv_.notify_all();
+            cv_.wait(lock,
+                     [this]()
+                     { return released_; });
+        }
+
+        bool wait_for_entries(size_t expected, std::chrono::milliseconds timeout = std::chrono::milliseconds(1000))
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            return cv_.wait_for(lock, timeout,
+                                [this, expected]()
+                                { return entries_ >= expected; });
+        }
+
+        void release()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+            cv_.notify_all();
+        }
+
+        size_t entries() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return entries_;
+        }
+
+    private:
+        mutable std::mutex mutex_;
+        std::condition_variable cv_;
+        size_t entries_{0};
+        bool released_{false};
+    };
+
+    class ManagedHookScope
+    {
+    public:
+        ~ManagedHookScope()
+        {
+            video_server::webrtc_internal::set_managed_stream_step_test_hook(nullptr);
+            video_server::webrtc_internal::set_managed_api_step_test_hook(nullptr);
+            video_server::webrtc_internal::set_managed_shutdown_wait_test_hook(nullptr);
+        }
+    };
+
+    video_server::ManagedVideoServerConfig make_two_stream_software_config()
+    {
+        video_server::ManagedVideoServerConfig config;
+        config.webrtc.enable_http_api = false;
+        config.streams.push_back({"alpha", "Alpha", 64, 48, 30.0, video_server::VideoPixelFormat::GRAY8});
+        config.streams.push_back({"bravo", "Bravo", 64, 48, 30.0, video_server::VideoPixelFormat::GRAY8});
+        video_server::RawVideoPipelineConfig pipeline_config;
+        pipeline_config.encoder = video_server::RawH264Encoder::LibOpenH264;
+        config.default_raw_pipelines.emplace("default", pipeline_config);
+        return config;
     }
 
 } // namespace
@@ -394,6 +467,76 @@ TEST(ManagedVideoServerTest, SeparateStreamGroupsCanStepSequentially)
     server->stop();
 }
 
+TEST(ManagedVideoServerTest, SameStreamGroupConcurrentStepIsRejected)
+{
+    ManagedHookScope hooks;
+    BlockingGate stream_gate;
+    video_server::webrtc_internal::set_managed_stream_step_test_hook(
+        [&stream_gate](const std::string &)
+        { stream_gate.arrive_and_wait(); });
+
+    auto server = video_server::CreateManagedVideoServer(make_software_managed_config("alpha", 64, 48, 30.0));
+    ASSERT_TRUE(server->start());
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+
+    std::vector<uint8_t> frame(64u * 48u, 17u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 64, 48, 1000, 1)));
+
+    auto first = std::async(std::launch::async,
+                            [&group]()
+                            { return group->step_streams(); });
+    const bool first_entered = stream_gate.wait_for_entries(1);
+    if (!first_entered)
+    {
+        stream_gate.release();
+    }
+    ASSERT_TRUE(first_entered) << "first stream step did not enter encode work";
+
+    EXPECT_FALSE(group->step_streams());
+    stream_gate.release();
+    EXPECT_TRUE(first.get());
+
+    server->stop();
+}
+
+TEST(ManagedVideoServerTest, IndependentStreamGroupsActuallyExecuteConcurrently)
+{
+    ManagedHookScope hooks;
+    BlockingGate stream_gate;
+    video_server::webrtc_internal::set_managed_stream_step_test_hook(
+        [&stream_gate](const std::string &)
+        { stream_gate.arrive_and_wait(); });
+
+    auto server = video_server::CreateManagedVideoServer(make_two_stream_software_config());
+    ASSERT_TRUE(server->start());
+    auto alpha_group = server->register_streams({"alpha"});
+    auto bravo_group = server->register_streams({"bravo"});
+    ASSERT_NE(alpha_group, nullptr);
+    ASSERT_NE(bravo_group, nullptr);
+
+    std::vector<uint8_t> alpha_frame(64u * 48u, 21u);
+    std::vector<uint8_t> bravo_frame(64u * 48u, 31u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(alpha_frame, 64, 48, 1000, 1)));
+    ASSERT_TRUE(server->push_frame("bravo", make_gray_frame_view(bravo_frame, 64, 48, 1000, 1)));
+
+    auto alpha_step = std::async(std::launch::async,
+                                 [&alpha_group]()
+                                 { return alpha_group->step_streams(); });
+    auto bravo_step = std::async(std::launch::async,
+                                 [&bravo_group]()
+                                 { return bravo_group->step_streams(); });
+
+    const bool both_entered = stream_gate.wait_for_entries(2);
+    stream_gate.release();
+    EXPECT_TRUE(both_entered) << "independent groups did not both enter stream work concurrently; entries="
+                              << stream_gate.entries();
+    EXPECT_TRUE(alpha_step.get());
+    EXPECT_TRUE(bravo_step.get());
+
+    server->stop();
+}
+
 TEST(ManagedVideoServerTest, EncodedHandoffIsBoundedWhenApiProgressionFallsBehind)
 {
     video_server::ManagedVideoServerConfig config;
@@ -449,26 +592,40 @@ TEST(ManagedVideoServerTest, StepApiDoesNotEncodePendingRawFrames)
 
 TEST(ManagedVideoServerTest, StepApiCanRunConcurrentlyWithStreamGroup)
 {
-    video_server::ManagedVideoServerConfig config;
-    config.webrtc.enable_http_api = true;
-    config.webrtc.http_port = 0;
-    config.webrtc.http_poll_timeout_ms = 50;
-    config.http_poll_timeout_ms = 50;
-    config.webrtc.max_http_connections_per_step = 1;
-    config.streams.push_back({"alpha", "Alpha", 32, 32, 30.0, video_server::VideoPixelFormat::GRAY8});
+    ManagedHookScope hooks;
+    BlockingGate api_gate;
+    BlockingGate stream_gate;
+    video_server::webrtc_internal::set_managed_api_step_test_hook(
+        [&api_gate]()
+        { api_gate.arrive_and_wait(); });
+    video_server::webrtc_internal::set_managed_stream_step_test_hook(
+        [&stream_gate](const std::string &)
+        { stream_gate.arrive_and_wait(); });
 
-    auto server = video_server::CreateManagedVideoServer(config);
+    auto server = video_server::CreateManagedVideoServer(make_software_managed_config("alpha", 64, 48, 30.0));
     ASSERT_TRUE(server->start());
     auto group = server->register_streams({"alpha"});
     ASSERT_NE(group, nullptr);
 
-    std::vector<uint8_t> frame(32u * 32u, 17u);
-    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 32, 32, 1000, 1)));
+    std::vector<uint8_t> frame(64u * 48u, 17u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 64, 48, 1000, 1)));
 
     auto api_step = std::async(std::launch::async, [&server]()
                                { return server->step_api(); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    EXPECT_TRUE(group->step_streams());
+    const bool api_entered = api_gate.wait_for_entries(1);
+    if (!api_entered)
+    {
+        api_gate.release();
+    }
+    ASSERT_TRUE(api_entered) << "API step did not enter API work";
+
+    auto stream_step = std::async(std::launch::async,
+                                  [&group]()
+                                  { return group->step_streams(); });
+    EXPECT_TRUE(stream_gate.wait_for_entries(1)) << "stream group did not enter stream work while API step was active";
+    stream_gate.release();
+    api_gate.release();
+    EXPECT_TRUE(stream_step.get());
     EXPECT_TRUE(api_step.get());
 
     ASSERT_TRUE(server->step_api());
@@ -529,27 +686,86 @@ TEST(ManagedVideoServerTest, ManagedApiThreadRejectsInvalidAffinity)
 
 TEST(ManagedVideoServerTest, ConcurrentStepApiCallsAreRejected)
 {
-    video_server::ManagedVideoServerConfig config;
-    config.webrtc.enable_http_api = true;
-    config.webrtc.http_port = 0;
-    config.webrtc.http_poll_timeout_ms = 50;
-    config.http_poll_timeout_ms = 50;
-    config.webrtc.max_http_connections_per_step = 1;
-    config.streams.push_back({"alpha", "Alpha", 16, 16, 30.0, video_server::VideoPixelFormat::GRAY8});
+    ManagedHookScope hooks;
+    BlockingGate api_gate;
+    video_server::webrtc_internal::set_managed_api_step_test_hook(
+        [&api_gate]()
+        { api_gate.arrive_and_wait(); });
 
-    auto server = video_server::CreateManagedVideoServer(config);
+    auto server = video_server::CreateManagedVideoServer(make_software_managed_config("alpha", 16, 16, 30.0));
     ASSERT_TRUE(server->start());
 
     auto first = std::async(std::launch::async, [&server]()
                             { return server->step_api(); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    const bool first_entered = api_gate.wait_for_entries(1);
+    if (!first_entered)
+    {
+        api_gate.release();
+    }
+    ASSERT_TRUE(first_entered) << "first API step did not enter API work";
     const bool second = server->step_api();
+    api_gate.release();
     const bool first_result = first.get();
 
     EXPECT_TRUE(first_result);
     EXPECT_FALSE(second);
 
     server->stop();
+}
+
+TEST(ManagedVideoServerTest, ServerDestructionWaitsForActiveStreamGroupStep)
+{
+    ManagedHookScope hooks;
+    BlockingGate stream_gate;
+    BlockingGate shutdown_gate;
+    video_server::webrtc_internal::set_managed_stream_step_test_hook(
+        [&stream_gate](const std::string &)
+        { stream_gate.arrive_and_wait(); });
+    video_server::webrtc_internal::set_managed_shutdown_wait_test_hook(
+        [&shutdown_gate]()
+        { shutdown_gate.arrive_and_wait(); });
+
+    auto server = video_server::CreateManagedVideoServer(make_software_managed_config("alpha", 64, 48, 30.0));
+    ASSERT_TRUE(server->start());
+    auto group = server->register_streams({"alpha"});
+    ASSERT_NE(group, nullptr);
+
+    std::vector<uint8_t> frame(64u * 48u, 41u);
+    ASSERT_TRUE(server->push_frame("alpha", make_gray_frame_view(frame, 64, 48, 1000, 1)));
+
+    auto stream_step = std::async(std::launch::async,
+                                  [&group]()
+                                  { return group->step_streams(); });
+    const bool stream_entered = stream_gate.wait_for_entries(1);
+    if (!stream_entered)
+    {
+        stream_gate.release();
+    }
+    ASSERT_TRUE(stream_entered) << "stream step did not enter encode work";
+
+    auto destroy_server = std::async(std::launch::async,
+                                     [&server]()
+                                     {
+                                         server.reset();
+                                         return true;
+                                     });
+    const bool shutdown_waiting = shutdown_gate.wait_for_entries(1);
+    if (!shutdown_waiting)
+    {
+        shutdown_gate.release();
+        stream_gate.release();
+    }
+    ASSERT_TRUE(shutdown_waiting) << "server destruction did not reach active-call wait";
+    EXPECT_EQ(stream_step.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(destroy_server.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+    shutdown_gate.release();
+    EXPECT_EQ(destroy_server.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+    stream_gate.release();
+    EXPECT_TRUE(stream_step.get());
+    EXPECT_TRUE(destroy_server.get());
+    EXPECT_FALSE(group->step_streams());
 }
 
 TEST(ManagedVideoServerTest, MaxStreamsPerStepCountsOnlyProgressedStreams)

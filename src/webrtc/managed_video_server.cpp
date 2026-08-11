@@ -3,10 +3,12 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -34,6 +36,51 @@ namespace video_server
 {
     namespace
     {
+        using ManagedStreamStepTestHook = std::function<void(const std::string &)>;
+        using ManagedApiStepTestHook = std::function<void()>;
+
+        std::mutex &managed_test_hook_mutex()
+        {
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        ManagedStreamStepTestHook &managed_stream_step_test_hook()
+        {
+            static ManagedStreamStepTestHook hook;
+            return hook;
+        }
+
+        ManagedApiStepTestHook &managed_api_step_test_hook()
+        {
+            static ManagedApiStepTestHook hook;
+            return hook;
+        }
+
+        ManagedApiStepTestHook &managed_shutdown_wait_test_hook()
+        {
+            static ManagedApiStepTestHook hook;
+            return hook;
+        }
+
+        ManagedStreamStepTestHook current_managed_stream_step_test_hook()
+        {
+            std::lock_guard<std::mutex> lock(managed_test_hook_mutex());
+            return managed_stream_step_test_hook();
+        }
+
+        ManagedApiStepTestHook current_managed_api_step_test_hook()
+        {
+            std::lock_guard<std::mutex> lock(managed_test_hook_mutex());
+            return managed_api_step_test_hook();
+        }
+
+        ManagedApiStepTestHook current_managed_shutdown_wait_test_hook()
+        {
+            std::lock_guard<std::mutex> lock(managed_test_hook_mutex());
+            return managed_shutdown_wait_test_hook();
+        }
+
         const char *to_string(ExecutionMode mode)
         {
             switch (mode)
@@ -351,7 +398,10 @@ namespace video_server
             struct ManagedServerAccess
             {
                 std::mutex mutex;
+                std::condition_variable cv;
                 ManagedVideoServer *owner{nullptr};
+                bool shutting_down{false};
+                size_t active_calls{0};
             };
 
             class StreamGroupHandle;
@@ -372,7 +422,20 @@ namespace video_server
             ~ManagedVideoServer() override
             {
                 {
-                    std::lock_guard<std::mutex> access_lock(access_->mutex);
+                    std::unique_lock<std::mutex> access_lock(access_->mutex);
+                    access_->shutting_down = true;
+                    if (access_->active_calls > 0)
+                    {
+                        if (const auto hook = current_managed_shutdown_wait_test_hook())
+                        {
+                            access_lock.unlock();
+                            hook();
+                            access_lock.lock();
+                        }
+                    }
+                    access_->cv.wait(access_lock,
+                                     [this]()
+                                     { return access_->active_calls == 0; });
                     access_->owner = nullptr;
                 }
                 stop();
@@ -811,7 +874,7 @@ namespace video_server
                     if (const auto access = access_.lock())
                     {
                         std::lock_guard<std::mutex> access_lock(access->mutex);
-                        if (access->owner != nullptr)
+                        if (access->owner != nullptr && !access->shutting_down)
                         {
                             access->owner->release_stream_group(group_id_, stream_ids_);
                         }
@@ -837,8 +900,27 @@ namespace video_server
                     {
                         return false;
                     }
-                    std::lock_guard<std::mutex> access_lock(access->mutex);
-                    return access->owner != nullptr && access->owner->step_stream_ids(stream_ids_);
+                    ManagedVideoServer *owner = nullptr;
+                    {
+                        std::lock_guard<std::mutex> access_lock(access->mutex);
+                        if (access->owner == nullptr || access->shutting_down)
+                        {
+                            return false;
+                        }
+                        owner = access->owner;
+                        ++access->active_calls;
+                    }
+                    struct ActiveCallGuard
+                    {
+                        std::shared_ptr<ManagedServerAccess> access;
+                        ~ActiveCallGuard()
+                        {
+                            std::lock_guard<std::mutex> access_lock(access->mutex);
+                            --access->active_calls;
+                            access->cv.notify_all();
+                        }
+                    } active_call{access};
+                    return owner->step_stream_ids(stream_ids_);
                 }
 
                 std::vector<std::string> stream_ids() const override { return stream_ids_; }
@@ -1053,6 +1135,10 @@ namespace video_server
                         pending.frame_id};
                     std::string error;
                     const auto encode_started_at = std::chrono::steady_clock::now();
+                    if (const auto hook = current_managed_stream_step_test_hook())
+                    {
+                        hook(stream_id);
+                    }
                     if (!state->pipeline->push_frame(transformed_view, &error))
                     {
                         spdlog::error("managed pipeline encode failed for {}: {}", stream_id, error);
@@ -1144,6 +1230,11 @@ namespace video_server
 
             bool step_api_impl()
             {
+                if (const auto hook = current_managed_api_step_test_hook())
+                {
+                    hook();
+                }
+
                 std::vector<std::pair<std::string, EncodedAccessUnitStorage>> units;
                 std::vector<std::pair<std::string, std::shared_ptr<ManagedStreamState>>> stream_states;
                 {
@@ -1253,6 +1344,27 @@ namespace video_server
         };
 
     } // namespace
+
+    namespace webrtc_internal
+    {
+        void set_managed_stream_step_test_hook(std::function<void(const std::string &)> hook)
+        {
+            std::lock_guard<std::mutex> lock(managed_test_hook_mutex());
+            managed_stream_step_test_hook() = std::move(hook);
+        }
+
+        void set_managed_api_step_test_hook(std::function<void()> hook)
+        {
+            std::lock_guard<std::mutex> lock(managed_test_hook_mutex());
+            managed_api_step_test_hook() = std::move(hook);
+        }
+
+        void set_managed_shutdown_wait_test_hook(std::function<void()> hook)
+        {
+            std::lock_guard<std::mutex> lock(managed_test_hook_mutex());
+            managed_shutdown_wait_test_hook() = std::move(hook);
+        }
+    } // namespace webrtc_internal
 
     ManagedVideoServerConfig load_managed_video_server_config(const std::string &config_path)
     {
