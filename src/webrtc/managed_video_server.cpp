@@ -428,22 +428,7 @@ namespace video_server
                 return true;
             }
 
-            ServerDebugSnapshot get_debug_snapshot() const override
-            {
-                auto snapshot = server_.get_debug_snapshot();
-                std::lock_guard<std::mutex> lock(mutex_);
-                for (auto &stream : snapshot.streams)
-                {
-                    const auto it = streams_.find(stream.stream_id);
-                    if (it == streams_.end())
-                    {
-                        continue;
-                    }
-                    stream.transform_timing = it->second.transform_timing;
-                    stream.encode_timing = it->second.encode_timing;
-                }
-                return snapshot;
-            }
+            ServerDebugSnapshot get_debug_snapshot() const override { return server_.get_debug_snapshot(); }
 
             bool register_stream(const StreamConfig &config) override
             {
@@ -598,8 +583,6 @@ namespace video_server
                 RawVideoPipelineConfig pipeline_template;
                 std::optional<PendingFrame> pending_frame;
                 std::unique_ptr<IRawVideoPipeline> pipeline;
-                StageTimingCounters transform_timing;
-                StageTimingCounters encode_timing;
                 uint64_t next_due_timestamp_ns{0};
                 uint64_t pipeline_config_generation{0};
                 uint32_t pipeline_width{0};
@@ -713,35 +696,6 @@ namespace video_server
                     std::chrono::duration_cast<std::chrono::microseconds>(finished_at - started_at).count());
             }
 
-            static void record_timing(StageTimingCounters &counters, uint64_t elapsed)
-            {
-                ++counters.samples;
-                counters.total_time_us += elapsed;
-                counters.last_time_us = elapsed;
-                counters.max_time_us = std::max(counters.max_time_us, elapsed);
-            }
-
-            void record_stream_timing(const std::string &stream_id,
-                                      StageTimingCounters ManagedStreamState::*field,
-                                      uint64_t elapsed)
-            {
-                if (field == &ManagedStreamState::transform_timing)
-                {
-                    server_.record_transform_timing(stream_id, elapsed);
-                }
-                else if (field == &ManagedStreamState::encode_timing)
-                {
-                    server_.record_encode_timing(stream_id, elapsed);
-                }
-
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = streams_.find(stream_id);
-                if (it != streams_.end())
-                {
-                    record_timing(it->second.*field, elapsed);
-                }
-            }
-
             StreamStepResult process_stream(const std::string &stream_id)
             {
                 StreamOutputConfig output_config;
@@ -784,8 +738,8 @@ namespace video_server
                 RgbImage transformed;
                 const auto transform_started_at = std::chrono::steady_clock::now();
                 const bool transform_ok = apply_display_transform(pending.view(), output_config, transformed);
-                record_stream_timing(stream_id, &ManagedStreamState::transform_timing,
-                                     elapsed_us(transform_started_at, std::chrono::steady_clock::now()));
+                server_.record_transform_timing(stream_id,
+                                                elapsed_us(transform_started_at, std::chrono::steady_clock::now()));
                 if (!transform_ok)
                 {
                     server_.note_frame_dropped(stream_id);
@@ -816,7 +770,6 @@ namespace video_server
                     const auto encode_started_at = std::chrono::steady_clock::now();
                     const bool encode_ok = it->second.pipeline->push_frame(transformed_view, &error);
                     const uint64_t encode_elapsed_us = elapsed_us(encode_started_at, std::chrono::steady_clock::now());
-                    record_timing(it->second.encode_timing, encode_elapsed_us);
                     server_.record_encode_timing(stream_id, encode_elapsed_us);
                     if (!encode_ok)
                     {

@@ -177,7 +177,7 @@ namespace video_server
         /** @brief Consumes one encoded access-unit snapshot. */
         virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
         /** @brief Applies negotiated H.264 parameters from SDP. */
-        virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
+        virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp, std::string video_mid = "") = 0;
         /** @brief Deactivates the sender permanently for this session. */
         virtual void deactivate(std::string reason) = 0;
         /** @brief Returns a diagnostic sender snapshot. */

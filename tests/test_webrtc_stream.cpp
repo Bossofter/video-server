@@ -212,6 +212,7 @@ namespace
         EXPECT_FALSE(before_bind.ready_for_video_track);
 
         track_sink->set_exists(true);
+        sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
 
         const auto after_exists = sender->snapshot();
         EXPECT_EQ(after_exists.sender_state, "waiting-for-decoded-startup-idr");
@@ -222,6 +223,7 @@ namespace
         EXPECT_FALSE(after_exists.first_decodable_frame_sent);
 
         track_sink->set_open(true);
+        sender->on_encoded_access_unit(make_encoded_unit({0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84}, 2000, true, false));
 
         const auto after_open = sender->snapshot();
         EXPECT_EQ(after_open.sender_state, "waiting-for-decoded-startup-idr");

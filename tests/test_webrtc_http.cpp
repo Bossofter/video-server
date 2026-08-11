@@ -2049,7 +2049,9 @@ TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCohe
 {
     const uint16_t port = static_cast<uint16_t>(23000 + (::getpid() % 10000));
     const std::string host = "127.0.0.1";
-    video_server::WebRtcVideoServer server(video_server::WebRtcVideoServerConfig{host, port, true});
+    auto config = video_server::WebRtcVideoServerConfig{host, port, true};
+    config.enable_debug_api = true;
+    video_server::WebRtcVideoServer server(config);
     video_server::StreamConfig alpha{"alpha", "alpha", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
     video_server::StreamConfig bravo{"bravo", "bravo", 8, 8, 30.0, video_server::VideoPixelFormat::GRAY8};
     ASSERT_TRUE(server.register_stream(alpha));
@@ -2185,6 +2187,11 @@ TEST(WebRtcHttpTest, SessionLifecycleTeardownReconnectIsolationAndConfigStayCohe
     EXPECT_TRUE(alpha_debug->current_session->active);
     EXPECT_EQ(bravo_debug->current_session->session_generation, bravo_generation_before_reconnect);
     EXPECT_TRUE(bravo_debug->current_session->active);
+
+    const auto debug_http = server.handle_http_request_for_test("GET", "/api/video/debug/stats");
+    ASSERT_EQ(debug_http.status, 200);
+    EXPECT_NE(debug_http.body.find("\"current_session\""), std::string::npos);
+    EXPECT_NE(debug_http.body.find("\"rtp_send_timing\""), std::string::npos);
 
     server.stop();
 }

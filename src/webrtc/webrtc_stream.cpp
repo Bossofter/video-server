@@ -375,11 +375,12 @@ namespace video_server
             H264EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink, uint32_t ssrc)
                 : video_track_sink_(std::move(video_track_sink)), ssrc_(ssrc) {}
 
-            void set_negotiated_h264_parameters(int payload_type, std::string fmtp) override
+            void set_negotiated_h264_parameters(int payload_type, std::string fmtp, std::string video_mid = "") override
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 negotiated_h264_payload_type_ = payload_type;
                 negotiated_h264_fmtp_ = std::move(fmtp);
+                video_mid_ = std::move(video_mid);
             }
 
             void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) override
@@ -430,6 +431,7 @@ namespace video_server
                     codec_ = codec_to_string(latest_encoded_unit->codec);
                     video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
                     video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
+                    video_mid_ = video_track_sink_ ? video_track_sink_->mid() : "";
                     has_track = video_track_exists_;
                     track_open = video_track_open_;
                     transport_ready = has_track && track_open;
@@ -738,8 +740,8 @@ namespace video_server
                 snapshot.last_lifecycle_event = last_lifecycle_event_;
                 snapshot.has_pending_encoded_unit = has_pending_encoded_unit_;
                 snapshot.codec_config_seen = codec_config_seen_;
-                snapshot.video_track_exists = session_active_ && video_track_sink_ && video_track_sink_->exists();
-                snapshot.video_track_open = session_active_ && video_track_sink_ && video_track_sink_->is_open();
+                snapshot.video_track_exists = session_active_ && video_track_exists_;
+                snapshot.video_track_open = session_active_ && video_track_open_;
                 snapshot.ready_for_video_track = snapshot.video_track_exists && codec_config_seen_ && cached_idr_available_;
                 snapshot.h264_delivery_active = h264_delivery_active_;
                 snapshot.keyframe_seen = keyframe_seen_;
@@ -776,7 +778,7 @@ namespace video_server
                 snapshot.negotiated_h264_payload_type = negotiated_h264_payload_type_;
                 snapshot.negotiated_h264_fmtp = negotiated_h264_fmtp_;
                 snapshot.last_packetization_status = last_packetization_status_;
-                snapshot.video_mid = (session_active_ && video_track_sink_) ? video_track_sink_->mid() : "";
+                snapshot.video_mid = video_mid_;
                 if (!snapshot.session_active)
                 {
                     snapshot.sender_state = "session-inactive";
@@ -819,6 +821,7 @@ namespace video_server
                 }
                 video_track_exists_ = video_track_sink_ && video_track_sink_->exists();
                 video_track_open_ = video_track_sink_ && video_track_sink_->is_open();
+                video_mid_ = video_track_sink_ ? video_track_sink_->mid() : "";
                 ready_for_video_track_ = video_track_exists_ && codec_config_seen_ && cached_idr_available_;
                 h264_delivery_active_ = false;
                 ++packetization_failures_;
@@ -852,6 +855,7 @@ namespace video_server
             bool ready_for_video_track_{false};
             bool video_track_exists_{false};
             bool video_track_open_{false};
+            std::string video_mid_;
             bool h264_delivery_active_{false};
             bool keyframe_seen_{false};
             bool cached_codec_config_available_{false};
@@ -1302,7 +1306,7 @@ namespace video_server
     local_video.addH264Codec(payload_type, h264_profile);
     local_video.addSSRC(video_ssrc_, "video-server-video", stream_id_, "h264-track");
     track->setDescription(local_video);
-    encoded_sender_->set_negotiated_h264_parameters(payload_type, h264_profile);
+    encoded_sender_->set_negotiated_h264_parameters(payload_type, h264_profile, track->mid());
     spdlog::info("[signaling] activated negotiated video section stream={} mid={} payload_type={} fmtp={} ssrc={}",
                  stream_id_, track->mid(), payload_type, h264_profile, video_ssrc_);
 
