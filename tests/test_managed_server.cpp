@@ -154,6 +154,11 @@ TEST(ManagedVideoServerTest, ManualStepPublishesOnlyLatestLatchedFrame)
     EXPECT_EQ(before_step->frames_received, 2u);
     EXPECT_EQ(before_step->frames_transformed, 0u);
     EXPECT_EQ(before_step->frames_dropped, 1u);
+    EXPECT_TRUE(before_step->raw_frame_statistics.available);
+    EXPECT_EQ(before_step->raw_frame_statistics.frame_id, 2u);
+    EXPECT_EQ(before_step->raw_frame_statistics.timestamp_ns, 200u);
+    EXPECT_DOUBLE_EQ(before_step->raw_frame_statistics.luminance_mean, 11.0);
+    EXPECT_EQ(before_step->raw_frame_statistics.luminance_histogram[11], 256u);
 
     ASSERT_TRUE(server->step());
 

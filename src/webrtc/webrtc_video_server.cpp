@@ -920,6 +920,40 @@ namespace video_server
             return out.str();
         }
 
+        std::string raw_frame_statistics_json(const RawFrameStatistics &statistics)
+        {
+            std::ostringstream out;
+            out << "{"
+                << "\"available\":" << bool_to_json(statistics.available) << ","
+                << "\"frame_id\":" << statistics.frame_id << ","
+                << "\"timestamp_ns\":" << statistics.timestamp_ns << ","
+                << "\"width\":" << statistics.width << ","
+                << "\"height\":" << statistics.height << ","
+                << "\"pixel_format\":\"" << json_escape(statistics.pixel_format) << "\","
+                << "\"pixel_count\":" << statistics.pixel_count << ","
+                << "\"luminance_min\":" << statistics.luminance_min << ","
+                << "\"luminance_max\":" << statistics.luminance_max << ","
+                << "\"luminance_mean\":" << statistics.luminance_mean << ","
+                << "\"luminance_stddev\":" << statistics.luminance_stddev << ","
+                << "\"luminance_p01\":" << statistics.luminance_p01 << ","
+                << "\"luminance_p50\":" << statistics.luminance_p50 << ","
+                << "\"luminance_p99\":" << statistics.luminance_p99 << ","
+                << "\"dynamic_range\":" << statistics.dynamic_range << ","
+                << "\"dark_pixel_fraction\":" << statistics.dark_pixel_fraction << ","
+                << "\"bright_pixel_fraction\":" << statistics.bright_pixel_fraction << ","
+                << "\"luminance_histogram\":[";
+            for (size_t i = 0; i < statistics.luminance_histogram.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    out << ',';
+                }
+                out << statistics.luminance_histogram[i];
+            }
+            out << "]}";
+            return out.str();
+        }
+
         std::string stream_debug_snapshot_json(const StreamDebugSnapshot &stream)
         {
             std::ostringstream out;
@@ -971,6 +1005,7 @@ namespace video_server
                 << "\"total_frames_transformed\":" << stream.total_frames_transformed << ","
                 << "\"total_frames_dropped\":" << stream.total_frames_dropped << ","
                 << "\"total_access_units_received\":" << stream.total_access_units_received << ","
+                << "\"raw_frame_statistics\":" << raw_frame_statistics_json(stream.raw_frame_statistics) << ","
                 << "\"current_session\":";
             if (stream.current_session.has_value())
             {
@@ -1466,6 +1501,7 @@ namespace video_server
                         << bool_to_json(latest_encoded ? latest_encoded->keyframe : false) << ','
                         << "\"latest_encoded_codec_config\":"
                         << bool_to_json(latest_encoded ? latest_encoded->codec_config : false) << ','
+                        << "\"raw_frame_statistics\":" << raw_frame_statistics_json(info->raw_frame_statistics) << ','
                         << "\"active\":" << bool_to_json(info->active) << ","
                         << "\"output_config\":" << output_config_json(info->output_config) << '}';
                     return finalize(HttpResponse{200, out.str(), "application/json"});
@@ -1859,6 +1895,11 @@ namespace video_server
     bool WebRtcVideoServer::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
     {
         return impl_->core_.note_frame_received(stream_id, timestamp_ns);
+    }
+
+    bool WebRtcVideoServer::note_frame_received(const std::string &stream_id, const VideoFrameView &frame)
+    {
+        return impl_->core_.note_frame_received(stream_id, frame);
     }
 
     bool WebRtcVideoServer::note_frame_dropped(const std::string &stream_id)

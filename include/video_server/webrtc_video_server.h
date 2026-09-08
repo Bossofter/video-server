@@ -145,6 +145,15 @@ namespace video_server
         bool note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
 
         /**
+         * @brief Records receipt of and computes statistics for one valid raw input frame.
+         *
+         * @param stream_id Identifier of the target stream.
+         * @param frame Raw frame to analyze before transforms or encoding.
+         * @return True when the stream exists and the frame could be analyzed.
+         */
+        bool note_frame_received(const std::string &stream_id, const VideoFrameView &frame);
+
+        /**
          * @brief Records that one raw frame was dropped for the stream.
          *
          * @param stream_id Identifier of the target stream.

@@ -76,6 +76,11 @@ Important fields include:
 - `latest_encoded_codec`
 - `latest_encoded_sequence_id`
 - `latest_encoded_keyframe`
+- `raw_frame_statistics`, containing a live snapshot calculated before display transforms or encoding:
+  - source frame id, timestamp, dimensions, pixel format, and pixel count
+  - normalized 0–255 luminance min, max, mean, standard deviation, p01, p50, and p99
+  - p01–p99 dynamic range and dark/bright pixel fractions
+  - a 256-bin luminance count histogram
 - `output_config`
 
 ### Get Latest Frame Image
@@ -222,6 +227,7 @@ Returns:
 - active session count
 - security counters
 - per-stream debug snapshots
+- the same per-stream `raw_frame_statistics` exposed by the individual stream-info route
 - encoder observability, including requested encoder, active encoder, hardware acceleration state, hardware device, and VA-API fallback reason when applicable
 
 ## Status Codes

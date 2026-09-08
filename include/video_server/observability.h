@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "video_server/raw_frame_statistics.h"
+
 namespace video_server
 {
 
@@ -109,6 +111,7 @@ namespace video_server
         uint64_t total_frames_transformed{0};                      /**< Total frames emitted by the transform stage. */
         uint64_t total_frames_dropped{0};                          /**< Total frames dropped by throttling or gating. */
         uint64_t total_access_units_received{0};                   /**< Total encoded access units received. */
+        RawFrameStatistics raw_frame_statistics;                   /**< Analysis of the latest accepted raw input frame. */
         std::optional<StreamSessionDebugSnapshot> current_session; /**< Current session snapshot when present. */
     };
 

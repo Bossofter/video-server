@@ -349,6 +349,77 @@ TEST(VideoServerCoreTest, AcceptsHighBitDepthGrayscaleInputAndPublishesRgbSnapsh
     EXPECT_NEAR(static_cast<double>(latest->bytes[9]), 64.0, 1.0);
 }
 
+TEST(VideoServerCoreTest, CalculatesStatisticsFromRawFrameBeforeDisplayTransform)
+{
+    video_server::VideoServerCore server;
+    const video_server::StreamConfig cfg{"raw-stats", "Raw statistics", 2, 2, 30.0,
+                                         video_server::VideoPixelFormat::GRAY8};
+    ASSERT_TRUE(server.register_stream(cfg));
+
+    video_server::StreamOutputConfig output;
+    output.display_mode = video_server::VideoDisplayMode::BlackHot;
+    output.output_fps = 1.0;
+    ASSERT_TRUE(server.set_stream_output_config(cfg.stream_id, output));
+
+    std::vector<uint8_t> first_pixels = {0, 64, 128, 255};
+    ASSERT_TRUE(server.push_frame(cfg.stream_id, make_gray_frame(first_pixels, 2, 2, 1'000'000'000, 41)));
+
+    auto info = server.get_stream_info(cfg.stream_id);
+    ASSERT_TRUE(info.has_value());
+    const auto &first = info->raw_frame_statistics;
+    EXPECT_TRUE(first.available);
+    EXPECT_EQ(first.frame_id, 41u);
+    EXPECT_EQ(first.timestamp_ns, 1'000'000'000u);
+    EXPECT_EQ(first.pixel_format, "GRAY8");
+    EXPECT_EQ(first.pixel_count, 4u);
+    EXPECT_DOUBLE_EQ(first.luminance_min, 0.0);
+    EXPECT_DOUBLE_EQ(first.luminance_max, 255.0);
+    EXPECT_DOUBLE_EQ(first.luminance_mean, 111.75);
+    EXPECT_NEAR(first.luminance_stddev, 94.2772, 0.0001);
+    EXPECT_DOUBLE_EQ(first.luminance_p01, 0.0);
+    EXPECT_DOUBLE_EQ(first.luminance_p50, 64.0);
+    EXPECT_DOUBLE_EQ(first.luminance_p99, 255.0);
+    EXPECT_DOUBLE_EQ(first.dynamic_range, 255.0);
+    EXPECT_DOUBLE_EQ(first.dark_pixel_fraction, 0.25);
+    EXPECT_DOUBLE_EQ(first.bright_pixel_fraction, 0.25);
+    EXPECT_EQ(first.luminance_histogram[0], 1u);
+    EXPECT_EQ(first.luminance_histogram[64], 1u);
+    EXPECT_EQ(first.luminance_histogram[128], 1u);
+    EXPECT_EQ(first.luminance_histogram[255], 1u);
+
+    const auto transformed = server.get_latest_frame_for_stream(cfg.stream_id);
+    ASSERT_NE(transformed, nullptr);
+    EXPECT_EQ(transformed->bytes[0], 255u); // Black-hot proves stats did not inspect transformed output.
+
+    // Accepted raw frames update live statistics even when output FPS gating drops their transformed output.
+    std::vector<uint8_t> second_pixels = {10, 10, 10, 10};
+    ASSERT_TRUE(server.push_frame(cfg.stream_id, make_gray_frame(second_pixels, 2, 2, 1'000'000'001, 42)));
+    info = server.get_stream_info(cfg.stream_id);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->frames_received, 2u);
+    EXPECT_EQ(info->frames_transformed, 1u);
+    EXPECT_EQ(info->frames_dropped, 1u);
+    EXPECT_EQ(info->raw_frame_statistics.frame_id, 42u);
+    EXPECT_DOUBLE_EQ(info->raw_frame_statistics.luminance_mean, 10.0);
+    EXPECT_EQ(info->raw_frame_statistics.luminance_histogram[10], 4u);
+}
+
+TEST(VideoServerCoreTest, NormalizesHighBitDepthRawStatisticsToEightBitLuminance)
+{
+    video_server::VideoServerCore server;
+    const video_server::StreamConfig cfg{"gray16-stats", "Gray16 statistics", 2, 1, 30.0,
+                                         video_server::VideoPixelFormat::GRAY16LE};
+    ASSERT_TRUE(server.register_stream(cfg));
+    const std::vector<uint8_t> pixels = {0x00, 0x00, 0xff, 0xff};
+    ASSERT_TRUE(server.push_frame(cfg.stream_id, make_gray16_frame(pixels, 2, 1, 50, 5)));
+
+    const auto info = server.get_stream_info(cfg.stream_id);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_DOUBLE_EQ(info->raw_frame_statistics.luminance_mean, 127.5);
+    EXPECT_EQ(info->raw_frame_statistics.luminance_histogram[0], 1u);
+    EXPECT_EQ(info->raw_frame_statistics.luminance_histogram[255], 1u);
+}
+
 TEST(VideoServerCoreTest, ReconfigureResetsOutputAndFpsThrottlePerStreamOnly)
 {
     video_server::VideoServerCore server;
