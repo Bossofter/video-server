@@ -51,7 +51,11 @@ vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
 vcpkg install 'video-server[vaapi]' --overlay-ports="${PWD}/vcpkg"
 ```
 
-`video-server[vaapi]` enables optional Linux VA-API H.264 hardware encoding for AMD and Intel VA-API devices. Software-only installs use OpenH264 or explicit libx264 where available.
+`video-server[vaapi]` enables Linux VA-API H.264 and AV1 hardware encoding for supported AMD Radeon and Intel devices. `video-server[nvenc]` enables NVIDIA H.264 and AV1 NVENC; both features can be selected together. Software H.264 installs use OpenH264 or explicit libx264 where available.
+
+AV1 is selected per raw pipeline with `codec = "av1"` and `encoder = "vaapi"`, `"nvenc"`, or `"automatic"`. Automatic AV1 selection tries VA-API first and then NVENC, and fails with probe diagnostics rather than silently switching to a software encoder. AV1 WebRTC output uses the standardized AV1 RTP payload and is negotiated only when the browser offers AV1.
+
+The project remains MIT licensed. The AV1 paths call FFmpeg/libav hardware wrappers and do not add GPL codec libraries; NVIDIA's driver is a system/runtime prerequisite and is not distributed by this project.
 
 ## License
 

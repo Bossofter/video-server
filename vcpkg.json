@@ -24,7 +24,7 @@
     ],
     "features": {
         "vaapi": {
-            "description": "Enable VA-API hardware H264 encoding support on Linux",
+            "description": "Enable VA-API hardware H264/AV1 encoding support on Linux (including Radeon)",
             "supports": "linux",
             "dependencies": [
                 {
@@ -33,6 +33,15 @@
                         "vaapi"
                     ],
                     "platform": "linux"
+                }
+            ]
+        },
+        "nvenc": {
+            "description": "Enable NVIDIA NVENC hardware H264/AV1 encoding support",
+            "dependencies": [
+                {
+                    "name": "ffmpeg",
+                    "features": ["nvcodec"]
                 }
             ]
         }

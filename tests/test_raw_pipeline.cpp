@@ -164,6 +164,45 @@ namespace
         EXPECT_TRUE(std::any_of(vaapi_options.private_options.begin(), vaapi_options.private_options.end(),
                                 [](const video_server::RawH264EncoderOption &option)
                                 { return option.key == "aud"; }));
+
+        config.codec = video_server::VideoCodec::AV1;
+        const auto av1_vaapi_options = video_server::build_libav_h264_encoder_backend_options(config, "av1_vaapi");
+        EXPECT_EQ(av1_vaapi_options.family, video_server::RawH264EncoderFamily::Vaapi);
+        EXPECT_TRUE(av1_vaapi_options.private_options.empty());
+
+        const auto av1_nvenc_options = video_server::build_libav_h264_encoder_backend_options(config, "av1_nvenc");
+        EXPECT_EQ(av1_nvenc_options.family, video_server::RawH264EncoderFamily::Nvenc);
+        EXPECT_TRUE(std::any_of(av1_nvenc_options.private_options.begin(), av1_nvenc_options.private_options.end(),
+                                [](const video_server::RawH264EncoderOption &option)
+                                { return option.key == "tune" && option.value == "ull"; }));
+    }
+
+    TEST(RawToH264PipelineTest, Av1RejectsH264OnlySoftwareEncoders)
+    {
+        auto config = make_default_config();
+        config.codec = video_server::VideoCodec::AV1;
+        config.encoder = video_server::RawH264Encoder::LibOpenH264;
+        auto pipeline = video_server::make_raw_video_pipeline("invalid-av1", config,
+                                                               [](const video_server::EncodedAccessUnitView &) { return true; });
+        std::string error;
+        EXPECT_FALSE(pipeline->start(&error));
+        EXPECT_NE(error.find("AV1 requires"), std::string::npos);
+    }
+
+    TEST(RawToH264PipelineTest, Av1HardwareProbesReportActionableResults)
+    {
+        std::string vaapi_error;
+        const bool vaapi = video_server::probe_raw_av1_vaapi_encoder(
+            "/dev/dri/video-server-test-missing-render-node", &vaapi_error);
+        EXPECT_FALSE(vaapi);
+        EXPECT_FALSE(vaapi_error.empty());
+
+        std::string nvenc_error;
+        const bool nvenc = video_server::probe_raw_av1_nvenc_encoder(&nvenc_error);
+        if (!nvenc)
+        {
+            EXPECT_FALSE(nvenc_error.empty());
+        }
     }
 
     TEST(RawToH264PipelineTest, ReportsVaapiCompileSupport)

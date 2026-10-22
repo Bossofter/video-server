@@ -161,6 +161,23 @@ namespace video_server
             {
                 return RawH264Encoder::Vaapi;
             }
+            if (value == "nvenc")
+            {
+                return RawH264Encoder::Nvenc;
+            }
+            return std::nullopt;
+        }
+
+        std::optional<VideoCodec> parse_codec(const std::string &value)
+        {
+            if (value == "h264" || value == "H264")
+            {
+                return VideoCodec::H264;
+            }
+            if (value == "av1" || value == "AV1")
+            {
+                return VideoCodec::AV1;
+            }
             return std::nullopt;
         }
 
@@ -213,6 +230,15 @@ namespace video_server
         RawVideoPipelineConfig parse_pipeline_config(const toml::table &table)
         {
             RawVideoPipelineConfig config;
+            if (const auto value = table_value<std::string>(table, "codec"))
+            {
+                const auto codec = parse_codec(*value);
+                if (!codec.has_value())
+                {
+                    throw std::runtime_error("invalid pipeline codec: " + *value);
+                }
+                config.codec = *codec;
+            }
             if (const auto value = table_value<uint32_t>(table, "input_width"))
             {
                 config.input_width = *value;
@@ -799,13 +825,14 @@ namespace video_server
             struct EncodedAccessUnitStorage
             {
                 std::vector<uint8_t> bytes;
+                VideoCodec codec{VideoCodec::H264};
                 uint64_t timestamp_ns{0};
                 bool keyframe{false};
                 bool codec_config{false};
 
                 EncodedAccessUnitView view() const
                 {
-                    return EncodedAccessUnitView{bytes.data(), bytes.size(), VideoCodec::H264, timestamp_ns, keyframe, codec_config};
+                    return EncodedAccessUnitView{bytes.data(), bytes.size(), codec, timestamp_ns, keyframe, codec_config};
                 }
             };
 
@@ -1019,13 +1046,14 @@ namespace video_server
                 }
 
                 RawVideoPipelineConfig pipeline_config = make_effective_pipeline_config(*state, output_config, width, height);
-                auto pipeline = make_raw_to_h264_pipeline(
+                auto pipeline = make_raw_video_pipeline(
                     stream_id, pipeline_config,
                     [state](const EncodedAccessUnitView &access_unit)
                     {
                         EncodedAccessUnitStorage storage;
                         storage.bytes.assign(static_cast<const uint8_t *>(access_unit.data),
                                              static_cast<const uint8_t *>(access_unit.data) + access_unit.size_bytes);
+                        storage.codec = access_unit.codec;
                         storage.timestamp_ns = access_unit.timestamp_ns;
                         storage.keyframe = access_unit.keyframe;
                         storage.codec_config = access_unit.codec_config;

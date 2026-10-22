@@ -174,6 +174,24 @@ encoder = "automatic"
 encoder_crf = 23
 ```
 
+For AV1 hardware encoding on Radeon/VA-API:
+
+```toml
+codec = "av1"
+encoder = "vaapi"
+hardware_device = "/dev/dri/renderD128"
+```
+
+For AV1 hardware encoding on NVIDIA:
+
+```toml
+codec = "av1"
+encoder = "nvenc"
+encoder_preset = "p1"
+```
+
+`automatic` AV1 selection probes `av1_vaapi` first, then `av1_nvenc`. It does not introduce a software AV1 fallback. The linked FFmpeg build must expose the selected encoder; with the overlay port, install the `vaapi` and/or `nvenc` feature. AV1 access units are emitted as low-overhead temporal-unit OBUs and packetized for WebRTC AV1 RTP.
+
 ## Pushing Frames
 
 ```cpp

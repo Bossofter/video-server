@@ -181,8 +181,23 @@ namespace video_server
             }
         }
 
-        const AVCodec *find_libav_h264_encoder(RawH264Encoder encoder)
+        const AVCodec *find_libav_encoder(VideoCodec codec, RawH264Encoder encoder)
         {
+            if (codec == VideoCodec::AV1)
+            {
+                switch (encoder)
+                {
+                case RawH264Encoder::Vaapi:
+                    return avcodec_find_encoder_by_name("av1_vaapi");
+                case RawH264Encoder::Nvenc:
+                    return avcodec_find_encoder_by_name("av1_nvenc");
+                case RawH264Encoder::Automatic:
+                    return nullptr;
+                case RawH264Encoder::LibX264:
+                case RawH264Encoder::LibOpenH264:
+                    return nullptr;
+                }
+            }
             switch (encoder)
             {
             case RawH264Encoder::LibX264:
@@ -191,6 +206,8 @@ namespace video_server
                 return avcodec_find_encoder_by_name("libopenh264");
             case RawH264Encoder::Vaapi:
                 return avcodec_find_encoder_by_name("h264_vaapi");
+            case RawH264Encoder::Nvenc:
+                return avcodec_find_encoder_by_name("h264_nvenc");
             case RawH264Encoder::Automatic:
                 return avcodec_find_encoder_by_name("libopenh264");
             }
@@ -254,23 +271,25 @@ namespace video_server
 #endif
         }
 
-        bool probe_vaapi_encoder_for_size(const std::string &hardware_device,
+        bool probe_vaapi_encoder_for_size(VideoCodec output_codec,
+                                          const std::string &hardware_device,
                                           uint32_t width,
                                           uint32_t height,
                                           std::string *error_message)
         {
 #if VIDEO_SERVER_ENABLE_VAAPI
-            const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
+            const char *encoder_name = output_codec == VideoCodec::AV1 ? "av1_vaapi" : "h264_vaapi";
+            const AVCodec *codec = avcodec_find_encoder_by_name(encoder_name);
             if (codec == nullptr)
             {
-                set_error_value(error_message, "h264_vaapi encoder unavailable in the linked libavcodec build");
+                set_error_value(error_message, std::string(encoder_name) + " encoder unavailable in the linked libavcodec build");
                 return false;
             }
 
             std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context(avcodec_alloc_context3(codec));
             if (!codec_context)
             {
-                set_error_value(error_message, "failed to allocate h264_vaapi probe codec context");
+                set_error_value(error_message, std::string("failed to allocate ") + encoder_name + " probe codec context");
                 return false;
             }
 
@@ -296,14 +315,14 @@ namespace video_server
             codec_context->hw_frames_ctx = av_buffer_ref(frames.get());
             if (codec_context->hw_frames_ctx == nullptr)
             {
-                set_error_value(error_message, "failed to attach VA-API frames context to h264_vaapi probe encoder");
+                set_error_value(error_message, std::string("failed to attach VA-API frames context to ") + encoder_name + " probe encoder");
                 return false;
             }
 
             const int rc = avcodec_open2(codec_context.get(), codec, nullptr);
             if (rc < 0)
             {
-                set_error_value(error_message, "h264_vaapi encoder unusable for " + std::to_string(width) + "x" +
+                set_error_value(error_message, std::string(encoder_name) + " encoder unusable for " + std::to_string(width) + "x" +
                                                    std::to_string(height) + ": " + av_error_string(rc));
                 return false;
             }
@@ -312,9 +331,41 @@ namespace video_server
             (void)hardware_device;
             (void)width;
             (void)height;
-            set_error_value(error_message, "VA-API H264 encoder support was not compiled into video-server");
+            set_error_value(error_message, "VA-API encoder support was not compiled into video-server");
             return false;
 #endif
+        }
+
+        bool probe_nvenc_encoder_for_size(VideoCodec output_codec, uint32_t width, uint32_t height,
+                                          std::string *error_message)
+        {
+            const char *encoder_name = output_codec == VideoCodec::AV1 ? "av1_nvenc" : "h264_nvenc";
+            const AVCodec *codec = avcodec_find_encoder_by_name(encoder_name);
+            if (codec == nullptr)
+            {
+                set_error_value(error_message, std::string(encoder_name) + " encoder unavailable in the linked libavcodec build");
+                return false;
+            }
+            std::unique_ptr<AVCodecContext, AvCodecContextDeleter> context(avcodec_alloc_context3(codec));
+            if (!context)
+            {
+                set_error_value(error_message, std::string("failed to allocate ") + encoder_name + " probe context");
+                return false;
+            }
+            context->width = static_cast<int>(width);
+            context->height = static_cast<int>(height);
+            context->pix_fmt = AV_PIX_FMT_YUV420P;
+            context->time_base = AVRational{1, 30};
+            context->framerate = AVRational{30, 1};
+            context->gop_size = 30;
+            context->max_b_frames = 0;
+            const int rc = avcodec_open2(context.get(), codec, nullptr);
+            if (rc < 0)
+            {
+                set_error_value(error_message, std::string(encoder_name) + " encoder unusable: " + av_error_string(rc));
+                return false;
+            }
+            return true;
         }
 
         class LibavH264EncoderBackend final : public IRawH264EncoderBackend
@@ -336,33 +387,52 @@ namespace video_server
                                                    ? *config_.output_height
                                                    : config_.input_height;
 
-                std::string vaapi_unavailable_reason;
+                std::string hardware_unavailable_reason;
                 const std::string requested_name = to_string(config_.encoder);
                 const std::string vaapi_device = effective_vaapi_device(config_);
                 bool select_vaapi = config_.encoder == RawH264Encoder::Vaapi;
+                bool select_nvenc = config_.encoder == RawH264Encoder::Nvenc;
                 if (config_.encoder == RawH264Encoder::Automatic)
                 {
-                    select_vaapi = probe_vaapi_encoder_for_size(vaapi_device, output_width, output_height,
-                                                                &vaapi_unavailable_reason);
+                    select_vaapi = probe_vaapi_encoder_for_size(config_.codec, vaapi_device, output_width, output_height,
+                                                                &hardware_unavailable_reason);
+                    if (!select_vaapi && config_.codec == VideoCodec::AV1)
+                    {
+                        std::string nvenc_reason;
+                        select_nvenc = probe_nvenc_encoder_for_size(config_.codec, output_width, output_height, &nvenc_reason);
+                        if (!select_nvenc)
+                        {
+                            hardware_unavailable_reason += "; " + nvenc_reason;
+                        }
+                    }
                 }
                 if (select_vaapi && !raw_h264_vaapi_compiled_support())
                 {
-                    set_error_value(error_message, "VA-API H264 encoder support was not compiled into video-server");
+                    set_error_value(error_message, "VA-API " + std::string(to_string(config_.codec)) +
+                                                       " encoder support was not compiled into video-server");
                     return false;
                 }
 
-                const AVCodec *codec = select_vaapi ? find_libav_h264_encoder(RawH264Encoder::Vaapi)
-                                                    : find_libav_h264_encoder(config_.encoder);
+                const AVCodec *codec = select_vaapi ? find_libav_encoder(config_.codec, RawH264Encoder::Vaapi)
+                                     : select_nvenc ? find_libav_encoder(config_.codec, RawH264Encoder::Nvenc)
+                                                    : find_libav_encoder(config_.codec, config_.encoder);
                 if (codec == nullptr)
                 {
                     if (select_vaapi)
                     {
-                        set_error_value(error_message, "h264_vaapi encoder unavailable in the linked libavcodec build");
+                        set_error_value(error_message, std::string(config_.codec == VideoCodec::AV1 ? "av1_vaapi" : "h264_vaapi") +
+                                                           " encoder unavailable in the linked libavcodec build");
+                    }
+                    else if (select_nvenc)
+                    {
+                        set_error_value(error_message, std::string(config_.codec == VideoCodec::AV1 ? "av1_nvenc" : "h264_nvenc") +
+                                                           " encoder unavailable in the linked libavcodec build");
                     }
                     else
                     {
                         set_error_value(error_message,
-                                        "failed to locate requested libav H264 encoder for mode '" + std::string(to_string(config_.encoder)) +
+                                        "failed to locate requested libav " + std::string(to_string(config_.codec)) +
+                                            " encoder for mode '" + std::string(to_string(config_.encoder)) +
                                             "'");
                     }
                     return false;
@@ -395,8 +465,8 @@ namespace video_server
                 codec_context->thread_count = 1;
 
                 selected_encoder_name_ = codec->name != nullptr ? codec->name : "unknown";
-                hardware_accelerated_ = select_vaapi;
-                active_hardware_device_ = select_vaapi ? vaapi_device : std::string();
+                hardware_accelerated_ = select_vaapi || select_nvenc;
+                active_hardware_device_ = select_vaapi ? vaapi_device : (select_nvenc ? "nvidia" : std::string());
                 encoder_options_ = build_libav_h264_encoder_backend_options(config_, selected_encoder_name_);
                 if (encoder_options_.family == RawH264EncoderFamily::OpenH264)
                 {
@@ -431,38 +501,42 @@ namespace video_server
                 int rc = avcodec_open2(codec_context.get(), codec, nullptr);
                 if (rc < 0)
                 {
-                    set_error_value(error_message, "failed to initialize libav H264 encoder '" + selected_encoder_name_ +
+                    set_error_value(error_message, "failed to initialize libav " + std::string(to_string(config_.codec)) +
+                                                       " encoder '" + selected_encoder_name_ +
                                                        "': " + av_error_string(rc));
                     return false;
                 }
 
-                const AVBitStreamFilter *filter = av_bsf_get_by_name("h264_mp4toannexb");
-                if (filter == nullptr)
-                {
-                    set_error_value(error_message, "failed to locate libav h264_mp4toannexb bitstream filter");
-                    return false;
-                }
                 std::unique_ptr<AVBSFContext, AvBsfContextDeleter> bitstream_filter;
-                AVBSFContext *raw_bsf = nullptr;
-                rc = av_bsf_alloc(filter, &raw_bsf);
-                if (rc < 0 || raw_bsf == nullptr)
+                if (config_.codec == VideoCodec::H264)
                 {
-                    set_error_value(error_message, "failed to allocate libav bitstream filter context: " + av_error_string(rc));
-                    return false;
-                }
-                bitstream_filter.reset(raw_bsf);
-                rc = avcodec_parameters_from_context(bitstream_filter->par_in, codec_context.get());
-                if (rc < 0)
-                {
-                    set_error_value(error_message, "failed to seed bitstream filter codec parameters: " + av_error_string(rc));
-                    return false;
-                }
-                bitstream_filter->time_base_in = codec_context->time_base;
-                rc = av_bsf_init(bitstream_filter.get());
-                if (rc < 0)
-                {
-                    set_error_value(error_message, "failed to initialize libav h264_mp4toannexb filter: " + av_error_string(rc));
-                    return false;
+                    const AVBitStreamFilter *filter = av_bsf_get_by_name("h264_mp4toannexb");
+                    if (filter == nullptr)
+                    {
+                        set_error_value(error_message, "failed to locate libav h264_mp4toannexb bitstream filter");
+                        return false;
+                    }
+                    AVBSFContext *raw_bsf = nullptr;
+                    rc = av_bsf_alloc(filter, &raw_bsf);
+                    if (rc < 0 || raw_bsf == nullptr)
+                    {
+                        set_error_value(error_message, "failed to allocate libav bitstream filter context: " + av_error_string(rc));
+                        return false;
+                    }
+                    bitstream_filter.reset(raw_bsf);
+                    rc = avcodec_parameters_from_context(bitstream_filter->par_in, codec_context.get());
+                    if (rc < 0)
+                    {
+                        set_error_value(error_message, "failed to seed bitstream filter codec parameters: " + av_error_string(rc));
+                        return false;
+                    }
+                    bitstream_filter->time_base_in = codec_context->time_base;
+                    rc = av_bsf_init(bitstream_filter.get());
+                    if (rc < 0)
+                    {
+                        set_error_value(error_message, "failed to initialize libav h264_mp4toannexb filter: " + av_error_string(rc));
+                        return false;
+                    }
                 }
 
                 std::unique_ptr<AVFrame, AvFrameDeleter> input_frame(av_frame_alloc());
@@ -532,7 +606,7 @@ namespace video_server
                 else if (config_.encoder == RawH264Encoder::Automatic)
                 {
                     spdlog::info("[encoder] stream={} requested={} vaapi-unavailable=\"{}\" selected={}", stream_id_,
-                                 requested_name, vaapi_unavailable_reason, selected_encoder_name_);
+                                 requested_name, hardware_unavailable_reason, selected_encoder_name_);
                 }
                 else
                 {
@@ -549,6 +623,7 @@ namespace video_server
                 }
 
                 next_frame_index_ = 0;
+                uses_vaapi_frames_ = select_vaapi;
                 codec_context_ = std::move(codec_context);
                 hw_device_context_ = std::move(hw_device);
                 hw_frames_context_ = std::move(hw_frames);
@@ -573,7 +648,7 @@ namespace video_server
                 {
                     return false;
                 }
-                AVFrame *frame_to_send = hardware_accelerated_ ? hardware_frame_.get() : encoder_frame_.get();
+                AVFrame *frame_to_send = uses_vaapi_frames_ ? hardware_frame_.get() : encoder_frame_.get();
                 const int rc = avcodec_send_frame(codec_context_.get(), frame_to_send);
                 if (rc < 0)
                 {
@@ -617,6 +692,7 @@ namespace video_server
                 selected_encoder_name_.clear();
                 active_hardware_device_.clear();
                 hardware_accelerated_ = false;
+                uses_vaapi_frames_ = false;
                 encoder_options_ = {};
             }
 
@@ -697,7 +773,7 @@ namespace video_server
                 {
                     encoder_frame_->pts = static_cast<int64_t>(next_frame_index_);
                 }
-                if (hardware_accelerated_)
+                if (uses_vaapi_frames_)
                 {
                     av_frame_unref(hardware_frame_.get());
                     rc = av_hwframe_get_buffer(hw_frames_context_.get(), hardware_frame_.get(), 0);
@@ -743,6 +819,10 @@ namespace video_server
 
             bool submit_packet(AVPacket *packet, std::string *error_message)
             {
+                if (config_.codec == VideoCodec::AV1)
+                {
+                    return emit_access_unit(packet, error_message);
+                }
                 int rc = av_bsf_send_packet(bitstream_filter_.get(), packet);
                 if (rc < 0)
                 {
@@ -776,16 +856,19 @@ namespace video_server
                 EncodedAccessUnitView view{};
                 view.data = packet->data;
                 view.size_bytes = static_cast<size_t>(packet->size);
-                view.codec = VideoCodec::H264;
+                view.codec = config_.codec;
                 view.timestamp_ns = static_cast<uint64_t>(av_rescale_q(packet->pts, codec_context_->time_base,
                                                                        AVRational{1, 1000000000}));
-                view.keyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0 || contains_nal_type(packet->data, view.size_bytes, kNalTypeIdr);
-                view.codec_config = contains_nal_type(packet->data, view.size_bytes, kNalTypeSps) &&
+                view.keyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0 ||
+                                (config_.codec == VideoCodec::H264 && contains_nal_type(packet->data, view.size_bytes, kNalTypeIdr));
+                view.codec_config = config_.codec == VideoCodec::H264 &&
+                                    contains_nal_type(packet->data, view.size_bytes, kNalTypeSps) &&
                                     contains_nal_type(packet->data, view.size_bytes, kNalTypePps) && !view.keyframe;
                 if (!sink_(view))
                 {
                     set_error_value(error_message,
-                                    "encoded access-unit sink rejected H264 access unit for stream '" + stream_id_ +
+                                    "encoded access-unit sink rejected " + std::string(to_string(config_.codec)) +
+                                        " access unit for stream '" + stream_id_ +
                                         "'; pipeline will stop and reject later push_frame() calls");
                     return false;
                 }
@@ -800,6 +883,7 @@ namespace video_server
             std::string selected_encoder_name_;
             std::string active_hardware_device_;
             bool hardware_accelerated_{false};
+            bool uses_vaapi_frames_{false};
             RawH264EncoderBackendOptions encoder_options_;
             std::unique_ptr<AVCodecContext, AvCodecContextDeleter> codec_context_;
             std::unique_ptr<AVBufferRef, AvBufferRefDeleter> hw_device_context_;
@@ -951,6 +1035,12 @@ namespace video_server
                     set_error_locked("encoder_crf must be in the range 0..51 when provided", error_message);
                     return false;
                 }
+                if (config_.codec == VideoCodec::AV1 &&
+                    (config_.encoder == RawH264Encoder::LibX264 || config_.encoder == RawH264Encoder::LibOpenH264))
+                {
+                    set_error_locked("AV1 requires encoder 'automatic', 'vaapi', or 'nvenc'", error_message);
+                    return false;
+                }
                 return true;
             }
 
@@ -1051,7 +1141,18 @@ namespace video_server
         if (codec_name.find("vaapi") != std::string::npos)
         {
             options.family = RawH264EncoderFamily::Vaapi;
-            options.private_options.push_back({"aud", config.emit_access_unit_delimiters ? "1" : "0"});
+            if (config.codec == VideoCodec::H264)
+            {
+                options.private_options.push_back({"aud", config.emit_access_unit_delimiters ? "1" : "0"});
+            }
+            return options;
+        }
+        if (codec_name.find("nvenc") != std::string::npos)
+        {
+            options.family = RawH264EncoderFamily::Nvenc;
+            options.private_options.push_back({"preset", config.encoder_preset == "ultrafast" ? "p1" : config.encoder_preset});
+            options.private_options.push_back({"tune", "ull"});
+            options.private_options.push_back({"delay", "0"});
             return options;
         }
         options.family = RawH264EncoderFamily::Generic;
@@ -1071,12 +1172,29 @@ namespace video_server
     {
 #if VIDEO_SERVER_ENABLE_VAAPI
         const std::string device_path = hardware_device.empty() ? std::string(kDefaultVaapiDevice) : hardware_device;
-        return probe_vaapi_encoder_for_size(device_path, 256, 128, error_message);
+        return probe_vaapi_encoder_for_size(VideoCodec::H264, device_path, 256, 128, error_message);
 #else
         (void)hardware_device;
         set_error_value(error_message, "VA-API H264 encoder support was not compiled into video-server");
         return false;
 #endif
+    }
+
+    bool probe_raw_av1_vaapi_encoder(const std::string &hardware_device, std::string *error_message)
+    {
+#if VIDEO_SERVER_ENABLE_VAAPI
+        const std::string device_path = hardware_device.empty() ? std::string(kDefaultVaapiDevice) : hardware_device;
+        return probe_vaapi_encoder_for_size(VideoCodec::AV1, device_path, 256, 128, error_message);
+#else
+        (void)hardware_device;
+        set_error_value(error_message, "VA-API AV1 encoder support was not compiled into video-server");
+        return false;
+#endif
+    }
+
+    bool probe_raw_av1_nvenc_encoder(std::string *error_message)
+    {
+        return probe_nvenc_encoder_for_size(VideoCodec::AV1, 256, 128, error_message);
     }
 
     std::unique_ptr<IRawH264EncoderBackend> make_raw_h264_encoder_backend(std::string stream_id,
@@ -1090,7 +1208,28 @@ namespace video_server
                                                                  RawVideoPipelineConfig config,
                                                                  EncodedAccessUnitSink sink)
     {
+        config.codec = VideoCodec::H264;
         return std::make_unique<RawToH264Pipeline>(std::move(stream_id), std::move(config), std::move(sink));
+    }
+
+    std::unique_ptr<IRawVideoPipeline> make_raw_video_pipeline(std::string stream_id,
+                                                               RawVideoPipelineConfig config,
+                                                               EncodedAccessUnitSink sink)
+    {
+        return std::make_unique<RawToH264Pipeline>(std::move(stream_id), std::move(config), std::move(sink));
+    }
+
+    std::unique_ptr<IRawVideoPipeline> make_raw_video_pipeline_for_server(std::string stream_id,
+                                                                          RawVideoPipelineConfig config,
+                                                                          IVideoServer &server)
+    {
+        std::string target_stream_id = stream_id;
+        return make_raw_video_pipeline(
+            std::move(stream_id), std::move(config),
+            [&server, target_stream_id = std::move(target_stream_id)](const EncodedAccessUnitView &access_unit)
+            {
+                return server.push_access_unit(target_stream_id, access_unit);
+            });
     }
 
     std::unique_ptr<IRawVideoPipeline> make_raw_to_h264_pipeline_for_server(std::string stream_id,
@@ -1130,6 +1269,8 @@ namespace video_server
             return "LibOpenH264";
         case RawH264Encoder::Vaapi:
             return "Vaapi";
+        case RawH264Encoder::Nvenc:
+            return "Nvenc";
         }
         return "Unknown";
     }
@@ -1144,6 +1285,8 @@ namespace video_server
             return "OpenH264";
         case RawH264EncoderFamily::Vaapi:
             return "Vaapi";
+        case RawH264EncoderFamily::Nvenc:
+            return "Nvenc";
         case RawH264EncoderFamily::Generic:
             return "Generic";
         }

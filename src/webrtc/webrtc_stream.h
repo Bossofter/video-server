@@ -177,6 +177,8 @@ namespace video_server
         virtual void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> latest_encoded_unit) = 0;
         /** @brief Applies negotiated H.264 parameters from SDP. */
         virtual void set_negotiated_h264_parameters(int payload_type, std::string fmtp) = 0;
+        /** @brief Applies negotiated AV1 parameters from SDP. */
+        virtual void set_negotiated_av1_parameters(int payload_type, std::string fmtp) { (void)payload_type; (void)fmtp; }
         /** @brief Deactivates the sender permanently for this session. */
         virtual void deactivate(std::string reason) = 0;
         /** @brief Returns a diagnostic sender snapshot. */
@@ -279,5 +281,9 @@ namespace video_server
      */
     std::unique_ptr<IEncodedVideoSender> make_h264_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
                                                                         uint32_t ssrc);
+
+    /** @brief Creates an AV1 RTP sender for low-overhead temporal-unit OBU access units. */
+    std::unique_ptr<IEncodedVideoSender> make_av1_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
+                                                                       uint32_t ssrc);
 
 } // namespace video_server

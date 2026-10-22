@@ -884,6 +884,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
         out << "input_pixel_format = \"GRAY8\"\n";
         out << "max_subscribers = 4\n";
         out << "\n[default_raw_pipelines.default]\n";
+        out << "codec = \"av1\"\n";
         out << "encoder = \"vaapi\"\n";
         out << "hardware_device = \"/dev/dri/renderD129\"\n";
         out << "encoder_preset = \"veryfast\"\n";
@@ -928,6 +929,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     EXPECT_EQ(config.streams.front().input_pixel_format, video_server::VideoPixelFormat::GRAY8);
     EXPECT_EQ(config.streams.front().max_subscribers, 4u);
     ASSERT_TRUE(config.default_raw_pipelines.find("default") != config.default_raw_pipelines.end());
+    EXPECT_EQ(config.default_raw_pipelines.at("default").codec, video_server::VideoCodec::AV1);
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder, video_server::RawH264Encoder::Vaapi);
     EXPECT_EQ(config.default_raw_pipelines.at("default").hardware_device, "/dev/dri/renderD129");
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_preset, "veryfast");

@@ -54,8 +54,10 @@ namespace video_server
         {
         case VideoCodec::H264:
             return "H264";
+        case VideoCodec::AV1:
+            return "AV1";
         }
-        return "H264";
+        return "Unknown";
     }
 
     std::optional<VideoDisplayMode> video_display_mode_from_string(const char *value)

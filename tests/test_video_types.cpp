@@ -21,6 +21,12 @@ TEST(VideoTypesTest, ConvertsPixelFormatsToStrings)
     EXPECT_EQ(std::string(video_server::to_string(VideoPixelFormat::I420)), "I420");
 }
 
+TEST(VideoTypesTest, ConvertsEncodedCodecsToStrings)
+{
+    EXPECT_STREQ(video_server::to_string(video_server::VideoCodec::H264), "H264");
+    EXPECT_STREQ(video_server::to_string(video_server::VideoCodec::AV1), "AV1");
+}
+
 TEST(VideoTypesTest, ParsesPixelFormatsFromStringsAndGrayscaleAliases)
 {
     using video_server::VideoPixelFormat;

@@ -14,11 +14,12 @@ namespace
     std::shared_ptr<const video_server::LatestEncodedUnit> make_encoded_unit(std::vector<uint8_t> bytes,
                                                                              uint64_t timestamp_ns,
                                                                              bool keyframe,
-                                                                             bool codec_config)
+                                                                             bool codec_config,
+                                                                             video_server::VideoCodec codec = video_server::VideoCodec::H264)
     {
         auto unit = std::make_shared<video_server::LatestEncodedUnit>();
         unit->bytes = std::move(bytes);
-        unit->codec = video_server::VideoCodec::H264;
+        unit->codec = codec;
         unit->timestamp_ns = timestamp_ns;
         unit->sequence_id = timestamp_ns;
         unit->keyframe = keyframe;
@@ -79,6 +80,26 @@ namespace
         size_t close_on_send_attempt_{0};
         std::string mid_;
     };
+
+    TEST(WebRtcStreamSessionTest, PacketizesAv1TemporalUnits)
+    {
+        auto track_sink = std::make_shared<FakeEncodedVideoTrackSink>();
+        auto sender = video_server::make_av1_encoded_video_sender(track_sink, 9876);
+        sender->set_negotiated_av1_parameters(104, "profile=0;level-idx=5;tier=0");
+        sender->on_encoded_access_unit(make_encoded_unit(
+            {0x12, 0x00, 0x32, 0x02, 0x00, 0x00}, 1000000000, true, true, video_server::VideoCodec::AV1));
+
+        const auto snapshot = sender->snapshot();
+        EXPECT_EQ(snapshot.codec, "AV1");
+        EXPECT_EQ(snapshot.sender_state, "sending-av1-rtp");
+        EXPECT_TRUE(snapshot.first_decodable_frame_sent);
+        EXPECT_GT(snapshot.packets_attempted, 0u);
+        EXPECT_EQ(snapshot.negotiated_h264_payload_type, 104);
+
+        std::lock_guard<std::mutex> lock(track_sink->mutex);
+        ASSERT_FALSE(track_sink->sent_packets.empty());
+        EXPECT_EQ(static_cast<uint8_t>(track_sink->sent_packets.front()[1]) & 0x7f, 104u);
+    }
 
     TEST(WebRtcStreamSessionTest, SenderSnapshotsStayIsolatedAcrossIndependentSenders)
     {

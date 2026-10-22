@@ -223,6 +223,12 @@ namespace
         invalid_codec.codec = static_cast<video_server::VideoCodec>(99);
         EXPECT_FALSE(server.push_access_unit(cfg.stream_id, invalid_codec));
 
+        auto av1_encoded = encoded;
+        av1_encoded.codec = video_server::VideoCodec::AV1;
+        av1_encoded.timestamp_ns = 251;
+        EXPECT_TRUE(server.push_access_unit(cfg.stream_id, av1_encoded));
+        EXPECT_EQ(server.get_latest_encoded_unit_for_stream(cfg.stream_id)->codec, video_server::VideoCodec::AV1);
+
         EXPECT_TRUE(server.remove_stream(cfg.stream_id));
         EXPECT_FALSE(server.remove_stream(cfg.stream_id));
     }

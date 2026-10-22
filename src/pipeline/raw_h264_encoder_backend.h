@@ -28,6 +28,7 @@ namespace video_server
         X264,
         OpenH264,
         Vaapi,
+        Nvenc,
         Generic
     };
 
@@ -131,6 +132,12 @@ namespace video_server
      * @return True when h264_vaapi, device creation, and frames initialization all work.
      */
     bool probe_raw_h264_vaapi_encoder(const std::string &hardware_device, std::string *error_message = nullptr);
+
+    /** @brief Probes the AV1 VA-API encoder (AMD/Intel on Linux). */
+    bool probe_raw_av1_vaapi_encoder(const std::string &hardware_device, std::string *error_message = nullptr);
+
+    /** @brief Probes the NVIDIA AV1 NVENC encoder. */
+    bool probe_raw_av1_nvenc_encoder(std::string *error_message = nullptr);
 
     /**
      * @brief Builds libav-specific backend options from the public pipeline config.
