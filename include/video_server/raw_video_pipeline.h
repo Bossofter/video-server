@@ -30,6 +30,7 @@ namespace video_server
         Automatic,
         LibX264,
         LibOpenH264,
+        LibAomAv1,
         Vaapi,
         Nvenc
     };

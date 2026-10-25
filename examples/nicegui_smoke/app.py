@@ -1986,6 +1986,8 @@ This page is a manual browser harness for the current H264 WebRTC consumer path.
 if __name__ in {'__main__', '__mp_main__'}:
     try:
         ui.run(host=ARGS.ui_host, port=ARGS.ui_port, reload=False, show=False, title='video-server NiceGUI browser harness')
+    except KeyboardInterrupt:
+        pass
     finally:
         if SMOKE_PROCESS is not None and SMOKE_PROCESS.poll() is None:
             try:

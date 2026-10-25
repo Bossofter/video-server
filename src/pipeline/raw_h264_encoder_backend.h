@@ -27,6 +27,7 @@ namespace video_server
     {
         X264,
         OpenH264,
+        AomAv1,
         Vaapi,
         Nvenc,
         Generic

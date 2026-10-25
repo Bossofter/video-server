@@ -191,6 +191,8 @@ namespace video_server
                     return avcodec_find_encoder_by_name("av1_vaapi");
                 case RawH264Encoder::Nvenc:
                     return avcodec_find_encoder_by_name("av1_nvenc");
+                case RawH264Encoder::LibAomAv1:
+                    return avcodec_find_encoder_by_name("libaom-av1");
                 case RawH264Encoder::Automatic:
                     return nullptr;
                 case RawH264Encoder::LibX264:
@@ -204,6 +206,8 @@ namespace video_server
                 return avcodec_find_encoder_by_name("libx264");
             case RawH264Encoder::LibOpenH264:
                 return avcodec_find_encoder_by_name("libopenh264");
+            case RawH264Encoder::LibAomAv1:
+                return nullptr;
             case RawH264Encoder::Vaapi:
                 return avcodec_find_encoder_by_name("h264_vaapi");
             case RawH264Encoder::Nvenc:
@@ -1038,7 +1042,12 @@ namespace video_server
                 if (config_.codec == VideoCodec::AV1 &&
                     (config_.encoder == RawH264Encoder::LibX264 || config_.encoder == RawH264Encoder::LibOpenH264))
                 {
-                    set_error_locked("AV1 requires encoder 'automatic', 'vaapi', or 'nvenc'", error_message);
+                    set_error_locked("AV1 requires encoder 'automatic', 'libaom-av1', 'vaapi', or 'nvenc'", error_message);
+                    return false;
+                }
+                if (config_.codec == VideoCodec::H264 && config_.encoder == RawH264Encoder::LibAomAv1)
+                {
+                    set_error_locked("libaom-av1 can only encode AV1", error_message);
                     return false;
                 }
                 return true;
@@ -1136,6 +1145,16 @@ namespace video_server
         {
             options.family = RawH264EncoderFamily::OpenH264;
             options.private_options.push_back({"allow_skip_frames", "1"});
+            return options;
+        }
+        if (codec_name.find("libaom-av1") != std::string::npos)
+        {
+            options.family = RawH264EncoderFamily::AomAv1;
+            options.private_options.push_back({"usage", "realtime"});
+            options.private_options.push_back({"cpu-used", "8"});
+            options.private_options.push_back({"lag-in-frames", "0"});
+            options.private_options.push_back({"row-mt", "1"});
+            options.private_options.push_back({"crf", std::to_string(config.encoder_crf.value_or(32))});
             return options;
         }
         if (codec_name.find("vaapi") != std::string::npos)
@@ -1267,6 +1286,8 @@ namespace video_server
             return "LibX264";
         case RawH264Encoder::LibOpenH264:
             return "LibOpenH264";
+        case RawH264Encoder::LibAomAv1:
+            return "LibAomAv1";
         case RawH264Encoder::Vaapi:
             return "Vaapi";
         case RawH264Encoder::Nvenc:
@@ -1283,6 +1304,8 @@ namespace video_server
             return "X264";
         case RawH264EncoderFamily::OpenH264:
             return "OpenH264";
+        case RawH264EncoderFamily::AomAv1:
+            return "AomAv1";
         case RawH264EncoderFamily::Vaapi:
             return "Vaapi";
         case RawH264EncoderFamily::Nvenc:

@@ -175,6 +175,15 @@ namespace
         EXPECT_TRUE(std::any_of(av1_nvenc_options.private_options.begin(), av1_nvenc_options.private_options.end(),
                                 [](const video_server::RawH264EncoderOption &option)
                                 { return option.key == "tune" && option.value == "ull"; }));
+
+        const auto libaom_options = video_server::build_libav_h264_encoder_backend_options(config, "libaom-av1");
+        EXPECT_EQ(libaom_options.family, video_server::RawH264EncoderFamily::AomAv1);
+        EXPECT_TRUE(std::any_of(libaom_options.private_options.begin(), libaom_options.private_options.end(),
+                                [](const video_server::RawH264EncoderOption &option)
+                                { return option.key == "usage" && option.value == "realtime"; }));
+        EXPECT_TRUE(std::any_of(libaom_options.private_options.begin(), libaom_options.private_options.end(),
+                                [](const video_server::RawH264EncoderOption &option)
+                                { return option.key == "crf" && option.value == "21"; }));
     }
 
     TEST(RawToH264PipelineTest, Av1RejectsH264OnlySoftwareEncoders)
@@ -383,6 +392,82 @@ namespace
         EXPECT_TRUE(runtime.hardware_accelerated);
         EXPECT_EQ(runtime.hardware_device, "/dev/dri/renderD128");
         pipeline->stop();
+    }
+
+    TEST(RawToH264PipelineTest, Av1VaapiHardwareEncodeSmokeSkipsWhenUnavailable)
+    {
+        std::string probe_error;
+        if (!video_server::probe_raw_av1_vaapi_encoder("/dev/dri/renderD128", &probe_error))
+        {
+            GTEST_SKIP() << "VA-API AV1 unavailable: " << probe_error;
+        }
+
+        std::vector<video_server::VideoCodec> emitted_codecs;
+        auto config = make_default_config(256, 128);
+        config.codec = video_server::VideoCodec::AV1;
+        config.encoder = video_server::RawH264Encoder::Vaapi;
+        config.hardware_device = "/dev/dri/renderD128";
+        auto pipeline = video_server::make_raw_video_pipeline(
+            "av1-vaapi-smoke", config,
+            [&emitted_codecs](const video_server::EncodedAccessUnitView &access_unit)
+            {
+                emitted_codecs.push_back(access_unit.codec);
+                return true;
+            });
+
+        std::string error;
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        EXPECT_EQ(pipeline->encoder_runtime_info().active_encoder, "av1_vaapi");
+        for (uint64_t i = 0; i < 8; ++i)
+        {
+            auto frame = make_rgb_frame(config.input_width, config.input_height, i + 501);
+            ASSERT_TRUE(pipeline->push_frame(
+                make_rgb_view(frame, config.input_width, config.input_height, 9000000000ull + i * 33333333ull, i + 1),
+                &error)) << error;
+        }
+        pipeline->stop();
+
+        ASSERT_FALSE(emitted_codecs.empty());
+        EXPECT_TRUE(std::all_of(emitted_codecs.begin(), emitted_codecs.end(), [](video_server::VideoCodec codec)
+                                { return codec == video_server::VideoCodec::AV1; }));
+    }
+
+    TEST(RawToH264PipelineTest, Av1LibAomSoftwareEncodeProducesAccessUnits)
+    {
+        std::vector<video_server::VideoCodec> emitted_codecs;
+        std::vector<std::size_t> emitted_sizes;
+        auto config = make_default_config(64, 48);
+        config.codec = video_server::VideoCodec::AV1;
+        config.encoder = video_server::RawH264Encoder::LibAomAv1;
+        config.encoder_crf = 32;
+        auto pipeline = video_server::make_raw_video_pipeline(
+            "av1-libaom-smoke", config,
+            [&emitted_codecs, &emitted_sizes](const video_server::EncodedAccessUnitView &access_unit)
+            {
+                emitted_codecs.push_back(access_unit.codec);
+                emitted_sizes.push_back(access_unit.size_bytes);
+                return true;
+            });
+
+        std::string error;
+        ASSERT_TRUE(pipeline->start(&error)) << error;
+        const auto runtime = pipeline->encoder_runtime_info();
+        EXPECT_EQ(runtime.active_encoder, "libaom-av1");
+        EXPECT_FALSE(runtime.hardware_accelerated);
+        for (uint64_t i = 0; i < 12; ++i)
+        {
+            auto frame = make_rgb_frame(config.input_width, config.input_height, i + 601);
+            ASSERT_TRUE(pipeline->push_frame(
+                make_rgb_view(frame, config.input_width, config.input_height, 10000000000ull + i * 33333333ull, i + 1),
+                &error)) << error;
+        }
+        ASSERT_TRUE(wait_until([&emitted_codecs]() { return !emitted_codecs.empty(); })) << error;
+        pipeline->stop();
+
+        ASSERT_FALSE(emitted_codecs.empty());
+        EXPECT_TRUE(std::all_of(emitted_codecs.begin(), emitted_codecs.end(), [](video_server::VideoCodec codec)
+                                { return codec == video_server::VideoCodec::AV1; }));
+        EXPECT_TRUE(std::all_of(emitted_sizes.begin(), emitted_sizes.end(), [](std::size_t size) { return size > 0; }));
     }
 
     TEST(RawToH264PipelineTest, ProducesEncodedAccessUnitsFromRawFrames)

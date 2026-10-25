@@ -157,6 +157,10 @@ namespace video_server
             {
                 return RawH264Encoder::LibOpenH264;
             }
+            if (value == "libaom-av1")
+            {
+                return RawH264Encoder::LibAomAv1;
+            }
             if (value == "vaapi")
             {
                 return RawH264Encoder::Vaapi;

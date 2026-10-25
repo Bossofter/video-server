@@ -14,7 +14,8 @@
         {
             "name": "ffmpeg",
             "features": [
-                "openh264"
+                "openh264",
+                "aom"
             ]
         },
         {

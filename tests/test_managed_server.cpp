@@ -939,6 +939,34 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     std::remove(path.c_str());
 }
 
+TEST(ManagedVideoServerTest, LoadsLibAomAv1Encoder)
+{
+    const std::string path = "/tmp/video_server_managed_libaom_config_test.toml";
+    {
+        std::ofstream out(path);
+        out << "[[streams]]\n";
+        out << "stream_id = \"software-av1\"\n";
+        out << "width = 64\n";
+        out << "height = 48\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"RGB24\"\n";
+        out << "\n[default_raw_pipelines.default]\n";
+        out << "codec = \"av1\"\n";
+        out << "encoder = \"libaom-av1\"\n";
+        out << "encoder_crf = 32\n";
+    }
+
+    const auto config = video_server::load_managed_video_server_config(path);
+    ASSERT_EQ(config.default_raw_pipelines.size(), 1u);
+    const auto &pipeline = config.default_raw_pipelines.at("default");
+    EXPECT_EQ(pipeline.codec, video_server::VideoCodec::AV1);
+    EXPECT_EQ(pipeline.encoder, video_server::RawH264Encoder::LibAomAv1);
+    ASSERT_TRUE(pipeline.encoder_crf.has_value());
+    EXPECT_EQ(*pipeline.encoder_crf, 32u);
+
+    std::remove(path.c_str());
+}
+
 TEST(ManagedVideoServerTest, LoadsTomlIceConfiguration)
 {
     const std::string path = "/tmp/video_server_managed_ice_config_test.toml";
