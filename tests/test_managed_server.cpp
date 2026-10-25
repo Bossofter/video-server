@@ -884,6 +884,7 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
         out << "input_pixel_format = \"GRAY8\"\n";
         out << "max_subscribers = 4\n";
         out << "\n[default_raw_pipelines.default]\n";
+        out << "codec = \"av1\"\n";
         out << "encoder = \"vaapi\"\n";
         out << "hardware_device = \"/dev/dri/renderD129\"\n";
         out << "encoder_preset = \"veryfast\"\n";
@@ -928,11 +929,40 @@ TEST(ManagedVideoServerTest, LoadsTomlConfig)
     EXPECT_EQ(config.streams.front().input_pixel_format, video_server::VideoPixelFormat::GRAY8);
     EXPECT_EQ(config.streams.front().max_subscribers, 4u);
     ASSERT_TRUE(config.default_raw_pipelines.find("default") != config.default_raw_pipelines.end());
+    EXPECT_EQ(config.default_raw_pipelines.at("default").codec, video_server::VideoCodec::AV1);
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder, video_server::RawH264Encoder::Vaapi);
     EXPECT_EQ(config.default_raw_pipelines.at("default").hardware_device, "/dev/dri/renderD129");
     EXPECT_EQ(config.default_raw_pipelines.at("default").encoder_preset, "veryfast");
     ASSERT_TRUE(config.default_raw_pipelines.at("default").encoder_crf.has_value());
     EXPECT_EQ(*config.default_raw_pipelines.at("default").encoder_crf, 18u);
+
+    std::remove(path.c_str());
+}
+
+TEST(ManagedVideoServerTest, LoadsLibAomAv1Encoder)
+{
+    const std::string path = "/tmp/video_server_managed_libaom_config_test.toml";
+    {
+        std::ofstream out(path);
+        out << "[[streams]]\n";
+        out << "stream_id = \"software-av1\"\n";
+        out << "width = 64\n";
+        out << "height = 48\n";
+        out << "nominal_fps = 30.0\n";
+        out << "input_pixel_format = \"RGB24\"\n";
+        out << "\n[default_raw_pipelines.default]\n";
+        out << "codec = \"av1\"\n";
+        out << "encoder = \"libaom-av1\"\n";
+        out << "encoder_crf = 32\n";
+    }
+
+    const auto config = video_server::load_managed_video_server_config(path);
+    ASSERT_EQ(config.default_raw_pipelines.size(), 1u);
+    const auto &pipeline = config.default_raw_pipelines.at("default");
+    EXPECT_EQ(pipeline.codec, video_server::VideoCodec::AV1);
+    EXPECT_EQ(pipeline.encoder, video_server::RawH264Encoder::LibAomAv1);
+    ASSERT_TRUE(pipeline.encoder_crf.has_value());
+    EXPECT_EQ(*pipeline.encoder_crf, 32u);
 
     std::remove(path.c_str());
 }

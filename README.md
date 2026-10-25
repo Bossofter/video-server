@@ -51,7 +51,19 @@ vcpkg install video-server --overlay-ports="${PWD}/vcpkg"
 vcpkg install 'video-server[vaapi]' --overlay-ports="${PWD}/vcpkg"
 ```
 
-`video-server[vaapi]` enables optional Linux VA-API H.264 hardware encoding for AMD and Intel VA-API devices. Software-only installs use OpenH264 or explicit libx264 where available.
+`video-server[vaapi]` enables Linux VA-API H.264 and AV1 hardware encoding for supported AMD Radeon and Intel devices. `video-server[nvenc]` enables NVIDIA H.264 and AV1 NVENC; both features can be selected together. Software H.264 installs use OpenH264 or explicit libx264 where available, and software AV1 uses libaom.
+
+AV1 is selected per raw pipeline with `codec = "av1"` and `encoder = "libaom-av1"`, `"vaapi"`, `"nvenc"`, or `"automatic"`. Use `libaom-av1` for an explicit hardware-independent software path. Automatic AV1 selection still tries VA-API first and then NVENC, and fails with probe diagnostics rather than silently consuming substantial CPU. AV1 WebRTC output uses the standardized AV1 RTP payload and is negotiated only when the browser offers AV1.
+
+The project remains MIT licensed. The AV1 paths use FFmpeg/libav with the BSD-licensed libaom library or hardware wrappers and do not add GPL codec libraries; NVIDIA's driver is a system/runtime prerequisite and is not distributed by this project.
+
+When video-server is linked against vcpkg's libva but uses a distribution-provided VA driver, libva may need its system driver directory explicitly:
+
+```bash
+export LIBVA_DRIVERS_PATH=/usr/lib/$(gcc -print-multiarch)/dri
+```
+
+The NiceGUI smoke launcher discovers common system driver directories automatically. `LIBVA_DRIVER_NAME=radeonsi` is normally unnecessary; use it only to override libva's driver selection deliberately.
 
 ## License
 

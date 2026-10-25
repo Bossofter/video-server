@@ -18,6 +18,14 @@ From the repo root:
 
 ```bash
 ./build.sh
+./examples/nicegui_smoke/run_smoke.sh
+```
+
+This launches only the C++ video server using `smoke_server.toml` (`127.0.0.1:8090` by default) with the default three-stream demo. Extra arguments are forwarded directly to `video_server_nicegui_smoke_server`.
+
+To launch the optional NiceGUI browser client as well:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r examples/nicegui_smoke/requirements.txt

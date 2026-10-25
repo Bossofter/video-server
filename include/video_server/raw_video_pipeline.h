@@ -30,7 +30,9 @@ namespace video_server
         Automatic,
         LibX264,
         LibOpenH264,
-        Vaapi
+        LibAomAv1,
+        Vaapi,
+        Nvenc
     };
 
     /**
@@ -49,6 +51,7 @@ namespace video_server
      */
     struct RawVideoPipelineConfig
     {
+        VideoCodec codec{VideoCodec::H264};                              /**< Encoded output codec. */
         uint32_t input_width{0};                                            /**< Expected input width in pixels. */
         uint32_t input_height{0};                                           /**< Expected input height in pixels. */
         VideoPixelFormat input_pixel_format{VideoPixelFormat::RGB24};       /**< Expected input pixel format. */
@@ -142,6 +145,16 @@ namespace video_server
     std::unique_ptr<IRawVideoPipeline> make_raw_to_h264_pipeline_for_server(std::string stream_id,
                                                                             RawVideoPipelineConfig config,
                                                                             IVideoServer &server);
+
+    /** @brief Builds a codec-selected raw video pipeline using config.codec. */
+    std::unique_ptr<IRawVideoPipeline> make_raw_video_pipeline(std::string stream_id,
+                                                               RawVideoPipelineConfig config,
+                                                               EncodedAccessUnitSink sink);
+
+    /** @brief Builds a codec-selected raw video pipeline bound to a server stream. */
+    std::unique_ptr<IRawVideoPipeline> make_raw_video_pipeline_for_server(std::string stream_id,
+                                                                          RawVideoPipelineConfig config,
+                                                                          IVideoServer &server);
 
     /**
      * @brief Returns a readable name for a scale mode value.

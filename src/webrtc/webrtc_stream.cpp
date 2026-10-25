@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <random>
@@ -12,7 +13,10 @@
 #include <utility>
 
 #include <rtc/configuration.hpp>
+#include <rtc/av1rtppacketizer.hpp>
 #include <rtc/description.hpp>
+#include <rtc/message.hpp>
+#include <rtc/rtppacketizationconfig.hpp>
 #include <spdlog/spdlog.h>
 
 #include "logging_utils.h"
@@ -29,6 +33,8 @@ namespace video_server
             {
             case VideoCodec::H264:
                 return "H264";
+            case VideoCodec::AV1:
+                return "AV1";
             }
             return "Unknown";
         }
@@ -50,6 +56,7 @@ namespace video_server
         }
 
         constexpr uint8_t kH264PayloadType = 102;
+        constexpr uint8_t kAv1PayloadType = 103;
         constexpr uint64_t kH264ClockRate = 90000;
         constexpr size_t kMaxRtpPayloadSize = 1200;
         constexpr size_t kMaxLocalIceCandidatesRetained = 256;
@@ -876,6 +883,205 @@ namespace video_server
             std::string last_packetization_status_{"awaiting-encoded-input"};
         };
 
+        class Av1EncodedVideoSender final : public IEncodedVideoSender
+        {
+        public:
+            Av1EncodedVideoSender(std::shared_ptr<IEncodedVideoTrackSink> sink, uint32_t ssrc)
+                : sink_(std::move(sink)), ssrc_(ssrc)
+            {
+                rebuild_packetizer(kAv1PayloadType);
+            }
+
+            void set_negotiated_h264_parameters(int, std::string) override {}
+
+            void set_negotiated_av1_parameters(int payload_type, std::string fmtp) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                negotiated_payload_type_ = payload_type;
+                negotiated_fmtp_ = std::move(fmtp);
+                rebuild_packetizer(payload_type);
+            }
+
+            void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> unit) override
+            {
+                if (!unit || !unit->valid)
+                {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!active_ || unit->codec != VideoCodec::AV1 || unit->bytes.empty())
+                {
+                    if (unit->codec != VideoCodec::AV1)
+                    {
+                        ++snapshot_.failed_units;
+                        snapshot_.sender_state = "rejected-non-av1-access-unit";
+                    }
+                    return;
+                }
+                if (unit->sequence_id == snapshot_.last_delivered_sequence_id)
+                {
+                    ++snapshot_.duplicate_units_skipped;
+                    return;
+                }
+                snapshot_.codec = "AV1";
+                snapshot_.has_pending_encoded_unit = true;
+                snapshot_.last_delivered_sequence_id = unit->sequence_id;
+                snapshot_.last_delivered_timestamp_ns = unit->timestamp_ns;
+                snapshot_.last_delivered_size_bytes = unit->bytes.size();
+                snapshot_.last_delivered_keyframe = unit->keyframe;
+                snapshot_.last_delivered_codec_config = unit->codec_config;
+                snapshot_.keyframe_seen = snapshot_.keyframe_seen || unit->keyframe;
+                snapshot_.codec_config_seen = snapshot_.codec_config_seen || unit->codec_config || unit->keyframe;
+                if (unit->keyframe)
+                {
+                    cached_keyframe_ = unit;
+                }
+                ++snapshot_.delivered_units;
+
+                snapshot_.video_track_exists = sink_ && sink_->exists();
+                snapshot_.video_track_open = sink_ && sink_->is_open();
+                snapshot_.ready_for_video_track = snapshot_.video_track_exists && snapshot_.keyframe_seen;
+                if (!snapshot_.video_track_exists)
+                {
+                    ++snapshot_.skipped_no_track;
+                    snapshot_.sender_state = "video-track-missing";
+                    return;
+                }
+                if (!snapshot_.video_track_open)
+                {
+                    ++snapshot_.skipped_track_not_open;
+                    snapshot_.sender_state = "waiting-for-video-track-open";
+                    return;
+                }
+                if (!started_ && !cached_keyframe_)
+                {
+                    ++snapshot_.skipped_keyframe_wait;
+                    snapshot_.sender_state = "waiting-for-av1-keyframe";
+                    return;
+                }
+
+                std::vector<std::shared_ptr<const LatestEncodedUnit>> units_to_send;
+                if (!started_ && cached_keyframe_)
+                {
+                    units_to_send.push_back(cached_keyframe_);
+                }
+                if ((started_ || cached_keyframe_.get() != unit.get()) && !unit->codec_config)
+                {
+                    units_to_send.push_back(unit);
+                }
+                uint64_t packet_count = 0;
+                try
+                {
+                    for (const auto &send_unit : units_to_send)
+                    {
+                        packetizer_config_->timestamp = timestamp_ns_to_h264_rtp_timestamp(send_unit->timestamp_ns);
+                        rtc::binary data(send_unit->bytes.size());
+                        std::memcpy(data.data(), send_unit->bytes.data(), send_unit->bytes.size());
+                        rtc::message_vector messages{rtc::make_message(std::move(data))};
+                        packetizer_->outgoingChain(messages, [&](rtc::message_ptr packet)
+                        {
+                            if (packet && !packet->empty())
+                            {
+                                sink_->send(packet->data(), packet->size());
+                                ++packet_count;
+                            }
+                        });
+                        for (const auto &packet : messages)
+                        {
+                            if (packet && !packet->empty())
+                            {
+                                sink_->send(packet->data(), packet->size());
+                                ++packet_count;
+                            }
+                        }
+                    }
+                }
+                catch (const std::exception &)
+                {
+                    ++snapshot_.packetization_failures;
+                    snapshot_.sender_state = "av1-packetization-failed";
+                    snapshot_.last_packetization_status = "packetization-failed";
+                    return;
+                }
+                started_ = true;
+                snapshot_.first_decodable_frame_sent = true;
+                snapshot_.startup_sequence_sent = true;
+                snapshot_.h264_delivery_active = true; // Backward-compatible generic delivery flag.
+                snapshot_.packets_attempted += packet_count;
+                snapshot_.packets_sent_after_track_open += packet_count;
+                snapshot_.sender_state = "sending-av1-rtp";
+                snapshot_.last_packetization_status = packet_count ? "rtp-packets-sent" : "no-rtp-packets-generated";
+            }
+
+            void deactivate(std::string reason) override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_ = false;
+                snapshot_.session_active = false;
+                snapshot_.session_teardown_reason = std::move(reason);
+                snapshot_.sender_state = "session-inactive";
+            }
+
+            EncodedVideoSenderSnapshot snapshot() const override
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto result = snapshot_;
+                result.video_track_exists = active_ && sink_ && sink_->exists();
+                result.video_track_open = active_ && sink_ && sink_->is_open();
+                result.negotiated_h264_payload_type = negotiated_payload_type_;
+                result.negotiated_h264_fmtp = negotiated_fmtp_;
+                result.video_mid = result.video_track_exists ? sink_->mid() : "";
+                return result;
+            }
+
+        private:
+            void rebuild_packetizer(int payload_type)
+            {
+                packetizer_config_ = std::make_shared<rtc::RtpPacketizationConfig>(
+                    ssrc_, "video-server-av1", static_cast<uint8_t>(payload_type), rtc::AV1RtpPacketizer::ClockRate);
+                packetizer_ = std::make_shared<rtc::AV1RtpPacketizer>(
+                    rtc::AV1RtpPacketizer::Packetization::TemporalUnit, packetizer_config_);
+            }
+
+            mutable std::mutex mutex_;
+            std::shared_ptr<IEncodedVideoTrackSink> sink_;
+            uint32_t ssrc_{0};
+            int negotiated_payload_type_{kAv1PayloadType};
+            std::string negotiated_fmtp_;
+            bool active_{true};
+            bool started_{false};
+            std::shared_ptr<const LatestEncodedUnit> cached_keyframe_;
+            EncodedVideoSenderSnapshot snapshot_;
+            std::shared_ptr<rtc::RtpPacketizationConfig> packetizer_config_;
+            std::shared_ptr<rtc::AV1RtpPacketizer> packetizer_;
+        };
+
+        class CodecDispatchVideoSender final : public IEncodedVideoSender
+        {
+        public:
+            CodecDispatchVideoSender(std::shared_ptr<IEncodedVideoTrackSink> sink, uint32_t ssrc)
+                : h264_(std::make_unique<H264EncodedVideoSender>(sink, ssrc)),
+                  av1_(std::make_unique<Av1EncodedVideoSender>(std::move(sink), ssrc)) {}
+            void on_encoded_access_unit(std::shared_ptr<const LatestEncodedUnit> unit) override
+            {
+                if (!unit) return;
+                active_codec_.store(unit->codec, std::memory_order_relaxed);
+                (unit->codec == VideoCodec::AV1 ? av1_.get() : h264_.get())->on_encoded_access_unit(std::move(unit));
+            }
+            void set_negotiated_h264_parameters(int pt, std::string fmtp) override
+            { h264_->set_negotiated_h264_parameters(pt, std::move(fmtp)); }
+            void set_negotiated_av1_parameters(int pt, std::string fmtp) override
+            { av1_->set_negotiated_av1_parameters(pt, std::move(fmtp)); }
+            void deactivate(std::string reason) override
+            { h264_->deactivate(reason); av1_->deactivate(std::move(reason)); }
+            EncodedVideoSenderSnapshot snapshot() const override
+            { return active_codec_.load(std::memory_order_relaxed) == VideoCodec::AV1 ? av1_->snapshot() : h264_->snapshot(); }
+        private:
+            std::unique_ptr<IEncodedVideoSender> h264_;
+            std::unique_ptr<IEncodedVideoSender> av1_;
+            std::atomic<VideoCodec> active_codec_{VideoCodec::H264};
+        };
+
         class RtcTrackPacketSink : public IEncodedVideoTrackSink
         {
         public:
@@ -1042,6 +1248,12 @@ namespace video_server
         return std::make_unique<H264EncodedVideoSender>(std::move(video_track_sink), ssrc);
     }
 
+    std::unique_ptr<IEncodedVideoSender> make_av1_encoded_video_sender(std::shared_ptr<IEncodedVideoTrackSink> video_track_sink,
+                                                                       uint32_t ssrc)
+    {
+        return std::make_unique<Av1EncodedVideoSender>(std::move(video_track_sink), ssrc);
+    }
+
     WebRtcStreamSession::WebRtcStreamSession(std::string stream_id, LatestFrameGetter latest_frame_getter,
                                              LatestEncodedUnitGetter latest_encoded_unit_getter,
                                              WebRtcIceConfig ice_config)
@@ -1055,7 +1267,7 @@ namespace video_server
         media_source_ = std::make_unique<StreamMediaSourceBridge>();
         video_ssrc_ = make_random_ssrc();
         video_track_sink_ = std::make_shared<AttachableRtcTrackSink>();
-        encoded_sender_ = make_h264_encoded_video_sender(video_track_sink_, video_ssrc_);
+        encoded_sender_ = std::make_unique<CodecDispatchVideoSender>(video_track_sink_, video_ssrc_);
         media_source_->on_latest_frame(latest_frame_getter(stream_id_));
         auto latest_encoded = latest_encoded_unit_getter(stream_id_);
         media_source_->on_latest_encoded_unit(latest_encoded);
@@ -1273,27 +1485,51 @@ namespace video_server
       return;
     }
 
-    int payload_type = kH264PayloadType;
+    const auto latest_encoded = media_source_->get_latest_encoded_unit();
+    const bool codec_known = latest_encoded != nullptr;
+    const bool wants_av1 = codec_known && latest_encoded->codec == VideoCodec::AV1;
+    int h264_payload_type = kH264PayloadType;
+    int av1_payload_type = kAv1PayloadType;
     std::string h264_profile = rtc::DEFAULT_H264_VIDEO_PROFILE;
+    std::string av1_profile;
+    bool h264_offered = false;
+    bool av1_offered = false;
     for (const int offered_payload_type : description.payloadTypes()) {
       const auto* rtp_map = description.rtpMap(offered_payload_type);
-      if (!rtp_map || rtp_map->format != "H264") {
-        continue;
+      if (!rtp_map) continue;
+      if (rtp_map->format == "H264" && !h264_offered) {
+        h264_offered = true;
+        h264_payload_type = offered_payload_type;
+        if (!rtp_map->fmtps.empty()) h264_profile = rtp_map->fmtps.front();
+      } else if (rtp_map->format == "AV1" && !av1_offered) {
+        av1_offered = true;
+        av1_payload_type = offered_payload_type;
+        if (!rtp_map->fmtps.empty()) av1_profile = rtp_map->fmtps.front();
       }
-      payload_type = offered_payload_type;
-      if (!rtp_map->fmtps.empty()) {
-        h264_profile = rtp_map->fmtps.front();
-      }
-      break;
+    }
+
+    const bool enable_h264 = h264_offered && (!codec_known || !wants_av1);
+    const bool enable_av1 = av1_offered && (!codec_known || wants_av1);
+    if (!enable_h264 && !enable_av1) {
+      spdlog::warn("[signaling] required codec not offered stream={} codec={}", stream_id_,
+                   codec_known ? (wants_av1 ? "AV1" : "H264") : "H264-or-AV1");
+      return;
     }
 
     rtc::Description::Video local_video(track->mid(), rtc::Description::Direction::SendOnly);
-    local_video.addH264Codec(payload_type, h264_profile);
-    local_video.addSSRC(video_ssrc_, "video-server-video", stream_id_, "h264-track");
+    if (enable_h264) {
+      local_video.addH264Codec(h264_payload_type, h264_profile);
+      encoded_sender_->set_negotiated_h264_parameters(h264_payload_type, h264_profile);
+    }
+    if (enable_av1) {
+      local_video.addAV1Codec(av1_payload_type, av1_profile.empty() ? std::nullopt : std::optional<std::string>(av1_profile));
+      encoded_sender_->set_negotiated_av1_parameters(av1_payload_type, av1_profile);
+    }
+    local_video.addSSRC(video_ssrc_, "video-server-video", stream_id_, "encoded-video-track");
     track->setDescription(local_video);
-    encoded_sender_->set_negotiated_h264_parameters(payload_type, h264_profile);
-    spdlog::info("[signaling] activated negotiated video section stream={} mid={} payload_type={} fmtp={} ssrc={}",
-                 stream_id_, track->mid(), payload_type, h264_profile, video_ssrc_);
+    spdlog::info("[signaling] activated negotiated video section stream={} mid={} codecs={}{} ssrc={}",
+                 stream_id_, track->mid(), enable_h264 ? "H264" : "", enable_av1 ? (enable_h264 ? ",AV1" : "AV1") : "",
+                 video_ssrc_);
 
     auto attachable_sink = std::dynamic_pointer_cast<AttachableRtcTrackSink>(video_track_sink_);
     if (!attachable_sink) {

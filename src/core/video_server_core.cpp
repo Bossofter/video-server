@@ -141,7 +141,7 @@ namespace video_server
             return false;
         }
 
-        if (access_unit.codec != VideoCodec::H264)
+        if (access_unit.codec != VideoCodec::H264 && access_unit.codec != VideoCodec::AV1)
         {
             return false;
         }

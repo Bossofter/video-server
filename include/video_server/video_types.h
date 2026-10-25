@@ -28,7 +28,8 @@ namespace video_server
      */
     enum class VideoCodec
     {
-        H264
+        H264,
+        AV1
     };
 
     /**

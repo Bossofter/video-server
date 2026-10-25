@@ -46,11 +46,7 @@ input_pixel_format = "GRAY8"
 max_subscribers = 4
 
 [default_raw_pipelines.default]
-encoder = "vaapi"
-hardware_device = "/dev/dri/renderD128"
-encoder_preset = "ultrafast"
-encoder_tune = "zerolatency"
-encoder_profile = "baseline"
-encoder_crf = 23
-repeat_headers = true
-emit_access_unit_delimiters = true
+# Encode AV1 in software with libaom for hardware-independent testing.
+codec = "av1"
+encoder = "libaom-av1"
+encoder_crf = 32
