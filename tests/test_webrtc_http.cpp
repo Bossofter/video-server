@@ -1799,6 +1799,20 @@ TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability)
     EXPECT_NE(stream_info.body.find("\"pixel_format\":\"GRAY8\""), std::string::npos);
 }
 
+TEST(WebRtcHttpTest, StreamsCollectionAcceptsOptionalTrailingSlash)
+{
+    video_server::WebRtcVideoServer server(make_http_test_config());
+    ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+
+    const auto without_slash = server.handle_http_request_for_test("GET", "/api/video/streams");
+    const auto with_slash = server.handle_http_request_for_test("GET", "/api/video/streams/");
+
+    ASSERT_EQ(without_slash.status, 200);
+    ASSERT_EQ(with_slash.status, 200);
+    EXPECT_EQ(with_slash.body, without_slash.body);
+    EXPECT_NE(with_slash.body.find("\"stream_id\":\"alpha\""), std::string::npos);
+}
+
 TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrectKey)
 {
     auto server_config = make_http_test_config();

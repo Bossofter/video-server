@@ -531,11 +531,16 @@ namespace video_server
             std::string rate_limit_bucket;
         };
 
+        bool is_streams_collection_path(const std::string &path)
+        {
+            return path == "/api/video/streams" || path == "/api/video/streams/";
+        }
+
         RoutePolicy classify_route(const HttpRequest &request)
         {
             RoutePolicy policy;
 
-            if (request.method == "GET" && request.path == "/api/video/streams")
+            if (request.method == "GET" && is_streams_collection_path(request.path))
             {
                 policy.group = RouteGroup::StreamsList;
                 policy.valid = true;
@@ -1409,7 +1414,7 @@ namespace video_server
                 }
             }
 
-            if (request.method == "GET" && request.path == "/api/video/streams")
+            if (request.method == "GET" && is_streams_collection_path(request.path))
             {
                 auto streams = core_.list_streams();
                 std::ostringstream out;
