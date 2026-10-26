@@ -1788,6 +1788,29 @@ TEST(WebRtcHttpTest, DebugStatsEndpointReportsPerStreamObservability)
     EXPECT_NE(response.body.find("\"active_encoder\":\"\""), std::string::npos);
     EXPECT_NE(response.body.find("\"hardware_accelerated\":false"), std::string::npos);
     EXPECT_NE(response.body.find("\"hardware_device\":\"\""), std::string::npos);
+    EXPECT_NE(response.body.find("\"raw_frame_statistics\":{\"available\":true,\"frame_id\":7"), std::string::npos);
+    EXPECT_NE(response.body.find("\"luminance_mean\":2.5"), std::string::npos);
+    EXPECT_NE(response.body.find("\"luminance_histogram\":[0,1,1,1,1,0"), std::string::npos);
+
+    const auto stream_info = server.handle_http_request_for_test("GET", "/api/video/streams/alpha");
+    ASSERT_EQ(stream_info.status, 200);
+    EXPECT_NE(stream_info.body.find("\"raw_frame_statistics\":{\"available\":true,\"frame_id\":7"),
+              std::string::npos);
+    EXPECT_NE(stream_info.body.find("\"pixel_format\":\"GRAY8\""), std::string::npos);
+}
+
+TEST(WebRtcHttpTest, StreamsCollectionAcceptsOptionalTrailingSlash)
+{
+    video_server::WebRtcVideoServer server(make_http_test_config());
+    ASSERT_TRUE(server.register_stream({"alpha", "Alpha", 2, 2, 15.0, video_server::VideoPixelFormat::GRAY8}));
+
+    const auto without_slash = server.handle_http_request_for_test("GET", "/api/video/streams");
+    const auto with_slash = server.handle_http_request_for_test("GET", "/api/video/streams/");
+
+    ASSERT_EQ(without_slash.status, 200);
+    ASSERT_EQ(with_slash.status, 200);
+    EXPECT_EQ(with_slash.body, without_slash.body);
+    EXPECT_NE(with_slash.body.find("\"stream_id\":\"alpha\""), std::string::npos);
 }
 
 TEST(WebRtcHttpTest, SharedKeyProtectionRejectsMissingOrWrongKeyAndAcceptsCorrectKey)

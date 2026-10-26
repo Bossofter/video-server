@@ -789,7 +789,11 @@ namespace video_server
                     }
                 }
 
-                server_.note_frame_received(stream_id, frame.timestamp_ns);
+                if (!server_.note_frame_received(stream_id, frame))
+                {
+                    server_.note_frame_dropped(stream_id);
+                    return false;
+                }
 
                 if (config_.execution_mode == ExecutionMode::InlineOnPush)
                 {

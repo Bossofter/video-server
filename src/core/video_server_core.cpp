@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "video_server/video_types.h"
+#include "raw_frame_statistics.h"
 #include "video_pixel_format_utils.h"
 #include "../transforms/display_transform.h"
 
@@ -34,6 +35,7 @@ namespace video_server
             snapshot.total_frames_transformed = stream.info.frames_transformed;
             snapshot.total_frames_dropped = stream.info.frames_dropped;
             snapshot.total_access_units_received = stream.info.access_units_received;
+            snapshot.raw_frame_statistics = stream.info.raw_frame_statistics;
 
             if (stream.latest_frame && stream.latest_frame->valid)
             {
@@ -98,6 +100,13 @@ namespace video_server
             return false;
         }
 
+        RawFrameStatistics raw_statistics;
+        if (!calculate_raw_frame_statistics(frame, raw_statistics))
+        {
+            note_frame_dropped(stream_id);
+            return false;
+        }
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = streams_.find(stream_id);
@@ -108,6 +117,7 @@ namespace video_server
             StreamState &stream = it->second;
             ++stream.info.frames_received;
             stream.info.last_input_timestamp_ns = frame.timestamp_ns;
+            stream.info.raw_frame_statistics = std::move(raw_statistics);
 
             if (output_config_snapshot.output_fps > 0.0)
             {
@@ -241,6 +251,27 @@ namespace video_server
 
         ++it->second.info.frames_received;
         it->second.info.last_input_timestamp_ns = timestamp_ns;
+        return true;
+    }
+
+    bool VideoServerCore::note_frame_received(const std::string &stream_id, const VideoFrameView &frame)
+    {
+        RawFrameStatistics raw_statistics;
+        if (!calculate_raw_frame_statistics(frame, raw_statistics))
+        {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(stream_id);
+        if (it == streams_.end())
+        {
+            return false;
+        }
+
+        ++it->second.info.frames_received;
+        it->second.info.last_input_timestamp_ns = frame.timestamp_ns;
+        it->second.info.raw_frame_statistics = std::move(raw_statistics);
         return true;
     }
 

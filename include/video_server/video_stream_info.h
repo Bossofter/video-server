@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 
+#include "video_server/raw_frame_statistics.h"
 #include "video_server/stream_config.h"
 #include "video_server/stream_output_config.h"
 #include "video_server/video_types.h"
@@ -37,6 +38,7 @@ namespace video_server
         size_t last_encoded_size_bytes{0};               /**< Size in bytes of the latest encoded unit. */
         bool last_encoded_keyframe{false};               /**< True when the latest encoded unit is a keyframe. */
         bool last_encoded_codec_config{false};           /**< True when the latest encoded unit carries codec configuration. */
+        RawFrameStatistics raw_frame_statistics;         /**< Analysis of the latest accepted raw input frame. */
     };
 
 } // namespace video_server
