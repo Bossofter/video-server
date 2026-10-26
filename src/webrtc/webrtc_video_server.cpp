@@ -1083,39 +1083,53 @@ namespace video_server
             HttpResponse response{200, "", "application/json"};
         };
 
-        bool start()
+        VideoServerResult start()
         {
             if (!allowlist_parse_error_.empty())
             {
                 spdlog::error("[security] {}", allowlist_parse_error_);
-                return false;
+                return VideoServerResult::failure(VideoServerError::InvalidConfiguration, allowlist_parse_error_);
             }
             if (!ice_config_error_.empty())
             {
                 spdlog::error("[webrtc] invalid ICE configuration: {}", ice_config_error_);
-                return false;
+                return VideoServerResult::failure(VideoServerError::InvalidConfiguration, ice_config_error_);
             }
             if (!config_.enable_http_api)
             {
-                return true;
+                return VideoServerResult::success();
             }
             auto handler = [this](const HttpRequest &request)
             { return this->handle_http(request); };
             if (config_.execution_mode == ExecutionMode::WorkerThread)
             {
-                return http_server_->start(std::move(handler), static_cast<int>(config_.http_poll_timeout_ms));
+                if (!http_server_->start(std::move(handler), static_cast<int>(config_.http_poll_timeout_ms)))
+                {
+                    return VideoServerResult::failure(VideoServerError::BackendFailure,
+                                                      "failed to start HTTP worker");
+                }
+                return VideoServerResult::success();
             }
-            return http_server_->open(std::move(handler));
+            if (!http_server_->open(std::move(handler)))
+            {
+                return VideoServerResult::failure(VideoServerError::BackendFailure,
+                                                  "failed to open HTTP listening socket");
+            }
+            return VideoServerResult::success();
         }
 
-        bool step()
+        VideoServerResult step()
         {
             if (!http_server_ || !http_server_->is_open() || config_.execution_mode == ExecutionMode::WorkerThread)
             {
-                return true;
+                return VideoServerResult::success();
             }
-            return http_server_->pump_once(static_cast<int>(config_.http_poll_timeout_ms),
-                                           std::max<size_t>(1, config_.max_http_connections_per_step));
+            if (!http_server_->pump_once(static_cast<int>(config_.http_poll_timeout_ms),
+                                         std::max<size_t>(1, config_.max_http_connections_per_step)))
+            {
+                return VideoServerResult::failure(VideoServerError::BackendFailure, "HTTP polling failed");
+            }
+            return VideoServerResult::success();
         }
 
         void stop()
@@ -1127,19 +1141,21 @@ namespace video_server
             }
         }
 
-        bool publish_transformed_frame(const std::string &stream_id,
-                                       std::vector<uint8_t> rgb_bytes,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint64_t timestamp_ns,
-                                       uint64_t frame_id)
+        VideoServerResult publish_transformed_frame(const std::string &stream_id,
+                                                    std::vector<uint8_t> rgb_bytes,
+                                                    uint32_t width,
+                                                    uint32_t height,
+                                                    uint64_t timestamp_ns,
+                                                    uint64_t frame_id)
         {
-            if (!core_.publish_transformed_frame(stream_id, std::move(rgb_bytes), width, height, timestamp_ns, frame_id))
+            auto result = core_.publish_transformed_frame(stream_id, std::move(rgb_bytes), width, height,
+                                                          timestamp_ns, frame_id);
+            if (!result)
             {
-                return false;
+                return result;
             }
             signaling_.on_latest_frame(stream_id, core_.get_latest_frame_for_stream(stream_id));
-            return true;
+            return VideoServerResult::success();
         }
 
         ServerDebugSnapshot get_debug_snapshot() const
@@ -1837,37 +1853,42 @@ namespace video_server
     WebRtcVideoServer::WebRtcVideoServer(WebRtcVideoServerConfig config) : impl_(std::make_unique<Impl>(config)) {}
     WebRtcVideoServer::~WebRtcVideoServer() = default;
 
-    bool WebRtcVideoServer::start() { return impl_->start(); }
-    bool WebRtcVideoServer::step() { return impl_->step(); }
+    VideoServerResult WebRtcVideoServer::start() { return impl_->start(); }
+    VideoServerResult WebRtcVideoServer::step() { return impl_->step(); }
     void WebRtcVideoServer::stop() { impl_->stop(); }
 
-    bool WebRtcVideoServer::register_stream(const StreamConfig &config) { return impl_->core_.register_stream(config); }
+    VideoServerResult WebRtcVideoServer::register_stream(const StreamConfig &config)
+    {
+        return impl_->core_.register_stream(config);
+    }
 
-    bool WebRtcVideoServer::remove_stream(const std::string &stream_id)
+    VideoServerResult WebRtcVideoServer::remove_stream(const std::string &stream_id)
     {
         impl_->signaling_.remove_stream(stream_id);
         return impl_->core_.remove_stream(stream_id);
     }
 
-    bool WebRtcVideoServer::push_frame(const std::string &stream_id, const VideoFrameView &frame)
+    VideoServerResult WebRtcVideoServer::push_frame(const std::string &stream_id, const VideoFrameView &frame)
     {
-        if (!impl_->core_.push_frame(stream_id, frame))
+        auto result = impl_->core_.push_frame(stream_id, frame);
+        if (!result)
         {
-            return false;
+            return result;
         }
         impl_->signaling_.on_latest_frame(stream_id, impl_->core_.get_latest_frame_for_stream(stream_id));
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool WebRtcVideoServer::push_access_unit(const std::string &stream_id,
-                                             const EncodedAccessUnitView &access_unit)
+    VideoServerResult WebRtcVideoServer::push_access_unit(const std::string &stream_id,
+                                                          const EncodedAccessUnitView &access_unit)
     {
-        if (!impl_->core_.push_access_unit(stream_id, access_unit))
+        auto result = impl_->core_.push_access_unit(stream_id, access_unit);
+        if (!result)
         {
-            return false;
+            return result;
         }
         impl_->signaling_.on_encoded_access_unit(stream_id, impl_->core_.get_latest_encoded_unit_for_stream(stream_id));
-        return true;
+        return VideoServerResult::success();
     }
 
     std::vector<VideoStreamInfo> WebRtcVideoServer::list_streams() const { return impl_->core_.list_streams(); }
@@ -1877,8 +1898,8 @@ namespace video_server
         return impl_->core_.get_stream_info(stream_id);
     }
 
-    bool WebRtcVideoServer::set_stream_output_config(const std::string &stream_id,
-                                                     const StreamOutputConfig &output_config)
+    VideoServerResult WebRtcVideoServer::set_stream_output_config(const std::string &stream_id,
+                                                                  const StreamOutputConfig &output_config)
     {
         return impl_->core_.set_stream_output_config(stream_id, output_config);
     }
@@ -1889,35 +1910,36 @@ namespace video_server
         return impl_->core_.get_stream_output_config(stream_id);
     }
 
-    bool WebRtcVideoServer::validate_raw_frame_input(const std::string &stream_id,
-                                                     const VideoFrameView &frame,
-                                                     StreamConfig *config_out,
-                                                     StreamOutputConfig *output_config_out) const
+    VideoServerResult WebRtcVideoServer::validate_raw_frame_input(const std::string &stream_id,
+                                                                  const VideoFrameView &frame,
+                                                                  StreamConfig *config_out,
+                                                                  StreamOutputConfig *output_config_out) const
     {
         return impl_->core_.validate_raw_frame_input(stream_id, frame, config_out, output_config_out);
     }
 
-    bool WebRtcVideoServer::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
+    VideoServerResult WebRtcVideoServer::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
     {
         return impl_->core_.note_frame_received(stream_id, timestamp_ns);
     }
 
-    bool WebRtcVideoServer::note_frame_received(const std::string &stream_id, const VideoFrameView &frame)
+    VideoServerResult WebRtcVideoServer::note_frame_received(const std::string &stream_id,
+                                                              const VideoFrameView &frame)
     {
         return impl_->core_.note_frame_received(stream_id, frame);
     }
 
-    bool WebRtcVideoServer::note_frame_dropped(const std::string &stream_id)
+    VideoServerResult WebRtcVideoServer::note_frame_dropped(const std::string &stream_id)
     {
         return impl_->core_.note_frame_dropped(stream_id);
     }
 
-    bool WebRtcVideoServer::publish_transformed_frame(const std::string &stream_id,
-                                                      std::vector<uint8_t> rgb_bytes,
-                                                      uint32_t width,
-                                                      uint32_t height,
-                                                      uint64_t timestamp_ns,
-                                                      uint64_t frame_id)
+    VideoServerResult WebRtcVideoServer::publish_transformed_frame(const std::string &stream_id,
+                                                                   std::vector<uint8_t> rgb_bytes,
+                                                                   uint32_t width,
+                                                                   uint32_t height,
+                                                                   uint64_t timestamp_ns,
+                                                                   uint64_t frame_id)
     {
         return impl_->publish_transformed_frame(stream_id, std::move(rgb_bytes), width, height, timestamp_ns, frame_id);
     }

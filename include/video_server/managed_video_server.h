@@ -73,9 +73,9 @@ namespace video_server
         /**
          * @brief Advances only the streams owned by this group once on the calling thread.
          *
-         * @return True when progression completed without fatal failure or concurrent-call rejection.
+         * @return Success or a typed contention/progression error.
          */
-        virtual bool step_streams() = 0;
+        virtual VideoServerResult step_streams() = 0;
 
         /**
          * @brief Returns the stream ids owned by this group.
@@ -96,9 +96,9 @@ namespace video_server
         /**
          * @brief Starts the managed server and registers configured streams.
          *
-         * @return True when startup succeeded, false otherwise.
+         * @return Success or a typed lifecycle/configuration/backend error.
          */
-        virtual bool start() = 0;
+        virtual VideoServerResult start() = 0;
 
         /**
          * @brief Stops the managed server and owned resources.
@@ -108,16 +108,16 @@ namespace video_server
         /**
          * @brief Progresses owned subsystems once according to the active execution policy.
          *
-         * @return True when progression completed without fatal failure, false otherwise.
+         * @return Success or a typed API/encoder/backend error.
          */
-        virtual bool step() = 0;
+        virtual VideoServerResult step() = 0;
 
         /**
          * @brief Progresses API, HTTP, signaling, WebRTC, transport, and encoded-output delivery once.
          *
-         * @return True when progression completed without fatal failure or concurrent-call rejection.
+         * @return Success or a typed execution-mode/contention/backend error.
          */
-        virtual bool step_api() = 0;
+        virtual VideoServerResult step_api() = 0;
 
         /**
          * @brief Registers an exclusive caller-stepped group of managed streams.

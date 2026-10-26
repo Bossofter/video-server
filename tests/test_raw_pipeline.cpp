@@ -659,8 +659,10 @@ namespace
         EXPECT_NE(error.find("sink rejected"), std::string::npos);
 
         auto extra_frame = make_rgb_frame(config.input_width, config.input_height, 99);
-        EXPECT_FALSE(pipeline->push_frame(
-            make_rgb_view(extra_frame, config.input_width, config.input_height, 3000000000ull, 99), &error));
+        const auto terminal_result = pipeline->push_frame(
+            make_rgb_view(extra_frame, config.input_width, config.input_height, 3000000000ull, 99), &error);
+        EXPECT_FALSE(terminal_result);
+        EXPECT_EQ(terminal_result.error(), video_server::VideoServerError::SinkRejected);
         EXPECT_NE(error.find("sink rejected"), std::string::npos);
 
         std::string repeated_error;
@@ -695,8 +697,11 @@ namespace
         pipeline->stop();
         EXPECT_GE(units_seen, 0u);
         auto extra_frame = make_rgb_frame(config.input_width, config.input_height, 99);
-        EXPECT_FALSE(
-            pipeline->push_frame(make_rgb_view(extra_frame, config.input_width, config.input_height, 999999999ull, 99), &error));
+        const auto stopped_result =
+            pipeline->push_frame(make_rgb_view(extra_frame, config.input_width, config.input_height, 999999999ull, 99));
+        EXPECT_FALSE(stopped_result);
+        EXPECT_EQ(stopped_result.error(), video_server::VideoServerError::NotStarted);
+        EXPECT_NE(stopped_result.message().find("not running"), std::string::npos);
     }
 
     TEST(RawToH264PipelineTest, RejectsUnsupportedPixelFormatsAtStart)

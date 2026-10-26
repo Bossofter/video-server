@@ -7,6 +7,7 @@ For the normal raw-frame-to-browser workflow, use:
 - [Getting Started](getting_started.md)
 - [Raw Frames To WebRTC](raw_frames_to_webrtc.md)
 - [API Routes](api_routes.md)
+- [Error Handling](error_handling.md)
 
 Supporting references:
 
