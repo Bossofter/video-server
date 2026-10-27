@@ -59,19 +59,21 @@ namespace video_server
 
     } // namespace
 
-    bool VideoServerCore::register_stream(const StreamConfig &config)
+    VideoServerResult VideoServerCore::register_stream(const StreamConfig &config)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (config.stream_id.empty() || config.width == 0 || config.height == 0 || config.nominal_fps <= 0.0 ||
             !is_supported_input_pixel_format(config.input_pixel_format) || config.max_subscribers == 0)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidConfiguration,
+                                              "stream configuration is invalid");
         }
 
         auto [it, inserted] = streams_.try_emplace(config.stream_id);
         if (!inserted)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::AlreadyExists,
+                                              "stream already exists: " + config.stream_id);
         }
 
         StreamState &stream = it->second;
@@ -81,30 +83,36 @@ namespace video_server
         info.config = config;
         info.output_config = StreamOutputConfig{};
         info.active = true;
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::remove_stream(const std::string &stream_id)
+    VideoServerResult VideoServerCore::remove_stream(const std::string &stream_id)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return streams_.erase(stream_id) > 0;
+        if (streams_.erase(stream_id) == 0)
+        {
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
+        }
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::push_frame(const std::string &stream_id, const VideoFrameView &frame)
+    VideoServerResult VideoServerCore::push_frame(const std::string &stream_id, const VideoFrameView &frame)
     {
         StreamConfig config_snapshot;
         StreamOutputConfig output_config_snapshot;
-        if (!validate_raw_frame_input(stream_id, frame, &config_snapshot, &output_config_snapshot))
+        const auto validation = validate_raw_frame_input(stream_id, frame, &config_snapshot, &output_config_snapshot);
+        if (!validation)
         {
-            note_frame_dropped(stream_id);
-            return false;
+            (void)note_frame_dropped(stream_id);
+            return validation;
         }
 
         RawFrameStatistics raw_statistics;
         if (!calculate_raw_frame_statistics(frame, raw_statistics))
         {
-            note_frame_dropped(stream_id);
-            return false;
+            (void)note_frame_dropped(stream_id);
+            return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                              "raw frame statistics could not be calculated");
         }
 
         {
@@ -112,7 +120,7 @@ namespace video_server
             auto it = streams_.find(stream_id);
             if (it == streams_.end())
             {
-                return false;
+                return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
             }
             StreamState &stream = it->second;
             ++stream.info.frames_received;
@@ -126,7 +134,7 @@ namespace video_server
                 if (stream.next_allowed_output_timestamp_ns > 0 && frame.timestamp_ns < stream.next_allowed_output_timestamp_ns)
                 {
                     ++stream.info.frames_dropped;
-                    return true;
+                    return VideoServerResult::success();
                 }
                 stream.next_allowed_output_timestamp_ns = frame.timestamp_ns + frame_interval_ns;
             }
@@ -135,25 +143,28 @@ namespace video_server
         RgbImage transformed;
         if (!apply_display_transform(frame, output_config_snapshot, transformed))
         {
-            note_frame_dropped(stream_id);
-            return false;
+            (void)note_frame_dropped(stream_id);
+            return VideoServerResult::failure(VideoServerError::TransformFailed,
+                                              "display transform failed for stream: " + stream_id);
         }
 
         return publish_transformed_frame(stream_id, std::move(transformed.rgb), transformed.width, transformed.height,
                                          frame.timestamp_ns, frame.frame_id);
     }
 
-    bool VideoServerCore::push_access_unit(const std::string &stream_id,
-                                           const EncodedAccessUnitView &access_unit)
+    VideoServerResult VideoServerCore::push_access_unit(const std::string &stream_id,
+                                                        const EncodedAccessUnitView &access_unit)
     {
         if (access_unit.data == nullptr || access_unit.size_bytes == 0)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                              "encoded access unit payload is empty");
         }
 
         if (access_unit.codec != VideoCodec::H264 && access_unit.codec != VideoCodec::AV1)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::Unsupported,
+                                              "encoded access unit codec is unsupported");
         }
 
         auto published_unit = std::make_shared<LatestEncodedUnit>();
@@ -170,7 +181,7 @@ namespace video_server
         auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
         }
 
         StreamState &stream = it->second;
@@ -186,13 +197,13 @@ namespace video_server
         info.last_encoded_size_bytes = access_unit.size_bytes;
         info.last_encoded_keyframe = access_unit.keyframe;
         info.last_encoded_codec_config = access_unit.codec_config;
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::validate_raw_frame_input(const std::string &stream_id,
-                                                   const VideoFrameView &frame,
-                                                   StreamConfig *config_out,
-                                                   StreamOutputConfig *output_config_out) const
+    VideoServerResult VideoServerCore::validate_raw_frame_input(const std::string &stream_id,
+                                                                const VideoFrameView &frame,
+                                                                StreamConfig *config_out,
+                                                                StreamOutputConfig *output_config_out) const
     {
         StreamConfig config_snapshot;
         StreamOutputConfig output_config_snapshot;
@@ -201,7 +212,7 @@ namespace video_server
             auto it = streams_.find(stream_id);
             if (it == streams_.end())
             {
-                return false;
+                return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
             }
             config_snapshot = it->second.info.config;
             output_config_snapshot = it->second.info.output_config;
@@ -209,24 +220,28 @@ namespace video_server
 
         if (frame.data == nullptr || frame.width == 0 || frame.height == 0)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                              "raw frame payload and dimensions must be non-empty");
         }
 
         if (frame.width != config_snapshot.width || frame.height != config_snapshot.height ||
             frame.pixel_format != config_snapshot.input_pixel_format)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                              "raw frame does not match the registered stream format");
         }
 
         if (!is_supported_input_pixel_format(frame.pixel_format))
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::Unsupported,
+                                              "raw frame pixel format is unsupported");
         }
 
         const uint32_t expected_stride = video_pixel_format_min_row_bytes(frame.pixel_format, frame.width);
         if (expected_stride == 0 || frame.stride_bytes < expected_stride)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                              "raw frame stride is smaller than the required row size");
         }
 
         if (config_out != nullptr)
@@ -237,63 +252,64 @@ namespace video_server
         {
             *output_config_out = output_config_snapshot;
         }
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
+    VideoServerResult VideoServerCore::note_frame_received(const std::string &stream_id, uint64_t timestamp_ns)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
         }
 
         ++it->second.info.frames_received;
         it->second.info.last_input_timestamp_ns = timestamp_ns;
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::note_frame_received(const std::string &stream_id, const VideoFrameView &frame)
+    VideoServerResult VideoServerCore::note_frame_received(const std::string &stream_id, const VideoFrameView &frame)
     {
         RawFrameStatistics raw_statistics;
         if (!calculate_raw_frame_statistics(frame, raw_statistics))
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                              "raw frame statistics could not be calculated");
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
         }
 
         ++it->second.info.frames_received;
         it->second.info.last_input_timestamp_ns = frame.timestamp_ns;
         it->second.info.raw_frame_statistics = std::move(raw_statistics);
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::note_frame_dropped(const std::string &stream_id)
+    VideoServerResult VideoServerCore::note_frame_dropped(const std::string &stream_id)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
         }
 
         ++it->second.info.frames_dropped;
-        return true;
+        return VideoServerResult::success();
     }
 
-    bool VideoServerCore::publish_transformed_frame(const std::string &stream_id,
-                                                    std::vector<uint8_t> rgb_bytes,
-                                                    uint32_t width,
-                                                    uint32_t height,
-                                                    uint64_t timestamp_ns,
-                                                    uint64_t frame_id)
+    VideoServerResult VideoServerCore::publish_transformed_frame(const std::string &stream_id,
+                                                                 std::vector<uint8_t> rgb_bytes,
+                                                                 uint32_t width,
+                                                                 uint32_t height,
+                                                                 uint64_t timestamp_ns,
+                                                                 uint64_t frame_id)
     {
         auto published_frame = std::make_shared<LatestFrame>();
         published_frame->bytes = std::move(rgb_bytes);
@@ -308,7 +324,7 @@ namespace video_server
         auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
         }
 
         StreamState &stream = it->second;
@@ -320,7 +336,7 @@ namespace video_server
         info.last_frame_timestamp_ns = timestamp_ns;
         info.last_frame_id = frame_id;
         info.has_latest_frame = true;
-        return true;
+        return VideoServerResult::success();
     }
 
     std::vector<VideoStreamInfo> VideoServerCore::list_streams() const
@@ -346,22 +362,23 @@ namespace video_server
         return it->second.info;
     }
 
-    bool VideoServerCore::set_stream_output_config(const std::string &stream_id,
-                                                   const StreamOutputConfig &output_config)
+    VideoServerResult VideoServerCore::set_stream_output_config(const std::string &stream_id,
+                                                                const StreamOutputConfig &output_config)
     {
         if (!is_valid_rotation(output_config.rotation_degrees) ||
             !is_valid_output_dimensions(output_config.output_width, output_config.output_height) ||
             !is_valid_output_fps(output_config.output_fps) ||
             output_config.palette_max <= output_config.palette_min)
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::InvalidConfiguration,
+                                              "stream output configuration is invalid");
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = streams_.find(stream_id);
         if (it == streams_.end())
         {
-            return false;
+            return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
         }
 
         StreamOutputConfig updated = output_config;
@@ -370,7 +387,7 @@ namespace video_server
         it->second.next_allowed_output_timestamp_ns = 0;
         it->second.latest_frame.reset();
         it->second.info.has_latest_frame = false;
-        return true;
+        return VideoServerResult::success();
     }
 
     std::optional<StreamOutputConfig> VideoServerCore::get_stream_output_config(

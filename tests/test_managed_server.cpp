@@ -650,7 +650,10 @@ TEST(ManagedVideoServerTest, ManagedApiThreadRejectsManualStepApi)
 
     auto server = video_server::CreateManagedVideoServer(config);
     ASSERT_TRUE(server->start());
-    EXPECT_FALSE(server->step_api());
+    const auto result = server->step_api();
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error(), video_server::VideoServerError::WrongExecutionMode);
+    EXPECT_FALSE(result.message().empty());
     server->stop();
 }
 
@@ -708,12 +711,13 @@ TEST(ManagedVideoServerTest, ConcurrentStepApiCallsAreRejected)
         api_gate.release();
     }
     ASSERT_TRUE(first_entered) << "first API step did not enter API work";
-    const bool second = server->step_api();
+    const auto second = server->step_api();
     api_gate.release();
     const bool first_result = first.get();
 
     EXPECT_TRUE(first_result);
     EXPECT_FALSE(second);
+    EXPECT_EQ(second.error(), video_server::VideoServerError::ResourceBusy);
 
     server->stop();
 }
