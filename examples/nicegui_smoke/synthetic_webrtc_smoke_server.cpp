@@ -62,6 +62,7 @@ namespace
         video_server::SyntheticFrameGenerator generator;
         Clock::duration frame_interval;
         Clock::time_point next_frame_at;
+        uint64_t skipped_frame_deadlines{0};
 
         RunningStream(const video_server::StreamConfig &stream_config, Clock::time_point start_time)
             : config(stream_config),
@@ -553,8 +554,7 @@ int main(int argc, char **argv)
         auto next_frame_at = Clock::time_point::max();
         for (auto &stream : streams)
         {
-            next_frame_at = std::min(next_frame_at, stream.next_frame_at);
-            while (stream.next_frame_at <= now)
+            if (stream.next_frame_at <= now)
             {
                 const auto raw_frame = stream.generator.next_frame();
                 if (!server->push_frame(stream.config.stream_id, raw_frame))
@@ -563,8 +563,21 @@ int main(int argc, char **argv)
                 }
                 pushed_frame = true;
                 stream.next_frame_at += stream.frame_interval;
-                next_frame_at = std::min(next_frame_at, stream.next_frame_at);
+
+                // The managed stream uses a single latest-frame latch. Replaying every
+                // overdue synthetic deadline would repeatedly replace that latch before
+                // step_streams() can consume it, producing an unbounded drop spiral when
+                // generation, statistics, or encoding takes longer than one frame period.
+                const auto frame_finished_at = Clock::now();
+                if (stream.next_frame_at <= frame_finished_at)
+                {
+                    const auto skipped =
+                        (frame_finished_at - stream.next_frame_at) / stream.frame_interval + 1;
+                    stream.skipped_frame_deadlines += static_cast<uint64_t>(skipped);
+                    stream.next_frame_at += stream.frame_interval * skipped;
+                }
             }
+            next_frame_at = std::min(next_frame_at, stream.next_frame_at);
         }
 
         if (pushed_frame)
@@ -609,11 +622,15 @@ int main(int argc, char **argv)
                 stream_step_stats.percentile(99.0), stream_step_stats.max_ms);
             for (const auto &stream : snapshot.streams)
             {
+                const auto running = std::find_if(streams.begin(), streams.end(), [&](const RunningStream &candidate)
+                                                  { return candidate.config.stream_id == stream.stream_id; });
                 const auto &session = stream.current_session;
                 spdlog::info(
-                    "[smoke-server] stream={} raw={} encoded={} au={} sender={} packets={} startup_injections={} track_closed={}",
+                    "[smoke-server] stream={} raw={} encoded={} au={} producer_deadlines_skipped={} sender={} packets={} startup_injections={} track_closed={}",
                     stream.stream_id, stream.latest_raw_frame_available, stream.latest_encoded_access_unit_available,
-                    stream.total_access_units_received, session ? session->sender_state : std::string("no-session"),
+                    stream.total_access_units_received,
+                    running != streams.end() ? running->skipped_frame_deadlines : 0,
+                    session ? session->sender_state : std::string("no-session"),
                     session ? session->counters.packets_sent_after_track_open : 0,
                     session ? session->counters.startup_sequence_injections : 0,
                     session ? session->counters.track_closed_events : 0);

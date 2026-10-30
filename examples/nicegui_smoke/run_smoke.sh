@@ -26,7 +26,7 @@ SERVER_ARGS=()
 HAS_STREAM_SELECTION=false
 for ARG in "$@"; do
   case "$ARG" in
-    --stream|--stream-id|--multi-stream-demo)
+    --config|--stream|--stream-id|--multi-stream-demo)
       HAS_STREAM_SELECTION=true
       ;;
   esac

@@ -23,6 +23,9 @@ From the repo root:
 
 This launches only the C++ video server using `smoke_server.toml` (`127.0.0.1:8090` by default) with the default three-stream demo. Extra arguments are forwarded directly to `video_server_nicegui_smoke_server`.
 
+Passing an explicit `--config PATH` uses the stream list from that file. The wrapper only selects the built-in
+alpha/bravo/charlie demo when no config or CLI stream selection is supplied.
+
 To launch the optional NiceGUI browser client as well:
 
 ```bash
@@ -64,6 +67,11 @@ python examples/nicegui_smoke/app.py \
   --stream charlie:320:240:30:Charlie-Checker \
   --auto-connect --debug --lan-only
 ```
+
+The synthetic producer does not replay overdue frame deadlines. If generation, per-frame diagnostics, or encoding
+cannot sustain the configured FPS, it skips obsolete synthetic deadlines and reports `producer_deadlines_skipped`
+in periodic observability logs. Submitted frames are stepped immediately instead of being replaced in the
+single-frame managed latch.
 
 The smoke tab now also includes a dropdown selector so you can point the full debug player at any configured stream before connecting or reconnecting.
 
