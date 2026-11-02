@@ -914,60 +914,70 @@ namespace video_server
 
             const std::string &stream_id() const override { return stream_id_; }
 
-            bool start(std::string *error_message = nullptr) override
+            VideoServerResult start(std::string *error_message = nullptr) override
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (running_)
                 {
-                    return true;
+                    return VideoServerResult::success();
                 }
-                if (!validate_config(error_message))
+                std::string local_error;
+                std::string *detail = error_message != nullptr ? error_message : &local_error;
+                if (!validate_config(detail))
                 {
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::InvalidConfiguration, *detail);
                 }
-                if (!encoder_backend_->open(error_message))
+                if (!encoder_backend_->open(detail))
                 {
-                    set_error_locked(error_message != nullptr ? *error_message : std::string("failed to open encoder backend"), error_message);
-                    return false;
+                    set_error_locked(detail->empty() ? std::string("failed to open encoder backend") : *detail, error_message);
+                    return VideoServerResult::failure(VideoServerError::EncoderFailure, last_error_);
                 }
                 failed_ = false;
+                failure_error_ = VideoServerError::EncoderFailure;
                 last_error_.clear();
                 fps_filter_interval_ns_ = config_.output_fps.has_value()
                                               ? static_cast<uint64_t>(std::llround(1000000000.0 / *config_.output_fps))
                                               : 0;
                 next_allowed_timestamp_ns_ = 0;
                 running_ = true;
-                return true;
+                return VideoServerResult::success();
             }
 
-            bool push_frame(const VideoFrameView &frame, std::string *error_message = nullptr) override
+            VideoServerResult push_frame(const VideoFrameView &frame, std::string *error_message = nullptr) override
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!running_)
                 {
-                    set_error_value(error_message, failed_ && !last_error_.empty() ? last_error_ : "pipeline is not running");
-                    return false;
+                    const std::string message = failed_ && !last_error_.empty() ? last_error_ : "pipeline is not running";
+                    set_error_value(error_message, message);
+                    return VideoServerResult::failure(failed_ ? failure_error_ : VideoServerError::NotStarted,
+                                                      message);
                 }
                 if (failed_)
                 {
                     set_error_value(error_message, last_error_);
-                    return false;
+                    return VideoServerResult::failure(failure_error_, last_error_);
                 }
-                if (!validate_frame(frame, error_message))
+                std::string local_error;
+                std::string *detail = error_message != nullptr ? error_message : &local_error;
+                if (!validate_frame(frame, detail))
                 {
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::InvalidArgument, *detail);
                 }
                 if (should_drop_frame_locked(frame.timestamp_ns))
                 {
-                    return true;
+                    return VideoServerResult::success();
                 }
-                if (!encoder_backend_->encode_frame(frame, error_message))
+                if (!encoder_backend_->encode_frame(frame, detail))
                 {
-                    set_error_locked(error_message != nullptr ? *error_message : std::string("encoder backend failed"), error_message);
+                    set_error_locked(detail->empty() ? std::string("encoder backend failed") : *detail, error_message);
+                    failure_error_ = last_error_.find("sink rejected") != std::string::npos
+                                         ? VideoServerError::SinkRejected
+                                         : VideoServerError::EncoderFailure;
                     fail_pipeline_locked();
-                    return false;
+                    return VideoServerResult::failure(failure_error_, last_error_);
                 }
-                return true;
+                return VideoServerResult::success();
             }
 
             RawH264EncoderRuntimeInfo encoder_runtime_info() const override
@@ -1114,6 +1124,7 @@ namespace video_server
             mutable std::mutex mutex_;
             bool running_{false};
             bool failed_{false};
+            VideoServerError failure_error_{VideoServerError::EncoderFailure};
             std::string last_error_;
             uint64_t fps_filter_interval_ns_{0};
             uint64_t next_allowed_timestamp_ns_{0};

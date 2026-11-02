@@ -471,27 +471,33 @@ namespace video_server
                 stop();
             }
 
-            bool start() override
+            VideoServerResult start() override
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 if (started_)
                 {
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::AlreadyStarted,
+                                                      "managed video server is already started");
                 }
 
                 for (auto &[stream_id, state] : streams_)
                 {
-                    if (!state->registered_with_server && !server_.register_stream(state->stream_config))
+                    if (!state->registered_with_server)
                     {
-                        spdlog::error("failed to register managed stream {}", stream_id);
-                        return false;
+                        auto result = server_.register_stream(state->stream_config);
+                        if (!result)
+                        {
+                            spdlog::error("failed to register managed stream {}: {}", stream_id, result.message());
+                            return result;
+                        }
                     }
                     state->registered_with_server = true;
                 }
 
-                if (!server_.start())
+                auto start_result = server_.start();
+                if (!start_result)
                 {
-                    return false;
+                    return start_result;
                 }
 
                 stop_requested_ = false;
@@ -512,10 +518,11 @@ namespace video_server
                         server_.stop();
                         lock.lock();
                         started_ = false;
-                        return false;
+                        return VideoServerResult::failure(VideoServerError::BackendFailure,
+                                                          "failed to apply managed API thread configuration");
                     }
                 }
-                return true;
+                return VideoServerResult::success();
             }
 
             void stop() override
@@ -541,11 +548,12 @@ namespace video_server
                 started_ = false;
             }
 
-            bool step() override
+            VideoServerResult step() override
             {
-                if (!step_api_compat())
+                auto api_result = step_api_compat();
+                if (!api_result)
                 {
-                    return false;
+                    return api_result;
                 }
 
                 std::vector<std::string> stream_ids;
@@ -554,7 +562,7 @@ namespace video_server
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (stream_order_.empty())
                     {
-                        return true;
+                        return VideoServerResult::success();
                     }
                     for (const auto &stream_id : stream_order_)
                     {
@@ -566,7 +574,7 @@ namespace video_server
                     }
                     if (stream_ids.empty())
                     {
-                        return true;
+                        return VideoServerResult::success();
                     }
                     start_index = next_stream_index_ % stream_ids.size();
                 }
@@ -586,7 +594,8 @@ namespace video_server
                     const auto result = process_stream(stream_id);
                     if (result == StreamStepResult::Failed)
                     {
-                        return false;
+                        return VideoServerResult::failure(VideoServerError::EncoderFailure,
+                                                          "managed stream progression failed for: " + stream_id);
                     }
                     if (result == StreamStepResult::Progressed)
                     {
@@ -604,16 +613,22 @@ namespace video_server
                                                            : ((start_index + 1) % stream_order_.size());
                     }
                 }
-                return step_api_compat();
+                api_result = step_api_compat();
+                if (!api_result)
+                {
+                    return api_result;
+                }
+                return VideoServerResult::success();
             }
 
-            bool step_api() override
+            VideoServerResult step_api() override
             {
                 if (config_.api_execution.mode == ManagedApiExecutionMode::ManagedThread ||
                     config_.execution_mode == ExecutionMode::WorkerThread)
                 {
                     spdlog::warn("manual step_api rejected while managed API thread mode is active");
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::WrongExecutionMode,
+                                                      "manual API stepping is disabled while a managed API thread is active");
                 }
                 return step_api_guarded();
             }
@@ -686,40 +701,43 @@ namespace video_server
                 return snapshot;
             }
 
-            bool register_stream(const StreamConfig &config) override
+            VideoServerResult register_stream(const StreamConfig &config) override
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (streams_.find(config.stream_id) != streams_.end())
                 {
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::AlreadyExists,
+                                                      "stream already exists: " + config.stream_id);
                 }
 
                 add_stream_state_locked(config);
                 auto &state = streams_.at(config.stream_id);
                 if (started_)
                 {
-                    if (!server_.register_stream(config))
+                    auto result = server_.register_stream(config);
+                    if (!result)
                     {
                         streams_.erase(config.stream_id);
-                        return false;
+                        return result;
                     }
                     state->registered_with_server = true;
                 }
-                return true;
+                return VideoServerResult::success();
             }
 
-            bool remove_stream(const std::string &stream_id) override
+            VideoServerResult remove_stream(const std::string &stream_id) override
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto it = streams_.find(stream_id);
                 if (it == streams_.end())
                 {
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::NotFound, "stream not found: " + stream_id);
                 }
                 if (it->second->owner_group_id != 0)
                 {
                     spdlog::warn("remove_stream rejected for {} because it is owned by a stream group", stream_id);
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::ResourceBusy,
+                                                      "stream is owned by a managed stream group: " + stream_id);
                 }
                 std::lock_guard<std::mutex> stream_lock(it->second->mutex);
                 if (it->second->pipeline)
@@ -729,7 +747,7 @@ namespace video_server
                 }
                 if (it->second->registered_with_server)
                 {
-                    server_.remove_stream(stream_id);
+                    (void)server_.remove_stream(stream_id);
                 }
                 stream_order_.erase(std::remove(stream_order_.begin(), stream_order_.end(), stream_id), stream_order_.end());
                 if (!stream_order_.empty())
@@ -741,24 +759,26 @@ namespace video_server
                     next_stream_index_ = 0;
                 }
                 streams_.erase(it);
-                return true;
+                return VideoServerResult::success();
             }
 
-            bool push_frame(const std::string &stream_id, const VideoFrameView &frame) override
+            VideoServerResult push_frame(const std::string &stream_id, const VideoFrameView &frame) override
             {
                 StreamConfig stream_config;
                 StreamOutputConfig output_config;
-                if (!server_.validate_raw_frame_input(stream_id, frame, &stream_config, &output_config))
+                auto validation = server_.validate_raw_frame_input(stream_id, frame, &stream_config, &output_config);
+                if (!validation)
                 {
-                    server_.note_frame_dropped(stream_id);
-                    return false;
+                    (void)server_.note_frame_dropped(stream_id);
+                    return validation;
                 }
 
                 const size_t frame_bytes = frame_storage_size(frame);
                 if (frame_bytes == 0)
                 {
-                    server_.note_frame_dropped(stream_id);
-                    return false;
+                    (void)server_.note_frame_dropped(stream_id);
+                    return VideoServerResult::failure(VideoServerError::InvalidArgument,
+                                                      "raw frame storage size is invalid");
                 }
 
                 PendingFrame pending;
@@ -776,37 +796,45 @@ namespace video_server
                     auto it = streams_.find(stream_id);
                     if (it == streams_.end())
                     {
-                        server_.note_frame_dropped(stream_id);
-                        return false;
+                        (void)server_.note_frame_dropped(stream_id);
+                        return VideoServerResult::failure(VideoServerError::NotFound,
+                                                          "stream not found: " + stream_id);
                     }
                     {
                         std::lock_guard<std::mutex> stream_lock(it->second->mutex);
                         if (it->second->pending_frame.has_value())
                         {
-                            server_.note_frame_dropped(stream_id);
+                            (void)server_.note_frame_dropped(stream_id);
                         }
                         it->second->pending_frame = std::move(pending);
                     }
                 }
 
-                if (!server_.note_frame_received(stream_id, frame))
+                auto received_result = server_.note_frame_received(stream_id, frame);
+                if (!received_result)
                 {
-                    server_.note_frame_dropped(stream_id);
-                    return false;
+                    (void)server_.note_frame_dropped(stream_id);
+                    return received_result;
                 }
 
                 if (config_.execution_mode == ExecutionMode::InlineOnPush)
                 {
-                    if (!step_api_compat())
+                    auto api_result = step_api_compat();
+                    if (!api_result)
                     {
-                        return false;
+                        return api_result;
                     }
-                    return process_stream(stream_id) != StreamStepResult::Failed;
+                    if (process_stream(stream_id) == StreamStepResult::Failed)
+                    {
+                        return VideoServerResult::failure(VideoServerError::EncoderFailure,
+                                                          "managed stream progression failed for: " + stream_id);
+                    }
                 }
-                return true;
+                return VideoServerResult::success();
             }
 
-            bool push_access_unit(const std::string &stream_id, const EncodedAccessUnitView &access_unit) override
+            VideoServerResult push_access_unit(const std::string &stream_id,
+                                                const EncodedAccessUnitView &access_unit) override
             {
                 return server_.push_access_unit(stream_id, access_unit);
             }
@@ -818,8 +846,8 @@ namespace video_server
                 return server_.get_stream_info(stream_id);
             }
 
-            bool set_stream_output_config(const std::string &stream_id,
-                                          const StreamOutputConfig &output_config) override
+            VideoServerResult set_stream_output_config(const std::string &stream_id,
+                                                       const StreamOutputConfig &output_config) override
             {
                 return server_.set_stream_output_config(stream_id, output_config);
             }
@@ -916,13 +944,14 @@ namespace video_server
                     }
                 }
 
-                bool step_streams() override
+                VideoServerResult step_streams() override
                 {
                     bool expected = false;
                     if (!stepping_.compare_exchange_strong(expected, true))
                     {
                         spdlog::warn("managed stream group concurrent step rejected group={}", group_id_);
-                        return false;
+                        return VideoServerResult::failure(VideoServerError::ResourceBusy,
+                                                          "managed stream group step is already active");
                     }
                     struct StepGuard
                     {
@@ -933,14 +962,16 @@ namespace video_server
                     const auto access = access_.lock();
                     if (!access)
                     {
-                        return false;
+                        return VideoServerResult::failure(VideoServerError::NotStarted,
+                                                          "managed video server is no longer available");
                     }
                     ManagedVideoServer *owner = nullptr;
                     {
                         std::lock_guard<std::mutex> access_lock(access->mutex);
                         if (access->owner == nullptr || access->shutting_down)
                         {
-                            return false;
+                            return VideoServerResult::failure(VideoServerError::NotStarted,
+                                                              "managed video server is stopping");
                         }
                         owner = access->owner;
                         ++access->active_calls;
@@ -955,7 +986,12 @@ namespace video_server
                             access->cv.notify_all();
                         }
                     } active_call{access};
-                    return owner->step_stream_ids(stream_ids_);
+                    if (!owner->step_stream_ids(stream_ids_))
+                    {
+                        return VideoServerResult::failure(VideoServerError::EncoderFailure,
+                                                          "managed stream group progression failed");
+                    }
+                    return VideoServerResult::success();
                 }
 
                 std::vector<std::string> stream_ids() const override { return stream_ids_; }
@@ -1138,7 +1174,7 @@ namespace video_server
                 const auto transform_started_at = std::chrono::steady_clock::now();
                 if (!apply_display_transform(pending.view(), output_config, transformed))
                 {
-                    server_.note_frame_dropped(stream_id);
+                    (void)server_.note_frame_dropped(stream_id);
                     return StreamStepResult::Progressed;
                 }
                 const auto transform_finished_at = std::chrono::steady_clock::now();
@@ -1238,23 +1274,24 @@ namespace video_server
                 }
             }
 
-            bool step_api_compat()
+            VideoServerResult step_api_compat()
             {
                 if (config_.api_execution.mode == ManagedApiExecutionMode::ManagedThread ||
                     config_.execution_mode == ExecutionMode::WorkerThread)
                 {
-                    return true;
+                    return VideoServerResult::success();
                 }
                 return step_api_guarded();
             }
 
-            bool step_api_guarded()
+            VideoServerResult step_api_guarded()
             {
                 bool expected = false;
                 if (!api_step_active_.compare_exchange_strong(expected, true))
                 {
                     spdlog::warn("managed API concurrent step rejected");
-                    return false;
+                    return VideoServerResult::failure(VideoServerError::ResourceBusy,
+                                                      "managed API step is already active");
                 }
                 struct StepGuard
                 {
@@ -1264,7 +1301,7 @@ namespace video_server
                 return step_api_impl();
             }
 
-            bool step_api_impl()
+            VideoServerResult step_api_impl()
             {
                 if (const auto hook = current_managed_api_step_test_hook())
                 {
@@ -1292,9 +1329,10 @@ namespace video_server
 
                 for (const auto &entry : units)
                 {
-                    if (!server_.push_access_unit(entry.first, entry.second.view()))
+                    auto result = server_.push_access_unit(entry.first, entry.second.view());
+                    if (!result)
                     {
-                        return false;
+                        return result;
                     }
                 }
                 return server_.step();

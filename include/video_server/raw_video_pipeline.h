@@ -89,18 +89,18 @@ namespace video_server
          * @brief Opens pipeline resources and validates the active configuration.
          *
          * @param error_message Optional destination for a human-readable failure reason.
-         * @return True when startup succeeded, false otherwise.
+         * @return Success or a typed configuration/encoder error.
          */
-        virtual bool start(std::string *error_message = nullptr) = 0;
+        virtual VideoServerResult start(std::string *error_message = nullptr) = 0;
 
         /**
          * @brief Admits one raw frame into the pipeline.
          *
          * @param frame Raw frame view to encode.
          * @param error_message Optional destination for a human-readable failure reason.
-         * @return True when the frame was accepted, false otherwise.
+         * @return Success or a typed lifecycle/frame/encoder/sink error.
          */
-        virtual bool push_frame(const VideoFrameView &frame, std::string *error_message = nullptr) = 0;
+        virtual VideoServerResult push_frame(const VideoFrameView &frame, std::string *error_message = nullptr) = 0;
 
         /**
          * @brief Returns the active encoder selection details for diagnostics.

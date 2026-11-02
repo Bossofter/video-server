@@ -53,7 +53,7 @@ namespace video_server
          * @param config Registration-time stream configuration.
          * @return True when the stream was registered, false otherwise.
          */
-        bool register_stream(const StreamConfig &config) override;
+        VideoServerResult register_stream(const StreamConfig &config) override;
 
         /**
          * @brief Removes a stream and its latest-frame/latest-unit snapshots.
@@ -61,7 +61,7 @@ namespace video_server
          * @param stream_id Identifier of the stream to remove.
          * @return True when the stream was removed, false otherwise.
          */
-        bool remove_stream(const std::string &stream_id) override;
+        VideoServerResult remove_stream(const std::string &stream_id) override;
 
         /**
          * @brief Ingests a raw frame for a registered stream.
@@ -70,7 +70,7 @@ namespace video_server
          * @param frame Raw frame view to validate, transform, and publish.
          * @return True when the frame was accepted, false otherwise.
          */
-        bool push_frame(const std::string &stream_id, const VideoFrameView &frame) override;
+        VideoServerResult push_frame(const std::string &stream_id, const VideoFrameView &frame) override;
 
         /**
          * @brief Ingests an encoded access unit for a registered stream.
@@ -79,7 +79,7 @@ namespace video_server
          * @param access_unit Encoded access unit to publish.
          * @return True when the access unit was accepted, false otherwise.
          */
-        bool push_access_unit(const std::string &stream_id, const EncodedAccessUnitView &access_unit) override;
+        VideoServerResult push_access_unit(const std::string &stream_id, const EncodedAccessUnitView &access_unit) override;
 
         /**
          * @brief Validates a raw input frame against the registered stream contract.
@@ -90,10 +90,10 @@ namespace video_server
          * @param output_config_out Optional destination for the active output config.
          * @return True when the frame matches the stream contract, false otherwise.
          */
-        bool validate_raw_frame_input(const std::string &stream_id,
-                                      const VideoFrameView &frame,
-                                      StreamConfig *config_out = nullptr,
-                                      StreamOutputConfig *output_config_out = nullptr) const;
+        VideoServerResult validate_raw_frame_input(const std::string &stream_id,
+                                                   const VideoFrameView &frame,
+                                                   StreamConfig *config_out = nullptr,
+                                                   StreamOutputConfig *output_config_out = nullptr) const;
 
         /**
          * @brief Records that one valid raw input frame was received for the stream.
@@ -102,16 +102,16 @@ namespace video_server
          * @param timestamp_ns Frame timestamp in nanoseconds.
          * @return True when the stream exists, false otherwise.
          */
-        bool note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
+        VideoServerResult note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
 
         /**
          * @brief Records and analyzes one valid raw input frame.
          *
          * @param stream_id Identifier of the target stream.
          * @param frame Raw frame to analyze before transforms or encoding.
-         * @return True when the stream exists and the frame could be analyzed.
+         * @return Success or a typed stream/frame-analysis error.
          */
-        bool note_frame_received(const std::string &stream_id, const VideoFrameView &frame);
+        VideoServerResult note_frame_received(const std::string &stream_id, const VideoFrameView &frame);
 
         /**
          * @brief Records that one raw frame was dropped for the stream.
@@ -119,7 +119,7 @@ namespace video_server
          * @param stream_id Identifier of the target stream.
          * @return True when the stream exists, false otherwise.
          */
-        bool note_frame_dropped(const std::string &stream_id);
+        VideoServerResult note_frame_dropped(const std::string &stream_id);
 
         /**
          * @brief Publishes a transformed RGB latest-frame snapshot for one stream.
@@ -132,12 +132,12 @@ namespace video_server
          * @param frame_id Source frame identifier.
          * @return True when the frame was published, false otherwise.
          */
-        bool publish_transformed_frame(const std::string &stream_id,
-                                       std::vector<uint8_t> rgb_bytes,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint64_t timestamp_ns,
-                                       uint64_t frame_id);
+        VideoServerResult publish_transformed_frame(const std::string &stream_id,
+                                                    std::vector<uint8_t> rgb_bytes,
+                                                    uint32_t width,
+                                                    uint32_t height,
+                                                    uint64_t timestamp_ns,
+                                                    uint64_t frame_id);
 
         /**
          * @brief Returns a snapshot of every registered stream.
@@ -161,8 +161,8 @@ namespace video_server
          * @param output_config Runtime output configuration to apply.
          * @return True when the configuration was accepted, false otherwise.
          */
-        bool set_stream_output_config(const std::string &stream_id,
-                                      const StreamOutputConfig &output_config) override;
+        VideoServerResult set_stream_output_config(const std::string &stream_id,
+                                                   const StreamOutputConfig &output_config) override;
 
         /**
          * @brief Returns the runtime output config for one stream when present.

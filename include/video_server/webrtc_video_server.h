@@ -95,30 +95,30 @@ namespace video_server
         /**
          * @brief Starts the HTTP and backend services.
          *
-         * @return True when startup succeeded, false otherwise.
+         * @return Success or a typed configuration/backend error.
          */
-        bool start();
+        VideoServerResult start();
 
         /**
          * @brief Progresses owned HTTP/network work once when using stepped execution.
          *
-         * @return True when progression succeeded, false on fatal error.
+         * @return Success or a typed backend error.
          */
-        bool step();
+        VideoServerResult step();
 
         /**
          * @brief Stops the server and releases active sessions.
          */
         void stop();
 
-        bool register_stream(const StreamConfig &config) override;
-        bool remove_stream(const std::string &stream_id) override;
-        bool push_frame(const std::string &stream_id, const VideoFrameView &frame) override;
-        bool push_access_unit(const std::string &stream_id, const EncodedAccessUnitView &access_unit) override;
+        VideoServerResult register_stream(const StreamConfig &config) override;
+        VideoServerResult remove_stream(const std::string &stream_id) override;
+        VideoServerResult push_frame(const std::string &stream_id, const VideoFrameView &frame) override;
+        VideoServerResult push_access_unit(const std::string &stream_id, const EncodedAccessUnitView &access_unit) override;
         std::vector<VideoStreamInfo> list_streams() const override;
         std::optional<VideoStreamInfo> get_stream_info(const std::string &stream_id) const override;
-        bool set_stream_output_config(const std::string &stream_id,
-                                      const StreamOutputConfig &output_config) override;
+        VideoServerResult set_stream_output_config(const std::string &stream_id,
+                                                   const StreamOutputConfig &output_config) override;
         std::optional<StreamOutputConfig> get_stream_output_config(const std::string &stream_id) const override;
 
         /**
@@ -128,38 +128,38 @@ namespace video_server
          * @param frame Raw frame view to validate.
          * @param config_out Optional destination for the registered stream config.
          * @param output_config_out Optional destination for the active output config.
-         * @return True when the frame matches the stream contract, false otherwise.
+         * @return Success or a typed stream/frame validation error.
          */
-        bool validate_raw_frame_input(const std::string &stream_id,
-                                      const VideoFrameView &frame,
-                                      StreamConfig *config_out = nullptr,
-                                      StreamOutputConfig *output_config_out = nullptr) const;
+        VideoServerResult validate_raw_frame_input(const std::string &stream_id,
+                                                   const VideoFrameView &frame,
+                                                   StreamConfig *config_out = nullptr,
+                                                   StreamOutputConfig *output_config_out = nullptr) const;
 
         /**
          * @brief Records receipt of one valid raw input frame.
          *
          * @param stream_id Identifier of the target stream.
          * @param timestamp_ns Frame timestamp in nanoseconds.
-         * @return True when the stream exists, false otherwise.
+         * @return Success or `NotFound` when the stream does not exist.
          */
-        bool note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
+        VideoServerResult note_frame_received(const std::string &stream_id, uint64_t timestamp_ns);
 
         /**
          * @brief Records receipt of and computes statistics for one valid raw input frame.
          *
          * @param stream_id Identifier of the target stream.
          * @param frame Raw frame to analyze before transforms or encoding.
-         * @return True when the stream exists and the frame could be analyzed.
+         * @return Success or a typed stream/frame-analysis error.
          */
-        bool note_frame_received(const std::string &stream_id, const VideoFrameView &frame);
+        VideoServerResult note_frame_received(const std::string &stream_id, const VideoFrameView &frame);
 
         /**
          * @brief Records that one raw frame was dropped for the stream.
          *
          * @param stream_id Identifier of the target stream.
-         * @return True when the stream exists, false otherwise.
+         * @return Success or `NotFound` when the stream does not exist.
          */
-        bool note_frame_dropped(const std::string &stream_id);
+        VideoServerResult note_frame_dropped(const std::string &stream_id);
 
         /**
          * @brief Publishes a transformed RGB frame as the canonical latest-frame snapshot.
@@ -170,14 +170,14 @@ namespace video_server
          * @param height Transformed frame height.
          * @param timestamp_ns Source frame timestamp in nanoseconds.
          * @param frame_id Source frame identifier.
-         * @return True when the transformed frame was published, false otherwise.
+         * @return Success or `NotFound` when the stream does not exist.
          */
-        bool publish_transformed_frame(const std::string &stream_id,
-                                       std::vector<uint8_t> rgb_bytes,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint64_t timestamp_ns,
-                                       uint64_t frame_id);
+        VideoServerResult publish_transformed_frame(const std::string &stream_id,
+                                                    std::vector<uint8_t> rgb_bytes,
+                                                    uint32_t width,
+                                                    uint32_t height,
+                                                    uint64_t timestamp_ns,
+                                                    uint64_t frame_id);
 
         /**
          * @brief Handles a synthetic HTTP request without opening a socket, for tests.

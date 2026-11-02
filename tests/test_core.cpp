@@ -233,6 +233,42 @@ namespace
         EXPECT_FALSE(server.remove_stream(cfg.stream_id));
     }
 
+    TEST(VideoServerCoreTest, ReturnsTypedErrorsForPublicMutations)
+    {
+        video_server::VideoServerCore server;
+        const video_server::StreamConfig config{
+            "alpha", "Alpha", 2, 2, 30.0, video_server::VideoPixelFormat::GRAY8};
+
+        const auto invalid_config = server.register_stream({});
+        EXPECT_EQ(invalid_config.error(), video_server::VideoServerError::InvalidConfiguration);
+        EXPECT_FALSE(invalid_config.message().empty());
+
+        ASSERT_TRUE(server.register_stream(config));
+        const auto duplicate = server.register_stream(config);
+        EXPECT_EQ(duplicate.error(), video_server::VideoServerError::AlreadyExists);
+        EXPECT_STREQ(video_server::to_string(duplicate.error()), "already_exists");
+
+        std::vector<uint8_t> pixels(4, 10);
+        const auto missing_stream = server.push_frame("missing", make_gray_frame(pixels, 2, 2, 100, 1));
+        EXPECT_EQ(missing_stream.error(), video_server::VideoServerError::NotFound);
+
+        const auto mismatched_frame = server.push_frame("alpha", make_gray_frame(pixels, 1, 4, 100, 1));
+        EXPECT_EQ(mismatched_frame.error(), video_server::VideoServerError::InvalidArgument);
+
+        video_server::EncodedAccessUnitView empty_access_unit{};
+        const auto empty_payload = server.push_access_unit("alpha", empty_access_unit);
+        EXPECT_EQ(empty_payload.error(), video_server::VideoServerError::InvalidArgument);
+
+        video_server::StreamOutputConfig invalid_output;
+        invalid_output.rotation_degrees = 45;
+        const auto invalid_output_result = server.set_stream_output_config("alpha", invalid_output);
+        EXPECT_EQ(invalid_output_result.error(), video_server::VideoServerError::InvalidConfiguration);
+
+        ASSERT_TRUE(server.remove_stream("alpha"));
+        const auto removed = server.remove_stream("alpha");
+        EXPECT_EQ(removed.error(), video_server::VideoServerError::NotFound);
+    }
+
 TEST(VideoServerCoreTest, StreamDebugSnapshotsRemainPerStreamAndStableUnderRepeatedUpdates)
 {
         video_server::VideoServerCore server;
