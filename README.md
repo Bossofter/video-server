@@ -20,7 +20,7 @@ raw frames
 - Build and first run: [docs/getting_started.md](docs/getting_started.md)
 - Integrate your own raw-frame producer: [docs/raw_frames_to_webrtc.md](docs/raw_frames_to_webrtc.md)
 - HTTP API and signaling routes: [docs/api_routes.md](docs/api_routes.md)
-- Runtime config fields: [docs/configuration_and_filters.md](docs/configuration_and_filters.md)
+- Complete managed TOML and runtime config reference: [docs/configuration_and_filters.md](docs/configuration_and_filters.md)
 - Session behavior: [docs/session_lifecycle.md](docs/session_lifecycle.md)
 - Security defaults: [docs/security_model.md](docs/security_model.md)
 - Soak testing: [docs/soak_testing.md](docs/soak_testing.md)

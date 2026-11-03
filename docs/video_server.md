@@ -11,7 +11,7 @@ For the normal raw-frame-to-browser workflow, use:
 
 Supporting references:
 
-- [Configuration And Filters](configuration_and_filters.md)
+- [Complete Configuration Reference](configuration_and_filters.md)
 - [Session Lifecycle](session_lifecycle.md)
 - [Security Model](security_model.md)
 - [Soak Testing](soak_testing.md)

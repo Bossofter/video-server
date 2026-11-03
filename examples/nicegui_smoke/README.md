@@ -1,14 +1,17 @@
 # NiceGUI browser harness
 
-This example is a **manual development/debug harness** for the browser-facing H264 WebRTC path.
+This example is a **manual development/debug harness** for the browser-facing H.264 and AV1 WebRTC paths.
+
+The smoke server uses the managed-server TOML schema. See the
+[complete configuration reference](../../docs/configuration_and_filters.md) for every supported option and default.
 
 It remains intentionally separate from the reusable server core:
 
 - the C++ smoke server executable starts `WebRtcVideoServer`
 - registers one or more synthetic streams
 - pushes raw synthetic frames for server-side observability
-- runs the shared raw→H264 in-process libav pipeline per stream
-- feeds those H264 access units into the existing `push_access_unit()` path
+- runs the shared raw-to-H.264/AV1 in-process libav pipeline per stream
+- feeds those encoded access units into the existing `push_access_unit()` path
 - the NiceGUI page consumes the stream(s) using the existing HTTP signaling API and native browser `<video>` elements
 - all browser debug UX, reconnect logic, telemetry, and console hooks live in `examples/nicegui_smoke/app.py`
 

@@ -183,5 +183,5 @@ Next documents:
 
 - [Raw Frames To WebRTC](raw_frames_to_webrtc.md)
 - [API Routes](api_routes.md)
-- [Configuration And Filters](configuration_and_filters.md)
+- [Complete Configuration Reference](configuration_and_filters.md)
 - [Session Lifecycle](session_lifecycle.md)

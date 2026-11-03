@@ -150,6 +150,9 @@ api_scheduling_priority = 10
 
 ## Minimal Config
 
+This example contains only the settings needed for a typical local server. For every TOML section, option, default,
+valid value, and precedence rule, see the [Complete Configuration Reference](configuration_and_filters.md).
+
 ```toml
 execution_mode = "manual_step"
 api_execution = "manual_step"
